@@ -56,10 +56,10 @@ rustup target add x86_64-pc-windows-msvc --toolchain stable
 cargo +stable build -p finance-app --release --target x86_64-pc-windows-msvc
 ```
 
-Run the app on the current machine with:
+For development, run the app in debug mode on the current machine with one command. This form explicitly selects the stable toolchain and works even when `cargo +stable` is not supported by the active Cargo executable:
 
 ```sh
-cargo +stable run -p finance-app
+rustup run stable cargo run -p finance-app
 ```
 
 On Windows, the database is stored at `%APPDATA%\FinanceApp\data.db` and logs are written under `%APPDATA%\FinanceApp\logs`. Other operating systems use their standard user configuration directory.
