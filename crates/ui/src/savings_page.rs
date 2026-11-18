@@ -7,6 +7,21 @@ use finance_core::{
 use finance_db::{self, Database};
 
 const SAVINGS_PAGE_SIZE: usize = 100;
+const SAVINGS_COLUMN_MIN_WIDTHS: [f32; 10] = [
+    95.0, 110.0, 90.0, 110.0, 135.0, 90.0, 100.0, 155.0, 85.0, 160.0,
+];
+const SAVINGS_COLUMN_GROWTH_WEIGHTS: [f32; 10] = [0.8, 1.1, 0.9, 1.0, 1.2, 0.9, 1.0, 1.3, 0.8, 1.0];
+
+fn savings_column_widths(available_width: f32) -> [f32; 10] {
+    let minimum_width: f32 = SAVINGS_COLUMN_MIN_WIDTHS.iter().sum();
+    let extra_width = (available_width - minimum_width).max(0.0);
+    let total_growth_weight: f32 = SAVINGS_COLUMN_GROWTH_WEIGHTS.iter().sum();
+
+    std::array::from_fn(|index| {
+        SAVINGS_COLUMN_MIN_WIDTHS[index]
+            + extra_width * SAVINGS_COLUMN_GROWTH_WEIGHTS[index] / total_growth_weight
+    })
+}
 
 #[derive(Default)]
 pub(super) struct SavingsPage {
@@ -208,14 +223,22 @@ impl SavingsPage {
                 ));
             });
             let mut action = None;
+            let column_widths = savings_column_widths(
+                (ui.available_width() - ui.spacing().item_spacing.x * 9.0).max(0.0),
+            );
             egui::ScrollArea::both()
                 .id_salt("savings_table_scroll")
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    egui::Grid::new("savings_table")
-                        .striped(true)
-                        .min_col_width(75.0)
-                        .show(ui, |ui| {
-                            for heading in [
+                    let row_height = 48.0;
+                    let table_width = column_widths.iter().sum::<f32>()
+                        + ui.spacing().item_spacing.x * (column_widths.len() - 1) as f32;
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(table_width, row_height),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.set_min_width(table_width);
+                            for (heading, width) in [
                                 "Банк",
                                 "Название",
                                 "Сумма",
@@ -226,59 +249,103 @@ impl SavingsPage {
                                 "Назначение процентов",
                                 "Статус",
                                 "Действия",
-                            ] {
-                                ui.strong(heading);
-                            }
-                            ui.end_row();
-
-                            for account in self
-                                .entries
-                                .iter()
-                                .skip(self.current_page * SAVINGS_PAGE_SIZE)
-                                .take(SAVINGS_PAGE_SIZE)
+                            ]
+                            .into_iter()
+                            .zip(column_widths)
                             {
-                                ui.label(&account.bank_name);
-                                ui.label(&account.title);
-                                ui.label(format!("{}", account.amount));
-                                ui.label(format!("{}%", account.base_rate));
-                                ui.label(
-                                    account
-                                        .rate_after_threshold
-                                        .map_or_else(|| "—".to_owned(), |rate| format!("{rate}%")),
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(width, row_height),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.set_min_width(width);
+                                        ui.add(egui::Label::new(heading).wrap());
+                                    },
                                 );
-                                ui.label(
-                                    account.threshold_amount.map_or_else(
-                                        || "—".to_owned(),
-                                        |amount| format!("{amount}"),
-                                    ),
-                                );
-                                ui.label(match (account.term_type, account.term_end_date) {
-                                    (SavingsTerm::Limited, Some(date)) => {
-                                        format!("до {}", date.format("%d.%m.%Y"))
-                                    }
-                                    (SavingsTerm::Limited, None) => "Дата не задана".to_owned(),
-                                    (SavingsTerm::Unlimited, _) => "Бессрочный".to_owned(),
-                                });
-                                ui.label(account.interest_destination.title());
-                                ui.label(if account.is_active {
-                                    "Активно"
-                                } else {
-                                    "Неактивно"
-                                });
-                                ui.horizontal(|ui| {
-                                    if ui.small_button("Изменить").clicked() {
-                                        action = Some(TableAction::Edit(account.id));
-                                    }
-                                    if ui.small_button("Удалить").clicked() {
-                                        action = Some(TableAction::Delete(
-                                            account.id,
-                                            account.title.clone(),
-                                        ));
-                                    }
-                                });
-                                ui.end_row();
                             }
-                        });
+                        },
+                    );
+
+                    for (row_index, account) in self
+                        .entries
+                        .iter()
+                        .skip(self.current_page * SAVINGS_PAGE_SIZE)
+                        .take(SAVINGS_PAGE_SIZE)
+                        .enumerate()
+                    {
+                        let amount = account.amount.to_string();
+                        let base_rate = format!("{}%", account.base_rate);
+                        let rate_after_threshold = account
+                            .rate_after_threshold
+                            .map_or_else(|| "—".to_owned(), |rate| format!("{rate}%"));
+                        let threshold_amount = account
+                            .threshold_amount
+                            .map_or_else(|| "—".to_owned(), |amount| format!("{amount}"));
+                        let term = match (account.term_type, account.term_end_date) {
+                            (SavingsTerm::Limited, Some(date)) => {
+                                format!("до {}", date.format("%d.%m.%Y"))
+                            }
+                            (SavingsTerm::Limited, None) => "Дата не задана".to_owned(),
+                            (SavingsTerm::Unlimited, _) => "Бессрочный".to_owned(),
+                        };
+                        let status = if account.is_active {
+                            "Активно"
+                        } else {
+                            "Неактивно"
+                        };
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(table_width, row_height),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.set_min_width(table_width);
+                                if row_index % 2 == 1 {
+                                    ui.painter().rect_filled(
+                                        ui.max_rect(),
+                                        0.0,
+                                        ui.visuals().faint_bg_color,
+                                    );
+                                }
+                                for (value, width) in [
+                                    account.bank_name.as_str(),
+                                    account.title.as_str(),
+                                    amount.as_str(),
+                                    base_rate.as_str(),
+                                    rate_after_threshold.as_str(),
+                                    threshold_amount.as_str(),
+                                    term.as_str(),
+                                    account.interest_destination.title(),
+                                    status,
+                                ]
+                                .into_iter()
+                                .zip(column_widths)
+                                {
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(width, row_height),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            ui.set_min_width(width);
+                                            ui.add(egui::Label::new(value).wrap());
+                                        },
+                                    );
+                                }
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(column_widths[9], row_height),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.set_min_width(column_widths[9]);
+                                        if ui.small_button("Изменить").clicked() {
+                                            action = Some(TableAction::Edit(account.id));
+                                        }
+                                        if ui.small_button("Удалить").clicked() {
+                                            action = Some(TableAction::Delete(
+                                                account.id,
+                                                account.title.clone(),
+                                            ));
+                                        }
+                                    },
+                                );
+                            },
+                        );
+                    }
                 });
 
             match action {
@@ -586,7 +653,77 @@ impl SavingsForm {
 
 #[cfg(test)]
 mod tests {
-    use super::SavingsPage;
+    use eframe::egui;
+
+    use super::{savings_column_widths, SavingsPage, SAVINGS_COLUMN_MIN_WIDTHS};
+
+    #[test]
+    fn savings_column_widths_fill_available_space_or_keep_minimum_widths() {
+        let minimum_width: f32 = SAVINGS_COLUMN_MIN_WIDTHS.iter().sum();
+
+        for available_width in [1_280.0, 1_920.0, 700.0] {
+            let widths = savings_column_widths(available_width);
+            let table_width: f32 = widths.iter().sum();
+            let expected_width = available_width.max(minimum_width);
+
+            assert!((table_width - expected_width).abs() < 0.01);
+            assert!(widths
+                .iter()
+                .zip(SAVINGS_COLUMN_MIN_WIDTHS)
+                .all(|(width, minimum)| *width >= minimum));
+        }
+    }
+
+    #[test]
+    fn savings_table_renders_with_adaptive_columns_in_egui_context() {
+        let (database, mut page) = filtered_savings_page();
+        let context = egui::Context::default();
+        let mut output = None;
+        for _ in 0..2 {
+            output = Some(context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_280.0, 720.0),
+                    )),
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default().show(context, |ui| {
+                        page.render(context, ui, &database, &[]);
+                    });
+                },
+            ));
+        }
+        let output = output.expect("savings page should render twice");
+        let rendered_text = output
+            .shapes
+            .iter()
+            .filter_map(|clipped_shape| match &clipped_shape.shape {
+                egui::epaint::Shape::Text(text_shape) => Some(text_shape.galley.job.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let actions_header_x = output
+            .shapes
+            .iter()
+            .find_map(|clipped_shape| match &clipped_shape.shape {
+                egui::epaint::Shape::Text(text_shape)
+                    if text_shape.galley.job.text == "Действия" =>
+                {
+                    Some(text_shape.pos.x)
+                }
+                _ => None,
+            });
+        assert!(rendered_text.contains(&"Ставка при условии"));
+        assert!(rendered_text.contains(&"Действия"));
+        assert!(rendered_text.contains(&"Alpha"));
+        assert!(rendered_text.contains(&"Изменить"));
+        assert!(
+            actions_header_x.is_some_and(|x| x > 1_050.0 && x < 1_280.0),
+            "actions header should be near the right edge: {actions_header_x:?}"
+        );
+    }
 
     fn filtered_savings_page() -> (finance_db::Database, SavingsPage) {
         let database =
