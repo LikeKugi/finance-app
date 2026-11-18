@@ -32,6 +32,14 @@ Build all workspace crates in release mode:
 cargo +stable build --workspace --release
 ```
 
+To build a native macOS release executable in `target/macos` (requires Apple Command Line Tools):
+
+```sh
+cargo +stable build -p finance-app --release --locked --target-dir target/macos
+```
+
+The executable is written to `target/macos/release/finance-app`.
+
 To cross-compile a Windows x64 GNU release executable, install the Rust target and ensure the GNU cross-linker is available in `PATH`:
 
 ```sh
