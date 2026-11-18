@@ -110,6 +110,8 @@ struct FinanceApp {
 
 const TRANSACTION_FILTERS_SCROLL_AREA_ID: &str = "transaction_filters_scroll_area";
 const TRANSACTION_TABLE_SCROLL_AREA_ID: &str = "transaction_table_scroll_area";
+const DIRECTORY_CATEGORIES_SCROLL_AREA_ID: &str = "directory_categories_scroll_area";
+const DIRECTORY_BANKS_SCROLL_AREA_ID: &str = "directory_banks_scroll_area";
 
 impl FinanceApp {
     fn new(database: Database) -> Self {
@@ -535,7 +537,7 @@ impl FinanceApp {
         });
     }
 
-    fn render_directories(&mut self, ui: &mut egui::Ui) {
+    fn render_directories(&mut self, ui: &mut egui::Ui) -> (egui::Id, egui::Id) {
         let previous_kind = self.directory_kind;
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.directory_kind, TransactionKind::Income, "Категории доходов");
@@ -549,6 +551,7 @@ impl FinanceApp {
             self.show_category_form = false;
             self.refresh_categories(self.directory_kind, true);
         }
+        let mut scroll_area_ids = None;
         ui.columns(2, |columns| {
             columns[0].heading("Категории");
             columns[0].horizontal(|ui| {
@@ -557,7 +560,9 @@ impl FinanceApp {
                     self.show_category_form = true;
                 }
             });
-            egui::ScrollArea::vertical().show(&mut columns[0], |ui| {
+            let category_scroll_area =
+                egui::ScrollArea::vertical().id_salt(DIRECTORY_CATEGORIES_SCROLL_AREA_ID);
+            let category_scroll_output = category_scroll_area.show(&mut columns[0], |ui| {
                 let categories = self.categories.clone();
                 let category_rows = category_tree_rows(&categories);
                 let name_width = (ui.available_width() - 145.0).max(100.0);
@@ -616,7 +621,8 @@ impl FinanceApp {
                     self.show_bank_form = true;
                 }
             });
-            egui::ScrollArea::vertical().show(&mut columns[1], |ui| {
+            let bank_scroll_area = egui::ScrollArea::vertical().id_salt(DIRECTORY_BANKS_SCROLL_AREA_ID);
+            let bank_scroll_output = bank_scroll_area.show(&mut columns[1], |ui| {
                 let banks = self.banks.clone();
                 let name_width = (ui.available_width() - 145.0).max(100.0);
                 egui::Grid::new("directory_banks_table")
@@ -656,6 +662,7 @@ impl FinanceApp {
                         }
                     });
             });
+            scroll_area_ids = Some((category_scroll_output.id, bank_scroll_output.id));
         });
 
         if self.show_category_form {
@@ -664,6 +671,7 @@ impl FinanceApp {
         if self.show_bank_form {
             self.render_bank_form(ui);
         }
+        scroll_area_ids.expect("directory columns should render both scroll areas")
     }
 
     fn render_category_form(&mut self, ui: &mut egui::Ui) {
@@ -822,7 +830,9 @@ impl eframe::App for FinanceApp {
             match self.active_tab {
                 ModuleTab::Income => self.render_transactions(ui, TransactionKind::Income),
                 ModuleTab::Expenses => self.render_transactions(ui, TransactionKind::Expense),
-                ModuleTab::Directories => self.render_directories(ui),
+                ModuleTab::Directories => {
+                    self.render_directories(ui);
+                }
                 ModuleTab::Savings | ModuleTab::PaymentDocuments | ModuleTab::Analysis => {
                     ui.label("Этот раздел пока не реализован.");
                 }
@@ -903,7 +913,8 @@ mod tests {
     use eframe::egui;
 
     use super::{
-        category_tree_rows, Category, TRANSACTION_FILTERS_SCROLL_AREA_ID,
+        category_tree_rows, Category, FinanceApp, ModuleTab, DIRECTORY_BANKS_SCROLL_AREA_ID,
+        DIRECTORY_CATEGORIES_SCROLL_AREA_ID, TRANSACTION_FILTERS_SCROLL_AREA_ID,
         TRANSACTION_TABLE_SCROLL_AREA_ID,
     };
 
@@ -989,5 +1000,39 @@ mod tests {
 
         let (filters_id, table_id) = scroll_area_ids.expect("egui should render both scroll areas");
         assert_ne!(filters_id, table_id);
+    }
+
+    #[test]
+    fn directory_scroll_areas_have_distinct_ids_when_rendered() {
+        let database = finance_db::Database::open_in_memory().expect("in-memory SQLite should open");
+        database
+            .execute_batch(include_str!("../../db/migrations/V1__initial.sql"))
+            .expect("initial migration should apply");
+        database
+            .execute_batch(include_str!("../../db/migrations/V2__transactions_and_directories.sql"))
+            .expect("directory migration should apply");
+        database
+            .execute("INSERT INTO income_categories (name) VALUES ('Тестовая категория')", [])
+            .expect("test category should be inserted");
+        database
+            .execute("INSERT INTO banks (name) VALUES ('Тестовый банк')", [])
+            .expect("test bank should be inserted");
+
+        let mut app = FinanceApp::new(database);
+        app.active_tab = ModuleTab::Directories;
+        app.refresh_directories();
+
+        let context = egui::Context::default();
+        let mut scroll_area_ids = None;
+        let _output = context.run(Default::default(), |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                scroll_area_ids = Some(app.render_directories(ui));
+            });
+        });
+
+        let (categories_id, banks_id) =
+            scroll_area_ids.expect("directory screen should render both lists");
+        assert_ne!(categories_id, banks_id);
+        assert_ne!(DIRECTORY_CATEGORIES_SCROLL_AREA_ID, DIRECTORY_BANKS_SCROLL_AREA_ID);
     }
 }
