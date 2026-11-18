@@ -362,11 +362,17 @@ impl FinanceApp {
                     );
                     ui.add_space(8.0);
                     ui.label("Категория:");
+                    let category_labels = category_tree_labels(&self.categories);
                     let selected_name = self.category_filter
-                        .and_then(|id| self.categories.iter().find(|category| category.id == id))
-                        .map_or("Все", |category| category.name.as_str());
+                        .and_then(|id| {
+                            category_labels
+                                .iter()
+                                .find(|(category_id, _)| *category_id == id)
+                                .map(|(_, label)| label.as_str())
+                        })
+                        .unwrap_or("Все");
                     egui::ComboBox::from_id_salt("transaction_category_filter")
-                        .width(150.0)
+                        .width(220.0)
                         .selected_text(selected_name)
                         .show_ui(ui, |ui| {
                             if ui
@@ -375,13 +381,12 @@ impl FinanceApp {
                             {
                                 self.refresh_transactions(kind);
                             }
-                            let categories = self.categories.clone();
-                            for category in categories {
+                            for (category_id, label) in &category_labels {
                                 if ui
                                     .selectable_value(
                                         &mut self.category_filter,
-                                        Some(category.id),
-                                        &category.name,
+                                        Some(*category_id),
+                                        label,
                                     )
                                     .clicked()
                                 {
@@ -478,15 +483,33 @@ impl FinanceApp {
                 95.0,
             );
             ui.label("Категория");
+            let category_labels = category_tree_labels(&self.categories);
             let selected_category = self.transaction_form.category_id
-                .and_then(|id| self.categories.iter().find(|category| category.id == id))
-                .map_or("Выберите", |category| category.name.as_str());
+                .and_then(|id| {
+                    category_labels
+                        .iter()
+                        .find(|(category_id, _)| *category_id == id)
+                        .map(|(_, label)| label.as_str())
+                })
+                .unwrap_or("Выберите");
+            let selectable_category_ids: HashSet<_> = self
+                .categories
+                .iter()
+                .filter(|category| {
+                    category.is_active || Some(category.id) == self.transaction_form.category_id
+                })
+                .map(|category| category.id)
+                .collect();
             egui::ComboBox::from_id_salt("transaction_category_form")
                 .selected_text(selected_category)
                 .show_ui(ui, |ui| {
-                    for category in &self.categories {
-                        if category.is_active || Some(category.id) == self.transaction_form.category_id {
-                            ui.selectable_value(&mut self.transaction_form.category_id, Some(category.id), &category.name);
+                    for (category_id, label) in &category_labels {
+                        if selectable_category_ids.contains(category_id) {
+                            ui.selectable_value(
+                                &mut self.transaction_form.category_id,
+                                Some(*category_id),
+                                label,
+                            );
                         }
                     }
                 });
@@ -935,6 +958,19 @@ fn category_tree_rows(categories: &[Category]) -> Vec<(usize, usize)> {
     rows
 }
 
+fn category_tree_labels(categories: &[Category]) -> Vec<(i64, String)> {
+    let mut path = Vec::new();
+
+    category_tree_rows(categories)
+        .into_iter()
+        .map(|(index, depth)| {
+            path.truncate(depth);
+            path.push(categories[index].name.as_str());
+            (categories[index].id, path.join(" → "))
+        })
+        .collect()
+}
+
 fn parse_optional_date(value: &str) -> Result<Option<NaiveDate>, String> {
     if value.trim().is_empty() {
         return Ok(None);
@@ -965,7 +1001,8 @@ mod tests {
     use eframe::egui;
 
     use super::{
-        category_tree_rows, Category, FinanceApp, ModuleTab, DIRECTORY_BANKS_SCROLL_AREA_ID,
+        category_tree_labels, category_tree_rows, Category, FinanceApp, ModuleTab,
+        DIRECTORY_BANKS_SCROLL_AREA_ID,
         DIRECTORY_CATEGORIES_SCROLL_AREA_ID, TRANSACTION_FILTERS_SCROLL_AREA_ID,
         TRANSACTION_TABLE_SCROLL_AREA_ID,
     };
@@ -1045,6 +1082,38 @@ mod tests {
             .collect();
 
         assert_eq!(rows, vec![(1, 0, true), (2, 1, false)]);
+    }
+
+    #[test]
+    fn category_tree_labels_show_paths_and_keep_inactive_categories() {
+        let mut categories = vec![
+            category(3, Some(2), true),
+            category(20, None, true),
+            category(4, Some(3), false),
+            category(2, None, false),
+            category(5, Some(2), true),
+            category(6, Some(20), true),
+        ];
+        categories[0].name = "Разное".to_owned();
+        categories[1].name = "Транспорт".to_owned();
+        categories[2].name = "История".to_owned();
+        categories[3].name = "Расходы".to_owned();
+        categories[4].name = "Разное".to_owned();
+        categories[5].name = "Разное".to_owned();
+
+        let rows = category_tree_labels(&categories);
+
+        assert_eq!(
+            rows,
+            vec![
+                (20, "Транспорт".to_owned()),
+                (6, "Транспорт → Разное".to_owned()),
+                (2, "Расходы".to_owned()),
+                (3, "Расходы → Разное".to_owned()),
+                (4, "Расходы → Разное → История".to_owned()),
+                (5, "Расходы → Разное".to_owned()),
+            ]
+        );
     }
 
     #[test]
