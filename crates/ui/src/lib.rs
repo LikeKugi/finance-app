@@ -9,6 +9,19 @@ use finance_db::{self, Database};
 use rust_decimal::Decimal;
 
 const TABLE_ROW_HEIGHT: f32 = 48.0;
+const TRANSACTION_COLUMN_MIN_WIDTHS: [f32; 6] = [115.0, 135.0, 90.0, 180.0, 220.0, 180.0];
+const TRANSACTION_COLUMN_GROWTH_WEIGHTS: [f32; 6] = [0.8, 0.8, 0.6, 1.1, 1.8, 1.0];
+
+fn transaction_column_widths(available_width: f32) -> [f32; 6] {
+    let minimum_width: f32 = TRANSACTION_COLUMN_MIN_WIDTHS.iter().sum();
+    let extra_width = (available_width - minimum_width).max(0.0);
+    let total_growth_weight: f32 = TRANSACTION_COLUMN_GROWTH_WEIGHTS.iter().sum();
+
+    std::array::from_fn(|index| {
+        TRANSACTION_COLUMN_MIN_WIDTHS[index]
+            + extra_width * TRANSACTION_COLUMN_GROWTH_WEIGHTS[index] / total_growth_weight
+    })
+}
 
 mod date_input;
 mod savings_page;
@@ -513,46 +526,67 @@ impl FinanceApp {
         ui.separator();
 
         let column_spacing = ui.spacing().item_spacing.x;
-        let comment_width =
-            (ui.available_width() - column_spacing * 5.0 - 85.0 - 180.0 - 130.0 - 75.0 - 150.0)
-                .max(120.0);
-        egui::ScrollArea::vertical()
+        let column_widths = transaction_column_widths(
+            (ui.available_width()
+                - column_spacing * (TRANSACTION_COLUMN_MIN_WIDTHS.len() - 1) as f32)
+                .max(0.0),
+        );
+        let table_width =
+            column_widths.iter().sum::<f32>() + column_spacing * (column_widths.len() - 1) as f32;
+        egui::ScrollArea::both()
             .id_salt(TRANSACTION_TABLE_SCROLL_AREA_ID)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                egui::Grid::new("transactions_table")
-                    .striped(true)
-                    .min_col_width(0.0)
-                    .min_row_height(TABLE_ROW_HEIGHT)
-                    .show(ui, |ui| {
-                        for heading in [
-                            "Дата",
-                            "Сумма",
-                            "Валюта",
-                            "Категория",
-                            "Комментарий",
-                            "Действия",
-                        ] {
-                            ui.strong(heading);
+                ui.set_min_width(table_width);
+                let headings = [
+                    "Дата",
+                    "Сумма",
+                    "Валюта",
+                    "Категория",
+                    "Комментарий",
+                    "Действия",
+                ];
+                ui.horizontal(|ui| {
+                    for (heading, width) in headings.into_iter().zip(column_widths) {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(width, TABLE_ROW_HEIGHT),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.set_min_width(width);
+                                ui.add(
+                                    egui::Label::new(egui::RichText::new(heading).strong()).wrap(),
+                                );
+                            },
+                        );
+                    }
+                });
+
+                let transactions = self.transactions.clone();
+                for (row_index, transaction) in transactions.iter().enumerate() {
+                    let row = ui.horizontal(|ui| {
+                        for (value, width) in [
+                            transaction.date.format("%d.%m.%Y").to_string(),
+                            transaction.amount.to_string(),
+                            transaction.currency.code().to_owned(),
+                            transaction.category_name.clone(),
+                            transaction.comment.clone(),
+                        ]
+                        .into_iter()
+                        .zip(column_widths)
+                        {
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(width, TABLE_ROW_HEIGHT),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.set_min_width(width);
+                                    ui.add(egui::Label::new(value).wrap());
+                                },
+                            );
                         }
-                        ui.end_row();
-                        let transactions = self.transactions.clone();
-                        for transaction in &transactions {
-                            ui.label(transaction.date.format("%d.%m.%Y").to_string());
-                            ui.add_sized(
-                                [130.0, 0.0],
-                                egui::Label::new(transaction.amount.to_string()).wrap(),
-                            );
-                            ui.label(transaction.currency.code());
-                            ui.add_sized(
-                                [180.0, 0.0],
-                                egui::Label::new(&transaction.category_name).wrap(),
-                            );
-                            ui.add_sized(
-                                [comment_width, 0.0],
-                                egui::Label::new(&transaction.comment).wrap(),
-                            );
-                            ui.horizontal(|ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(column_widths[5], TABLE_ROW_HEIGHT),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
                                 if ui.small_button("Изменить").clicked() {
                                     self.edit_transaction(transaction);
                                 }
@@ -560,10 +594,18 @@ impl FinanceApp {
                                     self.pending_delete =
                                         Some(DeleteTarget::Transaction(kind, transaction.id));
                                 }
-                            });
-                            ui.end_row();
-                        }
+                            },
+                        );
                     });
+                    if row_index % 2 == 1 {
+                        ui.ctx()
+                            .layer_painter(egui::LayerId::new(
+                                egui::Order::Background,
+                                ui.layer_id().id,
+                            ))
+                            .rect_filled(row.response.rect, 0.0, ui.visuals().faint_bg_color);
+                    }
+                }
             });
     }
 
@@ -1187,8 +1229,9 @@ mod tests {
     use eframe::egui;
 
     use super::{
-        category_tree_labels, category_tree_rows, Category, FinanceApp, ModuleTab, SavingsPage,
-        TransactionKind, DIRECTORY_BANKS_SCROLL_AREA_ID, DIRECTORY_CATEGORIES_SCROLL_AREA_ID,
+        category_tree_labels, category_tree_rows, transaction_column_widths, Category, FinanceApp,
+        ModuleTab, SavingsPage, TransactionKind, DIRECTORY_BANKS_SCROLL_AREA_ID,
+        DIRECTORY_CATEGORIES_SCROLL_AREA_ID, TABLE_ROW_HEIGHT, TRANSACTION_COLUMN_MIN_WIDTHS,
         TRANSACTION_FILTERS_SCROLL_AREA_ID, TRANSACTION_TABLE_SCROLL_AREA_ID,
     };
 
@@ -1258,6 +1301,32 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    fn render_transactions_at_width(
+        app: &mut FinanceApp,
+        context: &egui::Context,
+        kind: TransactionKind,
+        width: f32,
+    ) -> egui::FullOutput {
+        let mut output = None;
+        for _ in 0..2 {
+            output = Some(context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 720.0),
+                    )),
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default().show(context, |ui| {
+                        app.render_transactions(ui, kind);
+                    });
+                },
+            ));
+        }
+        output.expect("transaction screen should render twice")
     }
 
     fn render_directories_at_width(
@@ -1403,6 +1472,87 @@ mod tests {
 
         let (filters_id, table_id) = scroll_area_ids.expect("egui should render both scroll areas");
         assert_ne!(filters_id, table_id);
+    }
+
+    #[test]
+    fn transaction_column_widths_fill_available_space_or_keep_minimum_widths() {
+        let minimum_width: f32 = TRANSACTION_COLUMN_MIN_WIDTHS.iter().sum();
+
+        for available_width in [1_200.0, 1_840.0, 700.0] {
+            let widths = transaction_column_widths(available_width);
+            let table_width: f32 = widths.iter().sum();
+            let expected_width = available_width.max(minimum_width);
+
+            assert!((table_width - expected_width).abs() < 0.01);
+            assert!(widths
+                .iter()
+                .zip(TRANSACTION_COLUMN_MIN_WIDTHS)
+                .all(|(width, minimum)| *width >= minimum));
+        }
+    }
+
+    #[test]
+    fn income_and_expense_tables_align_columns_expand_and_wrap_long_comments() {
+        let long_comment = "Длинный комментарий для проверки переноса текста. ".repeat(12);
+
+        for kind in [TransactionKind::Income, TransactionKind::Expense] {
+            let mut app = filtered_transaction_app(kind);
+            app.transactions[0].comment = long_comment.clone();
+            let mut second_transaction = app.transactions[0].clone();
+            second_transaction.id += 100;
+            second_transaction.comment = "Следующая запись".to_owned();
+            app.transactions.push(second_transaction);
+
+            for width in [1_280.0, 1_920.0, 700.0] {
+                let context = egui::Context::default();
+                let output = render_transactions_at_width(&mut app, &context, kind, width);
+                let date_header = text_positions(&output, "Дата")[0];
+                let date_cells = text_positions(&output, "15.01.2024");
+                let amount_header = text_positions(&output, "Сумма")[0];
+                let amount_cell = text_positions(&output, "20")[0];
+                let category_header = text_positions(&output, "Категория")[0];
+                let category_cell = *text_positions(&output, "Основная")
+                    .last()
+                    .expect("transaction category should be rendered");
+                let comment_header = text_positions(&output, "Комментарий")[0];
+                let comment_shape =
+                    output
+                        .shapes
+                        .iter()
+                        .find_map(|clipped_shape| match &clipped_shape.shape {
+                            egui::epaint::Shape::Text(text_shape)
+                                if text_shape.galley.job.text == long_comment =>
+                            {
+                                Some((text_shape.pos, text_shape.galley.size().y))
+                            }
+                            _ => None,
+                        });
+                let next_comment = text_positions(&output, "Следующая запись")[0];
+                let action_positions = text_positions(&output, "Действия");
+
+                assert_eq!(date_cells.len(), 2);
+                assert!(
+                    (date_header.x - date_cells[0].x).abs() < 0.1,
+                    "date header and cell should align at width {width}: header={}, cell={}",
+                    date_header.x,
+                    date_cells[0].x
+                );
+                assert!((amount_header.x - amount_cell.x).abs() < 0.1);
+                assert!((category_header.x - category_cell.x).abs() < 0.1);
+                let (comment_position, comment_height) =
+                    comment_shape.expect("long comment should be rendered as wrapped text");
+                assert!((comment_header.x - comment_position.x).abs() < 0.1);
+                assert!(comment_height > TABLE_ROW_HEIGHT);
+                assert!(next_comment.y >= comment_position.y + comment_height);
+                if width >= 1_280.0 {
+                    let actions_header = action_positions[0];
+                    assert!(actions_header.x > width * 0.75);
+                    assert!(actions_header.x < width);
+                } else {
+                    assert!(action_positions.is_empty());
+                }
+            }
+        }
     }
 
     #[test]
