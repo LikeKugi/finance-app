@@ -404,6 +404,8 @@ impl FinanceApp {
             self.render_transaction_form(ui, kind);
         }
 
+        ui.separator();
+
         let column_spacing = ui.spacing().item_spacing.x;
         let comment_width = (ui.available_width()
             - column_spacing * 5.0
