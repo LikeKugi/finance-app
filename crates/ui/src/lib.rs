@@ -1005,6 +1005,13 @@ impl eframe::App for FinanceApp {
             });
         }
 
+        if self.active_tab == ModuleTab::Savings {
+            egui::TopBottomPanel::bottom("savings_footer").show(context, |ui| {
+                ui.separator();
+                self.savings_page.render_footer(ui);
+            });
+        }
+
         egui::CentralPanel::default().show(context, |ui| {
             ui.horizontal(|ui| {
                 ui.heading(self.active_tab.title());
