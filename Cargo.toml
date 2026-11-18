@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/core",
     "crates/db",
     "crates/ui",
     "crates/app",
@@ -12,6 +13,8 @@ directories = "6"
 eframe = "0.31"
 rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = { version = "1", features = ["serde"] }
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

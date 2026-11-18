@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rusqlite.workspace = true
+chrono.workspace = true
+finance-core = { path = "../core" }
+rusqlite = { workspace = true, features = ["backup"] }
+rust_decimal.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

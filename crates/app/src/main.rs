@@ -28,9 +28,7 @@ fn main() -> Result<()> {
     let database_path = app_directory.join("data.db");
     let database = finance_db::initialize(&database_path)
         .with_context(|| format!("Не удалось открыть базу данных: {}", database_path.display()))?;
-    drop(database);
-
-    finance_ui::run().context("Не удалось запустить окно приложения")?;
+    finance_ui::run(database).context("Не удалось запустить окно приложения")?;
     tracing::info!("Завершение FinanceApp");
 
     Ok(())
