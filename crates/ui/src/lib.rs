@@ -1042,7 +1042,10 @@ impl eframe::App for FinanceApp {
                     let actions_width = 140.0 * 2.0 + ui.spacing().item_spacing.x;
                     ui.add_space((ui.available_width() - actions_width).max(0.0));
                     if ui
-                        .add_enabled(!self.banks.is_empty(), egui::Button::new("＋ Добавить"))
+                        .add_enabled_ui(!self.banks.is_empty(), |ui| {
+                            ui.add_sized(egui::vec2(140.0, 40.0), egui::Button::new("＋ Добавить"))
+                        })
+                        .inner
                         .clicked()
                     {
                         self.savings_page.begin_new(&self.banks);
