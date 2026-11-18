@@ -230,7 +230,7 @@ impl SavingsPage {
                 .id_salt("savings_table_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    let row_height = 48.0;
+                    let row_height = super::TABLE_ROW_HEIGHT;
                     let table_width = column_widths.iter().sum::<f32>()
                         + ui.spacing().item_spacing.x * (column_widths.len() - 1) as f32;
                     ui.allocate_ui_with_layout(

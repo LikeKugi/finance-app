@@ -8,6 +8,8 @@ use finance_core::{
 use finance_db::{self, Database};
 use rust_decimal::Decimal;
 
+const TABLE_ROW_HEIGHT: f32 = 48.0;
+
 mod date_input;
 mod savings_page;
 
@@ -521,6 +523,7 @@ impl FinanceApp {
                 egui::Grid::new("transactions_table")
                     .striped(true)
                     .min_col_width(0.0)
+                    .min_row_height(TABLE_ROW_HEIGHT)
                     .show(ui, |ui| {
                         for heading in [
                             "Дата",
