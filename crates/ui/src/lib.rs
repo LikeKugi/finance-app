@@ -561,59 +561,77 @@ impl FinanceApp {
                     }
                 });
             });
-            let category_scroll_area =
-                egui::ScrollArea::vertical().id_salt(DIRECTORY_CATEGORIES_SCROLL_AREA_ID);
+            let category_scroll_area = egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .id_salt(DIRECTORY_CATEGORIES_SCROLL_AREA_ID);
             let category_scroll_output = category_scroll_area.show(&mut columns[0], |ui| {
                 let categories = self.categories.clone();
                 let category_rows = category_tree_rows(&categories);
-                let name_width = (ui.available_width() - 145.0).max(100.0);
-                egui::Grid::new("directory_categories_table")
-                    .striped(true)
-                    .min_col_width(85.0)
-                    .show(ui, |ui| {
-                        ui.add_sized(
-                            [name_width, 20.0],
-                            egui::Label::new(egui::RichText::new("Категория").strong()),
+                let table_width = ui.available_width();
+                let name_width = (table_width - 145.0).max(100.0);
+                let row_height = 22.0;
+                ui.allocate_ui_with_layout(
+                    egui::vec2(table_width, row_height),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(name_width, row_height),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.label(egui::RichText::new("Категория").strong());
+                            },
                         );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.strong("Действия");
-                        });
-                        ui.end_row();
+                        ui.strong("Действия");
+                    },
+                );
 
-                        for (index, depth) in category_rows {
-                            let category = &categories[index];
-                            let prefix = if depth == 0 {
-                                String::new()
-                            } else {
-                                format!("{}↳ ", "　".repeat(depth))
-                            };
-                            let active_suffix = if category.is_active { "" } else { " (неактивна)" };
-                            ui.add_sized(
-                                [name_width, 20.0],
-                                egui::Label::new(format!("{prefix}{}{active_suffix}", category.name)),
+                for (row_index, (index, depth)) in category_rows.into_iter().enumerate() {
+                    let category = &categories[index];
+                    let prefix = if depth == 0 {
+                        String::new()
+                    } else {
+                        format!("{}↳ ", "　".repeat(depth))
+                    };
+                    let active_suffix = if category.is_active { "" } else { " (неактивна)" };
+                    let mut edit_clicked = false;
+                    let mut delete_clicked = false;
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(table_width, row_height),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            if row_index % 2 == 1 {
+                                ui.painter().rect_filled(
+                                    ui.max_rect(),
+                                    0.0,
+                                    ui.visuals().faint_bg_color,
+                                );
+                            }
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(name_width, row_height),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.label(format!("{prefix}{}{active_suffix}", category.name));
+                                },
                             );
-
-                            let mut edit_clicked = false;
-                            let mut delete_clicked = false;
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 delete_clicked = ui.small_button("Удалить").clicked();
                                 edit_clicked = ui.small_button("Изменить").clicked();
                             });
-                            if edit_clicked {
-                                self.category_form = CategoryForm {
-                                    id: Some(category.id),
-                                    name: category.name.clone(),
-                                    parent_id: category.parent_id,
-                                    is_active: category.is_active,
-                                };
-                                self.show_category_form = true;
-                            }
-                            if delete_clicked {
-                                self.pending_delete = Some(DeleteTarget::Category(self.directory_kind, category.id));
-                            }
-                            ui.end_row();
-                        }
-                    });
+                        },
+                    );
+                    if edit_clicked {
+                        self.category_form = CategoryForm {
+                            id: Some(category.id),
+                            name: category.name.clone(),
+                            parent_id: category.parent_id,
+                            is_active: category.is_active,
+                        };
+                        self.show_category_form = true;
+                    }
+                    if delete_clicked {
+                        self.pending_delete = Some(DeleteTarget::Category(self.directory_kind, category.id));
+                    }
+                }
             });
             columns[1].horizontal(|ui| {
                 ui.heading("Банки");
@@ -624,46 +642,68 @@ impl FinanceApp {
                     }
                 });
             });
-            let bank_scroll_area = egui::ScrollArea::vertical().id_salt(DIRECTORY_BANKS_SCROLL_AREA_ID);
+            let bank_scroll_area = egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .id_salt(DIRECTORY_BANKS_SCROLL_AREA_ID);
             let bank_scroll_output = bank_scroll_area.show(&mut columns[1], |ui| {
                 let banks = self.banks.clone();
-                let name_width = (ui.available_width() - 145.0).max(100.0);
-                egui::Grid::new("directory_banks_table")
-                    .striped(true)
-                    .min_col_width(85.0)
-                    .show(ui, |ui| {
-                        ui.add_sized(
-                            [name_width, 20.0],
-                            egui::Label::new(egui::RichText::new("Банк").strong()),
+                let table_width = ui.available_width();
+                let name_width = (table_width - 145.0).max(100.0);
+                let row_height = 22.0;
+                ui.allocate_ui_with_layout(
+                    egui::vec2(table_width, row_height),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(name_width, row_height),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.label(egui::RichText::new("Банк").strong());
+                            },
                         );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.strong("Действия");
-                        });
-                        ui.end_row();
+                        ui.strong("Действия");
+                    },
+                );
 
-                        for bank in &banks {
-                            ui.add_sized([name_width, 20.0], egui::Label::new(&bank.name));
-
-                            let mut edit_clicked = false;
-                            let mut delete_clicked = false;
+                for (row_index, bank) in banks.iter().enumerate() {
+                    let mut edit_clicked = false;
+                    let mut delete_clicked = false;
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(table_width, row_height),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            if row_index % 2 == 1 {
+                                ui.painter().rect_filled(
+                                    ui.max_rect(),
+                                    0.0,
+                                    ui.visuals().faint_bg_color,
+                                );
+                            }
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(name_width, row_height),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.label(&bank.name);
+                                },
+                            );
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 delete_clicked = ui.small_button("Удалить").clicked();
                                 edit_clicked = ui.small_button("Изменить").clicked();
                             });
-                            if edit_clicked {
-                                self.bank_form = BankForm {
-                                    id: Some(bank.id),
-                                    name: bank.name.clone(),
-                                    comment: bank.comment.clone(),
-                                };
-                                self.show_bank_form = true;
-                            }
-                            if delete_clicked {
-                                self.pending_delete = Some(DeleteTarget::Bank(bank.id));
-                            }
-                            ui.end_row();
-                        }
-                    });
+                        },
+                    );
+                    if edit_clicked {
+                        self.bank_form = BankForm {
+                            id: Some(bank.id),
+                            name: bank.name.clone(),
+                            comment: bank.comment.clone(),
+                        };
+                        self.show_bank_form = true;
+                    }
+                    if delete_clicked {
+                        self.pending_delete = Some(DeleteTarget::Bank(bank.id));
+                    }
+                }
             });
             scroll_area_ids = Some((category_scroll_output.id, bank_scroll_output.id));
         });
@@ -939,6 +979,44 @@ mod tests {
         }
     }
 
+    fn render_directories_at_width(
+        app: &mut FinanceApp,
+        context: &egui::Context,
+        width: f32,
+    ) -> egui::FullOutput {
+        let mut output = None;
+        for _ in 0..2 {
+            output = Some(context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 720.0),
+                    )),
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default().show(context, |ui| {
+                        app.render_directories(ui);
+                    });
+                },
+            ));
+        }
+        output.expect("directory screen should render twice")
+    }
+
+    fn text_positions(output: &egui::FullOutput, text: &str) -> Vec<egui::Pos2> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped_shape| match &clipped_shape.shape {
+                egui::epaint::Shape::Text(text_shape) if text_shape.galley.job.text == text => {
+                    Some(text_shape.pos)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn category_tree_rows_nest_children_and_keep_sibling_order() {
         let categories = vec![
@@ -1046,5 +1124,78 @@ mod tests {
             scroll_area_ids.expect("directory screen should render both lists");
         assert_ne!(categories_id, banks_id);
         assert_ne!(DIRECTORY_CATEGORIES_SCROLL_AREA_ID, DIRECTORY_BANKS_SCROLL_AREA_ID);
+    }
+
+    #[test]
+    fn directory_name_columns_are_left_aligned_after_second_frame() {
+        let database = finance_db::Database::open_in_memory().expect("in-memory SQLite should open");
+        database
+            .execute_batch(include_str!("../../db/migrations/V1__initial.sql"))
+            .expect("initial migration should apply");
+        database
+            .execute_batch(include_str!("../../db/migrations/V2__transactions_and_directories.sql"))
+            .expect("directory migration should apply");
+        database
+            .execute("INSERT INTO income_categories (name) VALUES ('Корневая категория')", [])
+            .expect("root category should be inserted");
+        database
+            .execute(
+                "INSERT INTO income_categories (name, parent_id) VALUES ('Дочерняя категория', 1)",
+                [],
+            )
+            .expect("child category should be inserted");
+        database
+            .execute("INSERT INTO banks (name) VALUES ('Первый банк'), ('Второй банк')", [])
+            .expect("test banks should be inserted");
+
+        let mut app = FinanceApp::new(database);
+        app.active_tab = ModuleTab::Directories;
+        app.refresh_directories();
+
+        let context = egui::Context::default();
+        let narrow_output = render_directories_at_width(&mut app, &context, 1280.0);
+        let wide_output = render_directories_at_width(&mut app, &context, 1600.0);
+
+        for output in [&narrow_output, &wide_output] {
+            let category_header_x = text_positions(output, "Категория")[0].x;
+            for text in ["Корневая категория", "　↳ Дочерняя категория"] {
+                let text_start_x = text_positions(output, text)[0].x;
+                assert!(
+                    (text_start_x - category_header_x).abs() < 0.5,
+                    "category text should start at the header's left edge: {text} ({text_start_x} vs {category_header_x})"
+                );
+            }
+
+            let bank_header_x = text_positions(output, "Банк")[0].x;
+            for text in ["Первый банк", "Второй банк"] {
+                let text_start_x = text_positions(output, text)[0].x;
+                assert!(
+                    (text_start_x - bank_header_x).abs() < 0.5,
+                    "bank text should start at the header's left edge: {text} ({text_start_x} vs {bank_header_x})"
+                );
+            }
+        }
+
+        let action_column_xs = |output: &egui::FullOutput| {
+            let mut xs: Vec<_> = text_positions(output, "Изменить")
+                .into_iter()
+                .map(|position| position.x)
+                .collect();
+            xs.sort_by(f32::total_cmp);
+            xs.dedup_by(|left, right| (*left - *right).abs() < 0.5);
+            xs
+        };
+        let narrow_action_xs = action_column_xs(&narrow_output);
+        let wide_action_xs = action_column_xs(&wide_output);
+        assert_eq!(narrow_action_xs.len(), 2, "both action columns should render");
+        assert_eq!(wide_action_xs.len(), 2, "both action columns should render");
+        let panel_expansion = (1600.0_f32 - 1280.0) / 2.0;
+        for (index, (narrow_x, wide_x)) in narrow_action_xs.iter().zip(&wide_action_xs).enumerate() {
+            let expected_expansion = panel_expansion * (index as f32 + 1.0);
+            assert!(
+                (wide_x - narrow_x - expected_expansion).abs() < 1.0,
+                "the action column should move with the expanded name column: {narrow_x} to {wide_x}"
+            );
+        }
     }
 }
