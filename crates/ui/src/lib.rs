@@ -1,7 +1,7 @@
 use chrono::NaiveDate;
 use eframe::egui;
 use finance_core::{
-    parse_amount, Bank, Category, Currency, FinancialTransaction, TransactionKind,
+    parse_amount_expression, Bank, Category, Currency, FinancialTransaction, TransactionKind,
 };
 use finance_db::{self, Database};
 use rust_decimal::Decimal;
@@ -227,7 +227,7 @@ impl FinanceApp {
                 return;
             }
         };
-        let amount = match parse_amount(&self.transaction_form.amount) {
+        let amount = match parse_amount_expression(&self.transaction_form.amount) {
             Ok(amount) => amount,
             Err(error) => {
                 self.show_error(error.to_string());
@@ -467,7 +467,11 @@ impl FinanceApp {
         });
         ui.horizontal(|ui| {
             ui.label("Сумма");
-            ui.add(egui::TextEdit::singleline(&mut self.transaction_form.amount).desired_width(120.0));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.transaction_form.amount)
+                    .desired_width(180.0)
+                    .hint_text("например: 100 + 200 + 347"),
+            );
             ui.label("Валюта");
             let selected_currency = self.transaction_form.currency.map_or("Выберите", Currency::code);
             egui::ComboBox::from_id_salt("transaction_currency")
@@ -480,6 +484,19 @@ impl FinanceApp {
             ui.label("Комментарий");
             ui.add(egui::TextEdit::singleline(&mut self.transaction_form.comment).desired_width(240.0));
         });
+        if !self.transaction_form.amount.trim().is_empty() {
+            match parse_amount_expression(&self.transaction_form.amount) {
+                Ok(total) => {
+                    ui.label(format!("Итого: {total}"));
+                }
+                Err(_) => {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        "Введите положительные суммы, разделённые знаком +",
+                    );
+                }
+            }
+        }
         ui.horizontal(|ui| {
             if ui.button("Сохранить").clicked() {
                 self.save_transaction(kind);

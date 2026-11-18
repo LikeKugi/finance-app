@@ -79,6 +79,8 @@ pub enum DomainError {
     InvalidAmount,
     #[error("Некорректная сумма")]
     InvalidAmountFormat,
+    #[error("Сумма слишком велика")]
+    AmountOverflow,
     #[error("Неизвестная валюта: {0}")]
     UnknownCurrency(String),
 }
@@ -111,6 +113,16 @@ pub fn parse_amount(input: &str) -> Result<Decimal, DomainError> {
     Ok(amount)
 }
 
+/// Parses a sum of positive amounts separated by plus signs.
+pub fn parse_amount_expression(input: &str) -> Result<Decimal, DomainError> {
+    input.split('+').try_fold(Decimal::ZERO, |total, term| {
+        let amount = parse_amount(term)?;
+        total
+            .checked_add(amount)
+            .ok_or(DomainError::AmountOverflow)
+    })
+}
+
 /// Formats a decimal amount in a locale-independent representation for SQLite.
 pub fn canonical_amount(amount: Decimal) -> String {
     amount.normalize().to_string()
@@ -121,7 +133,7 @@ mod tests {
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
-    use super::{canonical_amount, parse_amount, DomainError};
+    use super::{canonical_amount, parse_amount, parse_amount_expression, DomainError};
 
     #[test]
     fn parse_amount_preserves_decimal_precision() {
@@ -149,6 +161,35 @@ mod tests {
     fn parse_amount_rejects_zero_and_negative_values() {
         assert_eq!(parse_amount("0"), Err(DomainError::InvalidAmount));
         assert_eq!(parse_amount("-1"), Err(DomainError::InvalidAmountFormat));
+    }
+
+    #[test]
+    fn parse_amount_expression_adds_multiple_amounts() {
+        assert_eq!(parse_amount_expression("100 + 200 + 347"), Ok(Decimal::from(647)));
+    }
+
+    #[test]
+    fn parse_amount_expression_adds_amounts_without_spaces() {
+        assert_eq!(parse_amount_expression("100+23"), Ok(Decimal::from(123)));
+    }
+
+    #[test]
+    fn parse_amount_expression_preserves_decimal_precision() {
+        assert_eq!(parse_amount_expression("1,25 + 2.50"), Ok(Decimal::new(375, 2)));
+    }
+
+    #[test]
+    fn parse_amount_expression_rejects_empty_terms_and_other_operators() {
+        assert_eq!(parse_amount_expression("1 + + 2"), Err(DomainError::InvalidAmountFormat));
+        assert_eq!(parse_amount_expression("1 - 2"), Err(DomainError::InvalidAmountFormat));
+    }
+
+    #[test]
+    fn parse_amount_expression_reports_overflow() {
+        assert_eq!(
+            parse_amount_expression("79228162514264337593543950335 + 1"),
+            Err(DomainError::AmountOverflow)
+        );
     }
 
     #[test]
