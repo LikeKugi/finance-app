@@ -108,6 +108,9 @@ struct FinanceApp {
     message: Option<(String, bool)>,
 }
 
+const TRANSACTION_FILTERS_SCROLL_AREA_ID: &str = "transaction_filters_scroll_area";
+const TRANSACTION_TABLE_SCROLL_AREA_ID: &str = "transaction_table_scroll_area";
+
 impl FinanceApp {
     fn new(database: Database) -> Self {
         let mut app = Self {
@@ -330,101 +333,74 @@ impl FinanceApp {
     }
 
     fn render_transactions(&mut self, ui: &mut egui::Ui, kind: TransactionKind) {
-        ui.horizontal(|ui| {
-            if ui.button("＋ Добавить").clicked() {
-                self.refresh_categories(kind, true);
-                self.start_new_transaction();
-            }
-            if ui.button("Обновить").clicked() {
-                self.refresh_transactions(kind);
-            }
-            ui.separator();
-            ui.label("Поиск");
-            ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(150.0));
-            ui.label("С");
-            date_input(
-                ui,
-                "from_date_filter",
-                &mut self.from_date,
-                &mut self.from_date_input,
-                95.0,
-            );
-            ui.label("По");
-            date_input(
-                ui,
-                "to_date_filter",
-                &mut self.to_date,
-                &mut self.to_date_input,
-                95.0,
-            );
-            if ui.button("Применить").clicked() {
-                self.refresh_transactions(kind);
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("Категория:");
-            let selected_name = self.category_filter
-                .and_then(|id| self.categories.iter().find(|category| category.id == id))
-                .map_or("Все", |category| category.name.as_str());
-            egui::ComboBox::from_id_salt("transaction_category_filter")
-                .selected_text(selected_name)
-                .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_value(&mut self.category_filter, None, "Все")
-                        .clicked()
-                    {
+        egui::ScrollArea::horizontal()
+            .id_salt(TRANSACTION_FILTERS_SCROLL_AREA_ID)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Поиск");
+                    ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(150.0));
+                    ui.add_space(8.0);
+                    ui.label("С");
+                    date_input(
+                        ui,
+                        "from_date_filter",
+                        &mut self.from_date,
+                        &mut self.from_date_input,
+                        95.0,
+                    );
+                    ui.add_space(8.0);
+                    ui.label("По");
+                    date_input(
+                        ui,
+                        "to_date_filter",
+                        &mut self.to_date,
+                        &mut self.to_date_input,
+                        95.0,
+                    );
+                    ui.add_space(8.0);
+                    ui.label("Категория:");
+                    let selected_name = self.category_filter
+                        .and_then(|id| self.categories.iter().find(|category| category.id == id))
+                        .map_or("Все", |category| category.name.as_str());
+                    egui::ComboBox::from_id_salt("transaction_category_filter")
+                        .width(150.0)
+                        .selected_text(selected_name)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_value(&mut self.category_filter, None, "Все")
+                                .clicked()
+                            {
+                                self.refresh_transactions(kind);
+                            }
+                            let categories = self.categories.clone();
+                            for category in categories {
+                                if ui
+                                    .selectable_value(
+                                        &mut self.category_filter,
+                                        Some(category.id),
+                                        &category.name,
+                                    )
+                                    .clicked()
+                                {
+                                    self.refresh_transactions(kind);
+                                }
+                            }
+                        });
+                    ui.add_space(8.0);
+                    if ui.button("Применить").clicked() {
                         self.refresh_transactions(kind);
                     }
-                    let categories = self.categories.clone();
-                    for category in categories {
-                        if ui
-                            .selectable_value(
-                                &mut self.category_filter,
-                                Some(category.id),
-                                &category.name,
-                            )
-                            .clicked()
-                        {
-                            self.refresh_transactions(kind);
-                        }
+                    if !self.categories.iter().any(|category| category.is_active) {
+                        ui.add_space(8.0);
+                        ui.label("Сначала добавьте категорию в разделе «Справочники».");
                     }
                 });
-            if !self.categories.iter().any(|category| category.is_active) {
-                ui.label("Сначала добавьте категорию в разделе «Справочники».");
-            }
-        });
+            });
 
         if self.show_transaction_form {
             self.render_transaction_form(ui, kind);
         }
-
-        ui.separator();
-        match self.transactions.iter().try_fold(
-            (Decimal::ZERO, Decimal::ZERO),
-            |mut totals, transaction| {
-                let total = match transaction.currency {
-                    Currency::Rub => &mut totals.0,
-                    Currency::Usd => &mut totals.1,
-                };
-                *total = total.checked_add(transaction.amount)?;
-                Some(totals)
-            },
-        ) {
-            Some((rub, usd)) => ui.label(format!(
-                "Записей: {}   Итого: {} RUB   {} USD",
-                self.transactions.len(),
-                rub,
-                usd
-            )),
-            None => {
-                self.show_error("Переполнение при подсчёте итоговой суммы".to_owned());
-                ui.colored_label(
-                    egui::Color32::RED,
-                    "Не удалось рассчитать итог: сумма слишком велика",
-                )
-            }
-        };
 
         let column_spacing = ui.spacing().item_spacing.x;
         let comment_width = (ui.available_width()
@@ -436,6 +412,7 @@ impl FinanceApp {
             - 150.0)
             .max(120.0);
         egui::ScrollArea::vertical()
+            .id_salt(TRANSACTION_TABLE_SCROLL_AREA_ID)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 egui::Grid::new("transactions_table")
@@ -777,8 +754,63 @@ impl eframe::App for FinanceApp {
             });
         });
 
+        if self.active_tab.transaction_kind().is_some() {
+            egui::TopBottomPanel::bottom("transaction_totals").show(context, |ui| {
+                ui.separator();
+                match self.transactions.iter().try_fold(
+                    (Decimal::ZERO, Decimal::ZERO),
+                    |mut totals, transaction| {
+                        let total = match transaction.currency {
+                            Currency::Rub => &mut totals.0,
+                            Currency::Usd => &mut totals.1,
+                        };
+                        *total = total.checked_add(transaction.amount)?;
+                        Some(totals)
+                    },
+                ) {
+                    Some((rub, usd)) => ui.label(format!(
+                        "Записей: {}   Итого: {} RUB   {} USD",
+                        self.transactions.len(),
+                        rub,
+                        usd
+                    )),
+                    None => {
+                        self.show_error("Переполнение при подсчёте итоговой суммы".to_owned());
+                        ui.colored_label(
+                            egui::Color32::RED,
+                            "Не удалось рассчитать итог: сумма слишком велика",
+                        )
+                    }
+                };
+            });
+        }
+
         egui::CentralPanel::default().show(context, |ui| {
-            ui.heading(self.active_tab.title());
+            ui.horizontal(|ui| {
+                ui.heading(self.active_tab.title());
+                let transaction_kind = match self.active_tab {
+                    ModuleTab::Income => Some(TransactionKind::Income),
+                    ModuleTab::Expenses => Some(TransactionKind::Expense),
+                    _ => None,
+                };
+                if let Some(kind) = transaction_kind {
+                    let actions_width = 140.0 * 2.0 + ui.spacing().item_spacing.x;
+                    ui.add_space((ui.available_width() - actions_width).max(0.0));
+                    if ui
+                        .add_sized(egui::vec2(140.0, 40.0), egui::Button::new("＋ Добавить"))
+                        .clicked()
+                    {
+                        self.refresh_categories(kind, true);
+                        self.start_new_transaction();
+                    }
+                    if ui
+                        .add_sized(egui::vec2(140.0, 40.0), egui::Button::new("↻ Обновить"))
+                        .clicked()
+                    {
+                        self.refresh_transactions(kind);
+                    }
+                }
+            });
             ui.separator();
             if let Some((message, is_error)) = &self.message {
                 ui.colored_label(
@@ -868,7 +900,12 @@ pub fn run(database: Database) -> eframe::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{category_tree_rows, Category};
+    use eframe::egui;
+
+    use super::{
+        category_tree_rows, Category, TRANSACTION_FILTERS_SCROLL_AREA_ID,
+        TRANSACTION_TABLE_SCROLL_AREA_ID,
+    };
 
     fn category(id: i64, parent_id: Option<i64>, is_active: bool) -> Category {
         Category {
@@ -925,5 +962,32 @@ mod tests {
             .collect();
 
         assert_eq!(rows, vec![(3, 0), (4, 1), (5, 0), (1, 0), (2, 1)]);
+    }
+
+    #[test]
+    fn transaction_scroll_areas_have_distinct_ids() {
+        let context = egui::Context::default();
+        let mut scroll_area_ids = None;
+
+        let _output = context.run(Default::default(), |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                let filters = egui::ScrollArea::horizontal()
+                    .id_salt(TRANSACTION_FILTERS_SCROLL_AREA_ID)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.label("Фильтры");
+                    });
+                let table = egui::ScrollArea::vertical()
+                    .id_salt(TRANSACTION_TABLE_SCROLL_AREA_ID)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.label("Таблица");
+                    });
+                scroll_area_ids = Some((filters.id, table.id));
+            });
+        });
+
+        let (filters_id, table_id) = scroll_area_ids.expect("egui should render both scroll areas");
+        assert_ne!(filters_id, table_id);
     }
 }
