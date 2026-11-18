@@ -19,15 +19,21 @@ fn main() -> Result<()> {
         .context("Не удалось настроить журналы приложения")?;
     let (writer, _log_guard) = tracing_appender::non_blocking(file_appender);
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_writer(writer)
         .try_init()
         .map_err(|error| anyhow::anyhow!("Не удалось запустить журналирование: {error:?}"))?;
 
     tracing::info!("Запуск FinanceApp");
     let database_path = app_directory.join("data.db");
-    let database = finance_db::initialize(&database_path)
-        .with_context(|| format!("Не удалось открыть базу данных: {}", database_path.display()))?;
+    let database = finance_db::initialize(&database_path).with_context(|| {
+        format!(
+            "Не удалось открыть базу данных: {}",
+            database_path.display()
+        )
+    })?;
     finance_ui::run(database)
         .map_err(|error| anyhow::anyhow!("Не удалось запустить окно приложения: {error:?}"))?;
     tracing::info!("Завершение FinanceApp");

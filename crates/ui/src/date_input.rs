@@ -84,7 +84,11 @@ fn show_calendar(ui: &mut egui::Ui, value: &mut String, state: &mut DateInputSta
         }
 
         if let Some(month) = state.visible_month {
-            ui.label(format!("{} {}", MONTH_NAMES[month.month0() as usize], month.year()));
+            ui.label(format!(
+                "{} {}",
+                MONTH_NAMES[month.month0() as usize],
+                month.year()
+            ));
         }
 
         let next = state
@@ -105,33 +109,35 @@ fn show_calendar(ui: &mut egui::Ui, value: &mut String, state: &mut DateInputSta
     let days = month_grid(month);
     let selected_date = NaiveDate::parse_from_str(value.trim(), DATE_FORMAT).ok();
 
-    egui::Grid::new("calendar_days").num_columns(7).show(ui, |ui| {
-        for weekday in WEEKDAY_NAMES {
-            ui.strong(weekday);
-        }
-        ui.end_row();
-
-        for week in 0..6 {
-            for weekday in 0..7 {
-                if let Some(date) = days[week * 7 + weekday] {
-                    let label = date.day().to_string();
-                    if ui
-                        .add_sized(
-                            [28.0, 26.0],
-                            egui::Button::new(label).selected(selected_date == Some(date)),
-                        )
-                        .clicked()
-                    {
-                        *value = state.select_date(date);
-                        ui.close_menu();
-                    }
-                } else {
-                    ui.add_sized([28.0, 26.0], egui::Label::new(" "));
-                }
+    egui::Grid::new("calendar_days")
+        .num_columns(7)
+        .show(ui, |ui| {
+            for weekday in WEEKDAY_NAMES {
+                ui.strong(weekday);
             }
             ui.end_row();
-        }
-    });
+
+            for week in 0..6 {
+                for weekday in 0..7 {
+                    if let Some(date) = days[week * 7 + weekday] {
+                        let label = date.day().to_string();
+                        if ui
+                            .add_sized(
+                                [28.0, 26.0],
+                                egui::Button::new(label).selected(selected_date == Some(date)),
+                            )
+                            .clicked()
+                        {
+                            *value = state.select_date(date);
+                            ui.close_menu();
+                        }
+                    } else {
+                        ui.add_sized([28.0, 26.0], egui::Label::new(" "));
+                    }
+                }
+                ui.end_row();
+            }
+        });
 }
 
 fn initial_month(value: &str, today: NaiveDate) -> NaiveDate {
@@ -207,7 +213,10 @@ mod tests {
 
         let month = initial_month("2024-12-25", today);
 
-        assert_eq!(month, NaiveDate::from_ymd_opt(2024, 12, 1).expect("valid month"));
+        assert_eq!(
+            month,
+            NaiveDate::from_ymd_opt(2024, 12, 1).expect("valid month")
+        );
     }
 
     #[test]

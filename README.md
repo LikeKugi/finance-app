@@ -1,6 +1,6 @@
 # FinanceApp
 
-FinanceApp is a local desktop application for personal and family finance management. The current implementation provides a native Russian-language window, local SQLite persistence, and the first functional slice for income, expense, and directory management.
+FinanceApp is a local desktop application for personal and family finance management. The current implementation provides a native Russian-language window, local SQLite persistence, and functional income, expense, directory, and savings modules.
 
 ## Workspace
 
@@ -9,7 +9,9 @@ FinanceApp is a local desktop application for personal and family finance manage
 - `finance-ui` — native `eframe` tables and Russian-language workflows.
 - `finance-db` — SQLite connection setup, embedded migrations, and repositories.
 
-Income and expense records support create, edit, delete with confirmation, inclusive date filters, category filters, text search, and exact RUB/USD totals. Directories support bank and hierarchical income/expense category management, activation, and deletion safeguards for categories in use. Savings, Payment Documents, Analysis, and exports are not implemented yet; no interest or balance formulas are assumed.
+Income and expense records support create, edit, delete with confirmation, inclusive date filters, category filters, text search, and exact RUB/USD totals. Directories support bank and hierarchical income/expense category management, activation, and deletion safeguards for categories in use. Savings support create, edit, delete with confirmation, bank/status/text filters, term and interest-destination fields, and exact decimal storage. Payment Documents, Analysis, and exports are not implemented yet.
+
+Savings amounts have no currency field in the current schema. The savings page therefore displays the entered amount without a currency symbol and does not calculate accrued interest or potential income: opening dates, balance history, bank-specific accrual rules, and verified card-spend conditions are not available. A threshold rate is presented as conditional, not as confirmed yield.
 
 Transaction dates and the income/expense date filters can be entered manually in `YYYY-MM-DD` format or selected from the calendar button. Date filters remain optional and can be cleared by deleting their text.
 

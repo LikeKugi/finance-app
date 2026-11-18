@@ -9,8 +9,10 @@ use finance_db::{self, Database};
 use rust_decimal::Decimal;
 
 mod date_input;
+mod savings_page;
 
 use date_input::{date_input, DateInputState};
+use savings_page::SavingsPage;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ModuleTab {
@@ -93,6 +95,7 @@ struct FinanceApp {
     transaction_form: TransactionForm,
     category_form: CategoryForm,
     bank_form: BankForm,
+    savings_page: SavingsPage,
     directory_kind: TransactionKind,
     search: String,
     from_date: String,
@@ -124,6 +127,7 @@ impl FinanceApp {
             transaction_form: TransactionForm::default(),
             category_form: CategoryForm::default(),
             bank_form: BankForm::default(),
+            savings_page: SavingsPage::default(),
             directory_kind: TransactionKind::Income,
             search: String::new(),
             from_date: String::new(),
@@ -147,8 +151,24 @@ impl FinanceApp {
             self.refresh_transactions(kind);
             self.refresh_categories(kind, true);
         }
+        if self.active_tab == ModuleTab::Savings {
+            self.refresh_savings();
+        }
         if self.active_tab == ModuleTab::Directories {
             self.refresh_directories();
+        }
+    }
+
+    fn refresh_savings(&mut self) {
+        match finance_db::list_banks(&self.database) {
+            Ok(banks) => self.banks = banks,
+            Err(error) => {
+                self.show_error(error.to_string());
+                return;
+            }
+        }
+        if let Err(error) = self.savings_page.refresh(&self.database) {
+            self.show_error(error.to_string());
         }
     }
 
@@ -168,7 +188,10 @@ impl FinanceApp {
             }
         };
         if matches!((from, to), (Some(start), Some(end)) if start > end) {
-            self.message = Some(("Начало периода не может быть позже окончания".to_owned(), true));
+            self.message = Some((
+                "Начало периода не может быть позже окончания".to_owned(),
+                true,
+            ));
             return;
         }
         match finance_db::list_transactions(
@@ -213,7 +236,10 @@ impl FinanceApp {
     fn start_new_transaction(&mut self) {
         self.transaction_date_input.reset();
         self.transaction_form = TransactionForm {
-            date: chrono::Local::now().date_naive().format("%Y-%m-%d").to_string(),
+            date: chrono::Local::now()
+                .date_naive()
+                .format("%Y-%m-%d")
+                .to_string(),
             category_id: self
                 .categories
                 .iter()
@@ -322,7 +348,9 @@ impl FinanceApp {
             DeleteTarget::Transaction(kind, id) => {
                 finance_db::delete_transaction(&self.database, kind, id)
             }
-            DeleteTarget::Category(kind, id) => finance_db::delete_category(&self.database, kind, id),
+            DeleteTarget::Category(kind, id) => {
+                finance_db::delete_category(&self.database, kind, id)
+            }
             DeleteTarget::Bank(id) => finance_db::delete_bank(&self.database, id),
         };
         match result {
@@ -416,7 +444,8 @@ impl FinanceApp {
                     ui.add_space(8.0);
                     ui.label("Категория:");
                     let category_labels = category_tree_labels(&self.categories);
-                    let selected_name = self.category_filter
+                    let selected_name = self
+                        .category_filter
                         .and_then(|id| {
                             category_labels
                                 .iter()
@@ -463,10 +492,7 @@ impl FinanceApp {
                         || !self.to_date.is_empty()
                         || self.category_filter.is_some();
                     if ui
-                        .add_enabled(
-                            has_active_filters,
-                            egui::Button::new("Сбросить фильтры"),
-                        )
+                        .add_enabled(has_active_filters, egui::Button::new("Сбросить фильтры"))
                         .clicked()
                     {
                         self.reset_transaction_filters(kind);
@@ -485,14 +511,9 @@ impl FinanceApp {
         ui.separator();
 
         let column_spacing = ui.spacing().item_spacing.x;
-        let comment_width = (ui.available_width()
-            - column_spacing * 5.0
-            - 85.0
-            - 180.0
-            - 130.0
-            - 75.0
-            - 150.0)
-            .max(120.0);
+        let comment_width =
+            (ui.available_width() - column_spacing * 5.0 - 85.0 - 180.0 - 130.0 - 75.0 - 150.0)
+                .max(120.0);
         egui::ScrollArea::vertical()
             .id_salt(TRANSACTION_TABLE_SCROLL_AREA_ID)
             .auto_shrink([false, false])
@@ -545,7 +566,11 @@ impl FinanceApp {
 
     fn render_transaction_form(&mut self, ui: &mut egui::Ui, kind: TransactionKind) {
         ui.separator();
-        ui.heading(if self.transaction_form.id.is_some() { "Изменить операцию" } else { "Новая операция" });
+        ui.heading(if self.transaction_form.id.is_some() {
+            "Изменить операцию"
+        } else {
+            "Новая операция"
+        });
         ui.horizontal(|ui| {
             ui.label("Дата");
             date_input(
@@ -557,7 +582,9 @@ impl FinanceApp {
             );
             ui.label("Категория");
             let category_labels = category_tree_labels(&self.categories);
-            let selected_category = self.transaction_form.category_id
+            let selected_category = self
+                .transaction_form
+                .category_id
                 .and_then(|id| {
                     category_labels
                         .iter()
@@ -595,12 +622,19 @@ impl FinanceApp {
                     .hint_text("например: 100 + 200 + 347"),
             );
             ui.label("Валюта");
-            let selected_currency = self.transaction_form.currency.map_or("Выберите", Currency::code);
+            let selected_currency = self
+                .transaction_form
+                .currency
+                .map_or("Выберите", Currency::code);
             egui::ComboBox::from_id_salt("transaction_currency")
                 .selected_text(selected_currency)
                 .show_ui(ui, |ui| {
                     for currency in Currency::ALL {
-                        ui.selectable_value(&mut self.transaction_form.currency, Some(currency), currency.code());
+                        ui.selectable_value(
+                            &mut self.transaction_form.currency,
+                            Some(currency),
+                            currency.code(),
+                        );
                     }
                 });
         });
@@ -638,8 +672,16 @@ impl FinanceApp {
     fn render_directories(&mut self, ui: &mut egui::Ui) -> (egui::Id, egui::Id) {
         let previous_kind = self.directory_kind;
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.directory_kind, TransactionKind::Income, "Категории доходов");
-            ui.selectable_value(&mut self.directory_kind, TransactionKind::Expense, "Категории расходов");
+            ui.selectable_value(
+                &mut self.directory_kind,
+                TransactionKind::Income,
+                "Категории доходов",
+            );
+            ui.selectable_value(
+                &mut self.directory_kind,
+                TransactionKind::Expense,
+                "Категории расходов",
+            );
         });
         if self.directory_kind != previous_kind {
             self.category_form = CategoryForm::default();
@@ -652,7 +694,10 @@ impl FinanceApp {
                 ui.heading("Категории");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("＋ Добавить категорию").clicked() {
-                        self.category_form = CategoryForm { is_active: true, ..CategoryForm::default() };
+                        self.category_form = CategoryForm {
+                            is_active: true,
+                            ..CategoryForm::default()
+                        };
                         self.show_category_form = true;
                     }
                 });
@@ -688,7 +733,11 @@ impl FinanceApp {
                     } else {
                         format!("{}↳ ", "　".repeat(depth))
                     };
-                    let active_suffix = if category.is_active { "" } else { " (неактивна)" };
+                    let active_suffix = if category.is_active {
+                        ""
+                    } else {
+                        " (неактивна)"
+                    };
                     let mut edit_clicked = false;
                     let mut delete_clicked = false;
                     ui.allocate_ui_with_layout(
@@ -709,10 +758,13 @@ impl FinanceApp {
                                     ui.label(format!("{prefix}{}{active_suffix}", category.name));
                                 },
                             );
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                delete_clicked = ui.small_button("Удалить").clicked();
-                                edit_clicked = ui.small_button("Изменить").clicked();
-                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    delete_clicked = ui.small_button("Удалить").clicked();
+                                    edit_clicked = ui.small_button("Изменить").clicked();
+                                },
+                            );
                         },
                     );
                     if edit_clicked {
@@ -725,7 +777,8 @@ impl FinanceApp {
                         self.show_category_form = true;
                     }
                     if delete_clicked {
-                        self.pending_delete = Some(DeleteTarget::Category(self.directory_kind, category.id));
+                        self.pending_delete =
+                            Some(DeleteTarget::Category(self.directory_kind, category.id));
                     }
                 }
             });
@@ -782,10 +835,13 @@ impl FinanceApp {
                                     ui.label(&bank.name);
                                 },
                             );
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                delete_clicked = ui.small_button("Удалить").clicked();
-                                edit_clicked = ui.small_button("Изменить").clicked();
-                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    delete_clicked = ui.small_button("Удалить").clicked();
+                                    edit_clicked = ui.small_button("Изменить").clicked();
+                                },
+                            );
                         },
                     );
                     if edit_clicked {
@@ -815,12 +871,18 @@ impl FinanceApp {
 
     fn render_category_form(&mut self, ui: &mut egui::Ui) {
         ui.separator();
-        ui.heading(if self.category_form.id.is_some() { "Изменить категорию" } else { "Новая категория" });
+        ui.heading(if self.category_form.id.is_some() {
+            "Изменить категорию"
+        } else {
+            "Новая категория"
+        });
         ui.horizontal(|ui| {
             ui.label("Название");
             ui.text_edit_singleline(&mut self.category_form.name);
             ui.label("Родительская категория");
-            let selected_parent = self.category_form.parent_id
+            let selected_parent = self
+                .category_form
+                .parent_id
                 .and_then(|id| self.categories.iter().find(|category| category.id == id))
                 .map_or("Нет", |category| category.name.as_str());
             egui::ComboBox::from_id_salt("category_parent")
@@ -829,7 +891,11 @@ impl FinanceApp {
                     ui.selectable_value(&mut self.category_form.parent_id, None, "Нет");
                     for category in &self.categories {
                         if Some(category.id) != self.category_form.id {
-                            ui.selectable_value(&mut self.category_form.parent_id, Some(category.id), &category.name);
+                            ui.selectable_value(
+                                &mut self.category_form.parent_id,
+                                Some(category.id),
+                                &category.name,
+                            );
                         }
                     }
                 });
@@ -847,7 +913,11 @@ impl FinanceApp {
 
     fn render_bank_form(&mut self, ui: &mut egui::Ui) {
         ui.separator();
-        ui.heading(if self.bank_form.id.is_some() { "Изменить банк" } else { "Новый банк" });
+        ui.heading(if self.bank_form.id.is_some() {
+            "Изменить банк"
+        } else {
+            "Новый банк"
+        });
         ui.horizontal(|ui| {
             ui.label("Название");
             ui.text_edit_singleline(&mut self.bank_form.name);
@@ -891,7 +961,10 @@ impl eframe::App for FinanceApp {
         egui::TopBottomPanel::top("module_tabs").show(context, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for tab in ModuleTab::ALL {
-                    if ui.selectable_value(&mut self.active_tab, tab, tab.title()).clicked() {
+                    if ui
+                        .selectable_value(&mut self.active_tab, tab, tab.title())
+                        .clicked()
+                    {
                         self.transaction_form = TransactionForm::default();
                         self.show_transaction_form = false;
                         self.category_filter = None;
@@ -965,12 +1038,31 @@ impl eframe::App for FinanceApp {
                     {
                         self.refresh_directories();
                     }
+                } else if self.active_tab == ModuleTab::Savings {
+                    let actions_width = 140.0 * 2.0 + ui.spacing().item_spacing.x;
+                    ui.add_space((ui.available_width() - actions_width).max(0.0));
+                    if ui
+                        .add_enabled(!self.banks.is_empty(), egui::Button::new("＋ Добавить"))
+                        .clicked()
+                    {
+                        self.savings_page.begin_new(&self.banks);
+                    }
+                    if ui
+                        .add_sized(egui::vec2(140.0, 40.0), egui::Button::new("↻ Обновить"))
+                        .clicked()
+                    {
+                        self.refresh_savings();
+                    }
                 }
             });
             ui.separator();
             if let Some((message, is_error)) = &self.message {
                 ui.colored_label(
-                    if *is_error { egui::Color32::RED } else { egui::Color32::DARK_GREEN },
+                    if *is_error {
+                        egui::Color32::RED
+                    } else {
+                        egui::Color32::DARK_GREEN
+                    },
                     message,
                 );
                 ui.separator();
@@ -981,7 +1073,15 @@ impl eframe::App for FinanceApp {
                 ModuleTab::Directories => {
                     self.render_directories(ui);
                 }
-                ModuleTab::Savings | ModuleTab::PaymentDocuments | ModuleTab::Analysis => {
+                ModuleTab::Savings => {
+                    if let Some(message) =
+                        self.savings_page
+                            .render(context, ui, &self.database, &self.banks)
+                    {
+                        self.message = Some(message);
+                    }
+                }
+                ModuleTab::PaymentDocuments | ModuleTab::Analysis => {
                     ui.label("Этот раздел пока не реализован.");
                 }
             }
@@ -1075,9 +1175,8 @@ mod tests {
 
     use super::{
         category_tree_labels, category_tree_rows, Category, FinanceApp, ModuleTab, TransactionKind,
-        DIRECTORY_BANKS_SCROLL_AREA_ID,
-        DIRECTORY_CATEGORIES_SCROLL_AREA_ID, TRANSACTION_FILTERS_SCROLL_AREA_ID,
-        TRANSACTION_TABLE_SCROLL_AREA_ID,
+        DIRECTORY_BANKS_SCROLL_AREA_ID, DIRECTORY_CATEGORIES_SCROLL_AREA_ID,
+        TRANSACTION_FILTERS_SCROLL_AREA_ID, TRANSACTION_TABLE_SCROLL_AREA_ID,
     };
 
     fn category(id: i64, parent_id: Option<i64>, is_active: bool) -> Category {
@@ -1090,12 +1189,15 @@ mod tests {
     }
 
     fn filtered_transaction_app(kind: TransactionKind) -> FinanceApp {
-        let database = finance_db::Database::open_in_memory().expect("in-memory SQLite should open");
+        let database =
+            finance_db::Database::open_in_memory().expect("in-memory SQLite should open");
         database
             .execute_batch(include_str!("../../db/migrations/V1__initial.sql"))
             .expect("initial migration should apply");
         database
-            .execute_batch(include_str!("../../db/migrations/V2__transactions_and_directories.sql"))
+            .execute_batch(include_str!(
+                "../../db/migrations/V2__transactions_and_directories.sql"
+            ))
             .expect("transaction migration should apply");
 
         let (category_table, transaction_table, active_tab) = match kind {
@@ -1124,7 +1226,11 @@ mod tests {
         app.to_date = "2024-01-31".to_owned();
         app.category_filter = Some(1);
         app.refresh_transactions(kind);
-        assert_eq!(app.transactions.len(), 1, "fixture should match all filters");
+        assert_eq!(
+            app.transactions.len(),
+            1,
+            "fixture should match all filters"
+        );
         app
     }
 
@@ -1288,15 +1394,21 @@ mod tests {
 
     #[test]
     fn directory_scroll_areas_have_distinct_ids_when_rendered() {
-        let database = finance_db::Database::open_in_memory().expect("in-memory SQLite should open");
+        let database =
+            finance_db::Database::open_in_memory().expect("in-memory SQLite should open");
         database
             .execute_batch(include_str!("../../db/migrations/V1__initial.sql"))
             .expect("initial migration should apply");
         database
-            .execute_batch(include_str!("../../db/migrations/V2__transactions_and_directories.sql"))
+            .execute_batch(include_str!(
+                "../../db/migrations/V2__transactions_and_directories.sql"
+            ))
             .expect("directory migration should apply");
         database
-            .execute("INSERT INTO income_categories (name) VALUES ('Тестовая категория')", [])
+            .execute(
+                "INSERT INTO income_categories (name) VALUES ('Тестовая категория')",
+                [],
+            )
             .expect("test category should be inserted");
         database
             .execute("INSERT INTO banks (name) VALUES ('Тестовый банк')", [])
@@ -1317,20 +1429,29 @@ mod tests {
         let (categories_id, banks_id) =
             scroll_area_ids.expect("directory screen should render both lists");
         assert_ne!(categories_id, banks_id);
-        assert_ne!(DIRECTORY_CATEGORIES_SCROLL_AREA_ID, DIRECTORY_BANKS_SCROLL_AREA_ID);
+        assert_ne!(
+            DIRECTORY_CATEGORIES_SCROLL_AREA_ID,
+            DIRECTORY_BANKS_SCROLL_AREA_ID
+        );
     }
 
     #[test]
     fn directory_name_columns_are_left_aligned_after_second_frame() {
-        let database = finance_db::Database::open_in_memory().expect("in-memory SQLite should open");
+        let database =
+            finance_db::Database::open_in_memory().expect("in-memory SQLite should open");
         database
             .execute_batch(include_str!("../../db/migrations/V1__initial.sql"))
             .expect("initial migration should apply");
         database
-            .execute_batch(include_str!("../../db/migrations/V2__transactions_and_directories.sql"))
+            .execute_batch(include_str!(
+                "../../db/migrations/V2__transactions_and_directories.sql"
+            ))
             .expect("directory migration should apply");
         database
-            .execute("INSERT INTO income_categories (name) VALUES ('Корневая категория')", [])
+            .execute(
+                "INSERT INTO income_categories (name) VALUES ('Корневая категория')",
+                [],
+            )
             .expect("root category should be inserted");
         database
             .execute(
@@ -1339,7 +1460,10 @@ mod tests {
             )
             .expect("child category should be inserted");
         database
-            .execute("INSERT INTO banks (name) VALUES ('Первый банк'), ('Второй банк')", [])
+            .execute(
+                "INSERT INTO banks (name) VALUES ('Первый банк'), ('Второй банк')",
+                [],
+            )
             .expect("test banks should be inserted");
 
         let mut app = FinanceApp::new(database);
@@ -1352,7 +1476,8 @@ mod tests {
 
         for output in [&narrow_output, &wide_output] {
             let category_header_x = text_positions(output, "Категория")[0].x;
-            for text in ["Корневая категория", "　↳ Дочерняя категория"] {
+            for text in ["Корневая категория", "　↳ Дочерняя категория"]
+            {
                 let text_start_x = text_positions(output, text)[0].x;
                 assert!(
                     (text_start_x - category_header_x).abs() < 0.5,
@@ -1381,10 +1506,15 @@ mod tests {
         };
         let narrow_action_xs = action_column_xs(&narrow_output);
         let wide_action_xs = action_column_xs(&wide_output);
-        assert_eq!(narrow_action_xs.len(), 2, "both action columns should render");
+        assert_eq!(
+            narrow_action_xs.len(),
+            2,
+            "both action columns should render"
+        );
         assert_eq!(wide_action_xs.len(), 2, "both action columns should render");
         let panel_expansion = (1600.0_f32 - 1280.0) / 2.0;
-        for (index, (narrow_x, wide_x)) in narrow_action_xs.iter().zip(&wide_action_xs).enumerate() {
+        for (index, (narrow_x, wide_x)) in narrow_action_xs.iter().zip(&wide_action_xs).enumerate()
+        {
             let expected_expansion = panel_expansion * (index as f32 + 1.0);
             assert!(
                 (wide_x - narrow_x - expected_expansion).abs() < 1.0,
