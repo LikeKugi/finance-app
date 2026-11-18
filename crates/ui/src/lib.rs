@@ -426,20 +426,27 @@ impl FinanceApp {
             }
         };
 
-        let column_width =
-            ((ui.available_width() - ui.spacing().item_spacing.x * 5.0) / 6.0).max(85.0);
+        let column_spacing = ui.spacing().item_spacing.x;
+        let comment_width = (ui.available_width()
+            - column_spacing * 5.0
+            - 85.0
+            - 180.0
+            - 130.0
+            - 75.0
+            - 150.0)
+            .max(120.0);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 egui::Grid::new("transactions_table")
                     .striped(true)
-                    .min_col_width(column_width)
+                    .min_col_width(0.0)
                     .show(ui, |ui| {
                         for heading in [
                             "Дата",
-                            "Категория",
                             "Сумма",
                             "Валюта",
+                            "Категория",
                             "Комментарий",
                             "Действия",
                         ] {
@@ -449,13 +456,19 @@ impl FinanceApp {
                         let transactions = self.transactions.clone();
                         for transaction in &transactions {
                             ui.label(transaction.date.format("%d.%m.%Y").to_string());
-                            ui.label(&transaction.category_name);
-                            ui.label(transaction.amount.to_string());
+                            ui.add_sized(
+                                [130.0, 0.0],
+                                egui::Label::new(transaction.amount.to_string()).wrap(),
+                            );
                             ui.label(transaction.currency.code());
-                            ui.scope(|ui| {
-                                ui.set_max_width(220.0);
-                                ui.add(egui::Label::new(&transaction.comment).wrap());
-                            });
+                            ui.add_sized(
+                                [180.0, 0.0],
+                                egui::Label::new(&transaction.category_name).wrap(),
+                            );
+                            ui.add_sized(
+                                [comment_width, 0.0],
+                                egui::Label::new(&transaction.comment).wrap(),
+                            );
                             ui.horizontal(|ui| {
                                 if ui.small_button("Изменить").clicked() {
                                     self.edit_transaction(transaction);
