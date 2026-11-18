@@ -552,12 +552,14 @@ impl FinanceApp {
         }
         let mut scroll_area_ids = None;
         ui.columns(2, |columns| {
-            columns[0].heading("Категории");
             columns[0].horizontal(|ui| {
-                if ui.button("＋ Добавить категорию").clicked() {
-                    self.category_form = CategoryForm { is_active: true, ..CategoryForm::default() };
-                    self.show_category_form = true;
-                }
+                ui.heading("Категории");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("＋ Добавить категорию").clicked() {
+                        self.category_form = CategoryForm { is_active: true, ..CategoryForm::default() };
+                        self.show_category_form = true;
+                    }
+                });
             });
             let category_scroll_area =
                 egui::ScrollArea::vertical().id_salt(DIRECTORY_CATEGORIES_SCROLL_AREA_ID);
@@ -613,12 +615,14 @@ impl FinanceApp {
                         }
                     });
             });
-            columns[1].heading("Банки");
             columns[1].horizontal(|ui| {
-                if ui.button("＋ Добавить банк").clicked() {
-                    self.bank_form = BankForm::default();
-                    self.show_bank_form = true;
-                }
+                ui.heading("Банки");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("＋ Добавить банк").clicked() {
+                        self.bank_form = BankForm::default();
+                        self.show_bank_form = true;
+                    }
+                });
             });
             let bank_scroll_area = egui::ScrollArea::vertical().id_salt(DIRECTORY_BANKS_SCROLL_AREA_ID);
             let bank_scroll_output = bank_scroll_area.show(&mut columns[1], |ui| {
