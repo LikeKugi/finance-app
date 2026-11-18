@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use chrono::NaiveDate;
 use eframe::egui;
 use finance_core::{
@@ -553,24 +555,55 @@ impl FinanceApp {
             });
             egui::ScrollArea::vertical().show(&mut columns[0], |ui| {
                 let categories = self.categories.clone();
-                for category in categories {
-                    ui.horizontal(|ui| {
-                        let prefix = if category.parent_id.is_some() { "　↳ " } else { "" };
-                        ui.label(format!("{prefix}{}{}", category.name, if category.is_active { "" } else { " (неактивна)" }));
-                        if ui.small_button("Изменить").clicked() {
-                            self.category_form = CategoryForm {
-                                id: Some(category.id),
-                                name: category.name.clone(),
-                                parent_id: category.parent_id,
-                                is_active: category.is_active,
+                let category_rows = category_tree_rows(&categories);
+                let name_width = (ui.available_width() - 145.0).max(100.0);
+                egui::Grid::new("directory_categories_table")
+                    .striped(true)
+                    .min_col_width(85.0)
+                    .show(ui, |ui| {
+                        ui.add_sized(
+                            [name_width, 20.0],
+                            egui::Label::new(egui::RichText::new("Категория").strong()),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.strong("Действия");
+                        });
+                        ui.end_row();
+
+                        for (index, depth) in category_rows {
+                            let category = &categories[index];
+                            let prefix = if depth == 0 {
+                                String::new()
+                            } else {
+                                format!("{}↳ ", "　".repeat(depth))
                             };
-                            self.show_category_form = true;
-                        }
-                        if ui.small_button("Удалить").clicked() {
-                            self.pending_delete = Some(DeleteTarget::Category(self.directory_kind, category.id));
+                            let active_suffix = if category.is_active { "" } else { " (неактивна)" };
+                            ui.add_sized(
+                                [name_width, 20.0],
+                                egui::Label::new(format!("{prefix}{}{active_suffix}", category.name)),
+                            );
+
+                            let mut edit_clicked = false;
+                            let mut delete_clicked = false;
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                delete_clicked = ui.small_button("Удалить").clicked();
+                                edit_clicked = ui.small_button("Изменить").clicked();
+                            });
+                            if edit_clicked {
+                                self.category_form = CategoryForm {
+                                    id: Some(category.id),
+                                    name: category.name.clone(),
+                                    parent_id: category.parent_id,
+                                    is_active: category.is_active,
+                                };
+                                self.show_category_form = true;
+                            }
+                            if delete_clicked {
+                                self.pending_delete = Some(DeleteTarget::Category(self.directory_kind, category.id));
+                            }
+                            ui.end_row();
                         }
                     });
-                }
             });
             columns[1].heading("Банки");
             columns[1].horizontal(|ui| {
@@ -581,22 +614,43 @@ impl FinanceApp {
             });
             egui::ScrollArea::vertical().show(&mut columns[1], |ui| {
                 let banks = self.banks.clone();
-                for bank in banks {
-                    ui.horizontal(|ui| {
-                        ui.label(&bank.name);
-                        if ui.small_button("Изменить").clicked() {
-                            self.bank_form = BankForm {
-                                id: Some(bank.id),
-                                name: bank.name.clone(),
-                                comment: bank.comment.clone(),
-                            };
-                            self.show_bank_form = true;
-                        }
-                        if ui.small_button("Удалить").clicked() {
-                            self.pending_delete = Some(DeleteTarget::Bank(bank.id));
+                let name_width = (ui.available_width() - 145.0).max(100.0);
+                egui::Grid::new("directory_banks_table")
+                    .striped(true)
+                    .min_col_width(85.0)
+                    .show(ui, |ui| {
+                        ui.add_sized(
+                            [name_width, 20.0],
+                            egui::Label::new(egui::RichText::new("Банк").strong()),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.strong("Действия");
+                        });
+                        ui.end_row();
+
+                        for bank in &banks {
+                            ui.add_sized([name_width, 20.0], egui::Label::new(&bank.name));
+
+                            let mut edit_clicked = false;
+                            let mut delete_clicked = false;
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                delete_clicked = ui.small_button("Удалить").clicked();
+                                edit_clicked = ui.small_button("Изменить").clicked();
+                            });
+                            if edit_clicked {
+                                self.bank_form = BankForm {
+                                    id: Some(bank.id),
+                                    name: bank.name.clone(),
+                                    comment: bank.comment.clone(),
+                                };
+                                self.show_bank_form = true;
+                            }
+                            if delete_clicked {
+                                self.pending_delete = Some(DeleteTarget::Bank(bank.id));
+                            }
+                            ui.end_row();
                         }
                     });
-                }
             });
         });
 
@@ -716,6 +770,47 @@ impl eframe::App for FinanceApp {
     }
 }
 
+fn category_tree_rows(categories: &[Category]) -> Vec<(usize, usize)> {
+    let mut category_ids = HashSet::with_capacity(categories.len());
+    let mut children_by_parent = HashMap::<i64, Vec<usize>>::new();
+    let mut roots = Vec::new();
+
+    for category in categories {
+        category_ids.insert(category.id);
+    }
+    for (index, category) in categories.iter().enumerate() {
+        match category.parent_id {
+            Some(parent_id) if category_ids.contains(&parent_id) => {
+                children_by_parent.entry(parent_id).or_default().push(index);
+            }
+            _ => roots.push(index),
+        }
+    }
+
+    let mut rows = Vec::with_capacity(categories.len());
+    let mut visited = vec![false; categories.len()];
+    for root in roots.into_iter().chain(0..categories.len()) {
+        if visited[root] {
+            continue;
+        }
+
+        let mut pending = vec![(root, 0)];
+        while let Some((index, depth)) = pending.pop() {
+            if visited[index] {
+                continue;
+            }
+
+            visited[index] = true;
+            rows.push((index, depth));
+            if let Some(children) = children_by_parent.get(&categories[index].id) {
+                pending.extend(children.iter().rev().map(|&child| (child, depth + 1)));
+            }
+        }
+    }
+
+    rows
+}
+
 fn parse_optional_date(value: &str) -> Result<Option<NaiveDate>, String> {
     if value.trim().is_empty() {
         return Ok(None);
@@ -739,4 +834,66 @@ pub fn run(database: Database) -> eframe::Result<()> {
         options,
         Box::new(move |_creation_context| Ok(Box::new(FinanceApp::new(database)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{category_tree_rows, Category};
+
+    fn category(id: i64, parent_id: Option<i64>, is_active: bool) -> Category {
+        Category {
+            id,
+            name: format!("Категория {id}"),
+            parent_id,
+            is_active,
+        }
+    }
+
+    #[test]
+    fn category_tree_rows_nest_children_and_keep_sibling_order() {
+        let categories = vec![
+            category(3, Some(2), true),
+            category(20, None, true),
+            category(4, Some(3), true),
+            category(2, None, true),
+            category(5, Some(2), true),
+        ];
+
+        let rows: Vec<_> = category_tree_rows(&categories)
+            .into_iter()
+            .map(|(index, depth)| (categories[index].id, depth))
+            .collect();
+
+        assert_eq!(rows, vec![(20, 0), (2, 0), (3, 1), (4, 2), (5, 1)]);
+    }
+
+    #[test]
+    fn category_tree_rows_keep_inactive_categories_visible() {
+        let categories = vec![category(1, None, true), category(2, Some(1), false)];
+
+        let rows: Vec<_> = category_tree_rows(&categories)
+            .into_iter()
+            .map(|(index, depth)| (categories[index].id, depth, categories[index].is_active))
+            .collect();
+
+        assert_eq!(rows, vec![(1, 0, true), (2, 1, false)]);
+    }
+
+    #[test]
+    fn category_tree_rows_include_missing_parents_and_cycles() {
+        let categories = vec![
+            category(1, Some(2), true),
+            category(2, Some(1), true),
+            category(3, Some(99), true),
+            category(4, Some(3), true),
+            category(5, None, true),
+        ];
+
+        let rows: Vec<_> = category_tree_rows(&categories)
+            .into_iter()
+            .map(|(index, depth)| (categories[index].id, depth))
+            .collect();
+
+        assert_eq!(rows, vec![(3, 0), (4, 1), (5, 0), (1, 0), (2, 1)]);
+    }
 }
