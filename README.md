@@ -11,6 +11,8 @@ FinanceApp is a local desktop application for personal and family finance manage
 
 Income and expense records support create, edit, delete with confirmation, inclusive date filters, category filters, text search, and exact RUB/USD totals. Directories support bank and hierarchical income/expense category management, activation, and deletion safeguards for categories in use. Savings, Payment Documents, Analysis, and exports are not implemented yet; no interest or balance formulas are assumed.
 
+Transaction dates and the income/expense date filters can be entered manually in `YYYY-MM-DD` format or selected from the calendar button. Date filters remain optional and can be cleared by deleting their text.
+
 ## Build and run
 
 Install the Rust stable toolchain if needed:

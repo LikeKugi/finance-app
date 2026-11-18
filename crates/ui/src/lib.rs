@@ -6,6 +6,10 @@ use finance_core::{
 use finance_db::{self, Database};
 use rust_decimal::Decimal;
 
+mod date_input;
+
+use date_input::{date_input, DateInputState};
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ModuleTab {
     Income,
@@ -91,6 +95,9 @@ struct FinanceApp {
     search: String,
     from_date: String,
     to_date: String,
+    transaction_date_input: DateInputState,
+    from_date_input: DateInputState,
+    to_date_input: DateInputState,
     category_filter: Option<i64>,
     show_transaction_form: bool,
     show_category_form: bool,
@@ -114,6 +121,9 @@ impl FinanceApp {
             search: String::new(),
             from_date: String::new(),
             to_date: String::new(),
+            transaction_date_input: DateInputState::default(),
+            from_date_input: DateInputState::default(),
+            to_date_input: DateInputState::default(),
             category_filter: None,
             show_transaction_form: false,
             show_category_form: false,
@@ -194,6 +204,7 @@ impl FinanceApp {
     }
 
     fn start_new_transaction(&mut self) {
+        self.transaction_date_input.reset();
         self.transaction_form = TransactionForm {
             date: chrono::Local::now().date_naive().format("%Y-%m-%d").to_string(),
             category_id: self
@@ -208,6 +219,7 @@ impl FinanceApp {
     }
 
     fn edit_transaction(&mut self, transaction: &FinancialTransaction) {
+        self.transaction_date_input.reset();
         self.transaction_form = TransactionForm {
             id: Some(transaction.id),
             date: transaction.date.format("%Y-%m-%d").to_string(),
@@ -328,16 +340,20 @@ impl FinanceApp {
             ui.label("Поиск");
             ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(150.0));
             ui.label("С");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.from_date)
-                    .desired_width(95.0)
-                    .hint_text("ГГГГ-ММ-ДД"),
+            date_input(
+                ui,
+                "from_date_filter",
+                &mut self.from_date,
+                &mut self.from_date_input,
+                95.0,
             );
             ui.label("По");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.to_date)
-                    .desired_width(95.0)
-                    .hint_text("ГГГГ-ММ-ДД"),
+            date_input(
+                ui,
+                "to_date_filter",
+                &mut self.to_date,
+                &mut self.to_date_input,
+                95.0,
             );
             if ui.button("Применить").clicked() {
                 self.refresh_transactions(kind);
@@ -449,8 +465,14 @@ impl FinanceApp {
         ui.separator();
         ui.heading(if self.transaction_form.id.is_some() { "Изменить операцию" } else { "Новая операция" });
         ui.horizontal(|ui| {
-            ui.label("Дата (ГГГГ-ММ-ДД)");
-            ui.text_edit_singleline(&mut self.transaction_form.date);
+            ui.label("Дата");
+            date_input(
+                ui,
+                "transaction_date",
+                &mut self.transaction_form.date,
+                &mut self.transaction_date_input,
+                95.0,
+            );
             ui.label("Категория");
             let selected_category = self.transaction_form.category_id
                 .and_then(|id| self.categories.iter().find(|category| category.id == id))
