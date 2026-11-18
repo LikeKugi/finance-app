@@ -1,0 +1,16 @@
+[package]
+name = "finance-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+directories.workspace = true
+finance-db = { path = "../db" }
+finance-ui = { path = "../ui" }
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
