@@ -13,10 +13,45 @@ Income and expense records support create, edit, delete with confirmation, inclu
 
 ## Build and run
 
-With a Rust stable toolchain installed:
+Install the Rust stable toolchain if needed:
 
 ```sh
-cargo run -p finance-app
+rustup toolchain install stable
+```
+
+Build the app for the current machine (debug or optimized release):
+
+```sh
+cargo +stable build -p finance-app
+cargo +stable build -p finance-app --release
+```
+
+Build all workspace crates in release mode:
+
+```sh
+cargo +stable build --workspace --release
+```
+
+To cross-compile a Windows x64 GNU release executable, install the Rust target and ensure the GNU cross-linker is available in `PATH`:
+
+```sh
+rustup target add x86_64-pc-windows-gnu --toolchain stable
+cargo +stable build -p finance-app --release --target x86_64-pc-windows-gnu
+```
+
+The executable is written to `target/x86_64-pc-windows-gnu/release/finance-app.exe`.
+
+For a Windows x64 MSVC release executable, install the Visual Studio C++ Build Tools, then run:
+
+```sh
+rustup target add x86_64-pc-windows-msvc --toolchain stable
+cargo +stable build -p finance-app --release --target x86_64-pc-windows-msvc
+```
+
+Run the app on the current machine with:
+
+```sh
+cargo +stable run -p finance-app
 ```
 
 On Windows, the database is stored at `%APPDATA%\FinanceApp\data.db` and logs are written under `%APPDATA%\FinanceApp\logs`. Other operating systems use their standard user configuration directory.
