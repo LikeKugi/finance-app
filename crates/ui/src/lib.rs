@@ -334,6 +334,38 @@ impl FinanceApp {
         }
     }
 
+    fn clear_search_filter(&mut self, kind: TransactionKind) {
+        self.search.clear();
+        self.refresh_transactions(kind);
+    }
+
+    fn clear_from_date_filter(&mut self, kind: TransactionKind) {
+        self.from_date.clear();
+        self.from_date_input.reset();
+        self.refresh_transactions(kind);
+    }
+
+    fn clear_to_date_filter(&mut self, kind: TransactionKind) {
+        self.to_date.clear();
+        self.to_date_input.reset();
+        self.refresh_transactions(kind);
+    }
+
+    fn clear_category_filter(&mut self, kind: TransactionKind) {
+        self.category_filter = None;
+        self.refresh_transactions(kind);
+    }
+
+    fn reset_transaction_filters(&mut self, kind: TransactionKind) {
+        self.search.clear();
+        self.from_date.clear();
+        self.to_date.clear();
+        self.from_date_input.reset();
+        self.to_date_input.reset();
+        self.category_filter = None;
+        self.refresh_transactions(kind);
+    }
+
     fn render_transactions(&mut self, ui: &mut egui::Ui, kind: TransactionKind) {
         egui::ScrollArea::horizontal()
             .id_salt(TRANSACTION_FILTERS_SCROLL_AREA_ID)
@@ -342,6 +374,13 @@ impl FinanceApp {
                 ui.horizontal(|ui| {
                     ui.label("Поиск");
                     ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(150.0));
+                    if ui
+                        .add_enabled(!self.search.is_empty(), egui::Button::new("×"))
+                        .on_hover_text("Очистить поиск")
+                        .clicked()
+                    {
+                        self.clear_search_filter(kind);
+                    }
                     ui.add_space(8.0);
                     ui.label("С");
                     date_input(
@@ -351,6 +390,13 @@ impl FinanceApp {
                         &mut self.from_date_input,
                         95.0,
                     );
+                    if ui
+                        .add_enabled(!self.from_date.is_empty(), egui::Button::new("×"))
+                        .on_hover_text("Очистить начальную дату")
+                        .clicked()
+                    {
+                        self.clear_from_date_filter(kind);
+                    }
                     ui.add_space(8.0);
                     ui.label("По");
                     date_input(
@@ -360,6 +406,13 @@ impl FinanceApp {
                         &mut self.to_date_input,
                         95.0,
                     );
+                    if ui
+                        .add_enabled(!self.to_date.is_empty(), egui::Button::new("×"))
+                        .on_hover_text("Очистить конечную дату")
+                        .clicked()
+                    {
+                        self.clear_to_date_filter(kind);
+                    }
                     ui.add_space(8.0);
                     ui.label("Категория:");
                     let category_labels = category_tree_labels(&self.categories);
@@ -394,9 +447,29 @@ impl FinanceApp {
                                 }
                             }
                         });
+                    if ui
+                        .add_enabled(self.category_filter.is_some(), egui::Button::new("×"))
+                        .on_hover_text("Очистить категорию")
+                        .clicked()
+                    {
+                        self.clear_category_filter(kind);
+                    }
                     ui.add_space(8.0);
                     if ui.button("Применить").clicked() {
                         self.refresh_transactions(kind);
+                    }
+                    let has_active_filters = !self.search.is_empty()
+                        || !self.from_date.is_empty()
+                        || !self.to_date.is_empty()
+                        || self.category_filter.is_some();
+                    if ui
+                        .add_enabled(
+                            has_active_filters,
+                            egui::Button::new("Сбросить фильтры"),
+                        )
+                        .clicked()
+                    {
+                        self.reset_transaction_filters(kind);
                     }
                     if !self.categories.iter().any(|category| category.is_active) {
                         ui.add_space(8.0);
@@ -1001,7 +1074,7 @@ mod tests {
     use eframe::egui;
 
     use super::{
-        category_tree_labels, category_tree_rows, Category, FinanceApp, ModuleTab,
+        category_tree_labels, category_tree_rows, Category, FinanceApp, ModuleTab, TransactionKind,
         DIRECTORY_BANKS_SCROLL_AREA_ID,
         DIRECTORY_CATEGORIES_SCROLL_AREA_ID, TRANSACTION_FILTERS_SCROLL_AREA_ID,
         TRANSACTION_TABLE_SCROLL_AREA_ID,
@@ -1014,6 +1087,58 @@ mod tests {
             parent_id,
             is_active,
         }
+    }
+
+    fn filtered_transaction_app(kind: TransactionKind) -> FinanceApp {
+        let database = finance_db::Database::open_in_memory().expect("in-memory SQLite should open");
+        database
+            .execute_batch(include_str!("../../db/migrations/V1__initial.sql"))
+            .expect("initial migration should apply");
+        database
+            .execute_batch(include_str!("../../db/migrations/V2__transactions_and_directories.sql"))
+            .expect("transaction migration should apply");
+
+        let (category_table, transaction_table, active_tab) = match kind {
+            TransactionKind::Income => ("income_categories", "incomes", ModuleTab::Income),
+            TransactionKind::Expense => ("expense_categories", "expenses", ModuleTab::Expenses),
+        };
+        database
+            .execute_batch(&format!(
+                "INSERT INTO {category_table} (id, name) VALUES
+                    (1, 'Основная'),
+                    (2, 'Другая');
+                INSERT INTO {transaction_table} (id, date, category_id, amount, currency, comment) VALUES
+                    (1, '2023-12-15', 1, '10', 'RUB', 'найти'),
+                    (2, '2024-01-15', 1, '20', 'RUB', 'найти'),
+                    (3, '2024-01-15', 1, '30', 'RUB', 'пропустить'),
+                    (4, '2024-01-15', 2, '40', 'RUB', 'найти'),
+                    (5, '2024-02-15', 1, '50', 'RUB', 'найти');"
+            ))
+            .expect("transaction fixtures should be inserted");
+
+        let mut app = FinanceApp::new(database);
+        app.active_tab = active_tab;
+        app.refresh_categories(kind, true);
+        app.search = "найти".to_owned();
+        app.from_date = "2024-01-01".to_owned();
+        app.to_date = "2024-01-31".to_owned();
+        app.category_filter = Some(1);
+        app.refresh_transactions(kind);
+        assert_eq!(app.transactions.len(), 1, "fixture should match all filters");
+        app
+    }
+
+    fn transaction_rows(app: &FinanceApp) -> Vec<(String, i64, String)> {
+        app.transactions
+            .iter()
+            .map(|transaction| {
+                (
+                    transaction.date.format("%Y-%m-%d").to_string(),
+                    transaction.category_id,
+                    transaction.comment.clone(),
+                )
+            })
+            .collect()
     }
 
     fn render_directories_at_width(
@@ -1265,6 +1390,81 @@ mod tests {
                 (wide_x - narrow_x - expected_expansion).abs() < 1.0,
                 "the action column should move with the expanded name column: {narrow_x} to {wide_x}"
             );
+        }
+    }
+
+    #[test]
+    fn transaction_filters_can_be_cleared_individually_for_income_and_expenses() {
+        for kind in [TransactionKind::Income, TransactionKind::Expense] {
+            let mut app = filtered_transaction_app(kind);
+            app.clear_search_filter(kind);
+            assert!(app.search.is_empty());
+            assert_eq!(app.from_date, "2024-01-01");
+            assert_eq!(app.to_date, "2024-01-31");
+            assert_eq!(app.category_filter, Some(1));
+            assert_eq!(
+                transaction_rows(&app),
+                vec![
+                    ("2024-01-15".to_owned(), 1, "пропустить".to_owned()),
+                    ("2024-01-15".to_owned(), 1, "найти".to_owned()),
+                ]
+            );
+
+            let mut app = filtered_transaction_app(kind);
+            app.clear_from_date_filter(kind);
+            assert_eq!(app.search, "найти");
+            assert!(app.from_date.is_empty());
+            assert_eq!(app.to_date, "2024-01-31");
+            assert_eq!(app.category_filter, Some(1));
+            assert_eq!(
+                transaction_rows(&app),
+                vec![
+                    ("2024-01-15".to_owned(), 1, "найти".to_owned()),
+                    ("2023-12-15".to_owned(), 1, "найти".to_owned()),
+                ]
+            );
+
+            let mut app = filtered_transaction_app(kind);
+            app.clear_to_date_filter(kind);
+            assert_eq!(app.search, "найти");
+            assert_eq!(app.from_date, "2024-01-01");
+            assert!(app.to_date.is_empty());
+            assert_eq!(app.category_filter, Some(1));
+            assert_eq!(
+                transaction_rows(&app),
+                vec![
+                    ("2024-02-15".to_owned(), 1, "найти".to_owned()),
+                    ("2024-01-15".to_owned(), 1, "найти".to_owned()),
+                ]
+            );
+
+            let mut app = filtered_transaction_app(kind);
+            app.clear_category_filter(kind);
+            assert_eq!(app.search, "найти");
+            assert_eq!(app.from_date, "2024-01-01");
+            assert_eq!(app.to_date, "2024-01-31");
+            assert_eq!(app.category_filter, None);
+            assert_eq!(
+                transaction_rows(&app),
+                vec![
+                    ("2024-01-15".to_owned(), 2, "найти".to_owned()),
+                    ("2024-01-15".to_owned(), 1, "найти".to_owned()),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn all_transaction_filters_can_be_reset_for_income_and_expenses() {
+        for kind in [TransactionKind::Income, TransactionKind::Expense] {
+            let mut app = filtered_transaction_app(kind);
+            app.reset_transaction_filters(kind);
+
+            assert!(app.search.is_empty());
+            assert!(app.from_date.is_empty());
+            assert!(app.to_date.is_empty());
+            assert_eq!(app.category_filter, None);
+            assert_eq!(app.transactions.len(), 5);
         }
     }
 }
