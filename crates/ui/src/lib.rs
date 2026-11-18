@@ -436,7 +436,7 @@ impl FinanceApp {
                 ui.colored_label(
                     egui::Color32::RED,
                     "Не удалось рассчитать итог: сумма слишком велика",
-                );
+                )
             }
         };
 
