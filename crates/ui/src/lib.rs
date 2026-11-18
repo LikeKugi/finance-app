@@ -395,45 +395,10 @@ impl FinanceApp {
             }
         });
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Grid::new("transactions_table")
-                .striped(true)
-                .min_col_width(85.0)
-                .show(ui, |ui| {
-                    for heading in [
-                        "Дата",
-                        "Категория",
-                        "Сумма",
-                        "Валюта",
-                        "Комментарий",
-                        "Действия",
-                    ] {
-                        ui.strong(heading);
-                    }
-                    ui.end_row();
-                    let transactions = self.transactions.clone();
-                    for transaction in &transactions {
-                        ui.label(transaction.date.format("%d.%m.%Y").to_string());
-                        ui.label(&transaction.category_name);
-                        ui.label(transaction.amount.to_string());
-                        ui.label(transaction.currency.code());
-                        ui.scope(|ui| {
-                            ui.set_max_width(220.0);
-                            ui.add(egui::Label::new(&transaction.comment).wrap());
-                        });
-                        ui.horizontal(|ui| {
-                            if ui.small_button("Изменить").clicked() {
-                                self.edit_transaction(transaction);
-                            }
-                            if ui.small_button("Удалить").clicked() {
-                                self.pending_delete =
-                                    Some(DeleteTarget::Transaction(kind, transaction.id));
-                            }
-                        });
-                        ui.end_row();
-                    }
-                });
-        });
+        if self.show_transaction_form {
+            self.render_transaction_form(ui, kind);
+        }
+
         ui.separator();
         match self.transactions.iter().try_fold(
             (Decimal::ZERO, Decimal::ZERO),
@@ -461,9 +426,49 @@ impl FinanceApp {
             }
         };
 
-        if self.show_transaction_form {
-            self.render_transaction_form(ui, kind);
-        }
+        let column_width =
+            ((ui.available_width() - ui.spacing().item_spacing.x * 5.0) / 6.0).max(85.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                egui::Grid::new("transactions_table")
+                    .striped(true)
+                    .min_col_width(column_width)
+                    .show(ui, |ui| {
+                        for heading in [
+                            "Дата",
+                            "Категория",
+                            "Сумма",
+                            "Валюта",
+                            "Комментарий",
+                            "Действия",
+                        ] {
+                            ui.strong(heading);
+                        }
+                        ui.end_row();
+                        let transactions = self.transactions.clone();
+                        for transaction in &transactions {
+                            ui.label(transaction.date.format("%d.%m.%Y").to_string());
+                            ui.label(&transaction.category_name);
+                            ui.label(transaction.amount.to_string());
+                            ui.label(transaction.currency.code());
+                            ui.scope(|ui| {
+                                ui.set_max_width(220.0);
+                                ui.add(egui::Label::new(&transaction.comment).wrap());
+                            });
+                            ui.horizontal(|ui| {
+                                if ui.small_button("Изменить").clicked() {
+                                    self.edit_transaction(transaction);
+                                }
+                                if ui.small_button("Удалить").clicked() {
+                                    self.pending_delete =
+                                        Some(DeleteTarget::Transaction(kind, transaction.id));
+                                }
+                            });
+                            ui.end_row();
+                        }
+                    });
+            });
     }
 
     fn render_transaction_form(&mut self, ui: &mut egui::Ui, kind: TransactionKind) {
@@ -762,6 +767,13 @@ impl eframe::App for FinanceApp {
         egui::CentralPanel::default().show(context, |ui| {
             ui.heading(self.active_tab.title());
             ui.separator();
+            if let Some((message, is_error)) = &self.message {
+                ui.colored_label(
+                    if *is_error { egui::Color32::RED } else { egui::Color32::DARK_GREEN },
+                    message,
+                );
+                ui.separator();
+            }
             match self.active_tab {
                 ModuleTab::Income => self.render_transactions(ui, TransactionKind::Income),
                 ModuleTab::Expenses => self.render_transactions(ui, TransactionKind::Expense),
@@ -769,10 +781,6 @@ impl eframe::App for FinanceApp {
                 ModuleTab::Savings | ModuleTab::PaymentDocuments | ModuleTab::Analysis => {
                     ui.label("Этот раздел пока не реализован.");
                 }
-            }
-            if let Some((message, is_error)) = &self.message {
-                ui.separator();
-                ui.colored_label(if *is_error { egui::Color32::RED } else { egui::Color32::DARK_GREEN }, message);
             }
         });
         self.render_delete_confirmation(context);
