@@ -85,50 +85,93 @@ impl SavingsPage {
         }
 
         let mut should_refresh = false;
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Банк");
-            let selected_bank = self
-                .bank_filter
-                .and_then(|id| banks.iter().find(|bank| bank.id == id))
-                .map_or("Все банки", |bank| bank.name.as_str());
-            egui::ComboBox::from_id_salt("savings_bank_filter")
-                .selected_text(selected_bank)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.bank_filter, None, "Все банки");
-                    for bank in banks {
-                        ui.selectable_value(&mut self.bank_filter, Some(bank.id), &bank.name);
+        egui::ScrollArea::horizontal()
+            .id_salt("savings_filters_scroll")
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Поиск");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.search)
+                            .hint_text("Название или банк")
+                            .desired_width(180.0),
+                    );
+                    if ui
+                        .add_enabled(!self.search.is_empty(), egui::Button::new("×"))
+                        .on_hover_text("Очистить поиск")
+                        .clicked()
+                    {
+                        self.clear_search_filter();
+                        should_refresh = true;
+                    }
+                    ui.add_space(8.0);
+
+                    ui.label("Банк");
+                    let selected_bank = self
+                        .bank_filter
+                        .and_then(|id| banks.iter().find(|bank| bank.id == id))
+                        .map_or("Все банки", |bank| bank.name.as_str());
+                    egui::ComboBox::from_id_salt("savings_bank_filter")
+                        .selected_text(selected_bank)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.bank_filter, None, "Все банки");
+                            for bank in banks {
+                                ui.selectable_value(
+                                    &mut self.bank_filter,
+                                    Some(bank.id),
+                                    &bank.name,
+                                );
+                            }
+                        });
+                    if ui
+                        .add_enabled(self.bank_filter.is_some(), egui::Button::new("×"))
+                        .on_hover_text("Очистить банк")
+                        .clicked()
+                    {
+                        self.clear_bank_filter();
+                        should_refresh = true;
+                    }
+                    ui.add_space(8.0);
+
+                    ui.label("Статус");
+                    egui::ComboBox::from_id_salt("savings_active_filter")
+                        .selected_text(match self.active_filter {
+                            None => "Все",
+                            Some(true) => "Активные",
+                            Some(false) => "Неактивные",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.active_filter, None, "Все");
+                            ui.selectable_value(&mut self.active_filter, Some(true), "Активные");
+                            ui.selectable_value(&mut self.active_filter, Some(false), "Неактивные");
+                        });
+                    if ui
+                        .add_enabled(self.active_filter.is_some(), egui::Button::new("×"))
+                        .on_hover_text("Очистить статус")
+                        .clicked()
+                    {
+                        self.clear_active_filter();
+                        should_refresh = true;
+                    }
+                    ui.add_space(8.0);
+
+                    if ui.button("Применить").clicked() {
+                        should_refresh = true;
+                    }
+                    let has_active_filters = !self.search.is_empty()
+                        || self.bank_filter.is_some()
+                        || self.active_filter.is_some();
+                    if ui
+                        .add_enabled(has_active_filters, egui::Button::new("Сбросить фильтры"))
+                        .clicked()
+                    {
+                        self.reset_filters();
+                        should_refresh = true;
                     }
                 });
+            });
 
-            ui.label("Статус");
-            egui::ComboBox::from_id_salt("savings_active_filter")
-                .selected_text(match self.active_filter {
-                    None => "Все",
-                    Some(true) => "Активные",
-                    Some(false) => "Неактивные",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.active_filter, None, "Все");
-                    ui.selectable_value(&mut self.active_filter, Some(true), "Активные");
-                    ui.selectable_value(&mut self.active_filter, Some(false), "Неактивные");
-                });
-
-            ui.label("Поиск");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.search)
-                    .hint_text("Название или банк")
-                    .desired_width(180.0),
-            );
-            if ui.button("Применить фильтры").clicked() {
-                should_refresh = true;
-            }
-            if ui.button("Сбросить").clicked() {
-                self.bank_filter = None;
-                self.active_filter = None;
-                self.search.clear();
-                should_refresh = true;
-            }
-        });
+        ui.separator();
 
         if should_refresh {
             if let Err(error) = self.refresh(database) {
@@ -282,6 +325,24 @@ impl SavingsPage {
             error: None,
         };
         self.show_form = true;
+    }
+
+    fn clear_search_filter(&mut self) {
+        self.search.clear();
+    }
+
+    fn clear_bank_filter(&mut self) {
+        self.bank_filter = None;
+    }
+
+    fn clear_active_filter(&mut self) {
+        self.active_filter = None;
+    }
+
+    fn reset_filters(&mut self) {
+        self.clear_search_filter();
+        self.clear_bank_filter();
+        self.clear_active_filter();
     }
 
     fn render_form(
@@ -520,5 +581,110 @@ impl SavingsForm {
         };
         details.validate().map_err(|error| error.to_string())?;
         Ok(details)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SavingsPage;
+
+    fn filtered_savings_page() -> (finance_db::Database, SavingsPage) {
+        let database =
+            finance_db::Database::open_in_memory().expect("in-memory SQLite should open");
+        database
+            .execute_batch(include_str!("../../db/migrations/V1__initial.sql"))
+            .expect("initial migration should apply");
+        database
+            .execute_batch(include_str!(
+                "../../db/migrations/V2__transactions_and_directories.sql"
+            ))
+            .expect("directory migration should apply");
+        database
+            .execute_batch(include_str!("../../db/migrations/V3__savings.sql"))
+            .expect("savings migration should apply");
+        database
+            .execute_batch(
+                "INSERT INTO banks (id, name) VALUES (1, 'Банк Альфа'), (2, 'Банк Бета');
+                 INSERT INTO savings (
+                     id, bank_id, title, amount, base_rate, term_type,
+                     term_end_date, interest_destination, is_active
+                 ) VALUES
+                     (1, 1, 'Alpha', '100', '1', 'unlimited', NULL, 'reinvest', 1),
+                     (2, 1, 'Alpha', '100', '1', 'unlimited', NULL, 'reinvest', 0),
+                     (3, 1, 'Gamma', '100', '1', 'unlimited', NULL, 'reinvest', 1),
+                     (4, 2, 'Alpha', '100', '1', 'unlimited', NULL, 'reinvest', 1),
+                     (5, 2, 'Beta', '100', '1', 'unlimited', NULL, 'reinvest', 0);",
+            )
+            .expect("savings fixtures should be inserted");
+
+        let mut page = SavingsPage {
+            bank_filter: Some(1),
+            active_filter: Some(true),
+            search: "Alpha".to_owned(),
+            ..SavingsPage::default()
+        };
+        page.refresh(&database)
+            .expect("initial savings filter should load");
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            [1]
+        );
+
+        (database, page)
+    }
+
+    #[test]
+    fn clearing_each_savings_filter_refreshes_results_and_preserves_other_filters() {
+        let (database, mut page) = filtered_savings_page();
+        page.clear_search_filter();
+        page.refresh(&database)
+            .expect("results without search should load");
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            [1, 3]
+        );
+
+        let (database, mut page) = filtered_savings_page();
+        page.clear_bank_filter();
+        page.refresh(&database)
+            .expect("results without bank filter should load");
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            [1, 4]
+        );
+
+        let (database, mut page) = filtered_savings_page();
+        page.clear_active_filter();
+        page.refresh(&database)
+            .expect("results without status filter should load");
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+    }
+
+    #[test]
+    fn resetting_savings_filters_clears_all_values_and_refreshes_results() {
+        let (database, mut page) = filtered_savings_page();
+        page.reset_filters();
+        page.refresh(&database)
+            .expect("results without filters should load");
+
+        assert!(page.search.is_empty());
+        assert_eq!(page.bank_filter, None);
+        assert_eq!(page.active_filter, None);
+        assert_eq!(page.entries.len(), 5);
     }
 }

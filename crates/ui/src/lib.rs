@@ -1184,8 +1184,8 @@ mod tests {
     use eframe::egui;
 
     use super::{
-        category_tree_labels, category_tree_rows, Category, FinanceApp, ModuleTab, TransactionKind,
-        DIRECTORY_BANKS_SCROLL_AREA_ID, DIRECTORY_CATEGORIES_SCROLL_AREA_ID,
+        category_tree_labels, category_tree_rows, Category, FinanceApp, ModuleTab, SavingsPage,
+        TransactionKind, DIRECTORY_BANKS_SCROLL_AREA_ID, DIRECTORY_CATEGORIES_SCROLL_AREA_ID,
         TRANSACTION_FILTERS_SCROLL_AREA_ID, TRANSACTION_TABLE_SCROLL_AREA_ID,
     };
 
@@ -1400,6 +1400,28 @@ mod tests {
 
         let (filters_id, table_id) = scroll_area_ids.expect("egui should render both scroll areas");
         assert_ne!(filters_id, table_id);
+    }
+
+    #[test]
+    fn savings_filters_render_in_search_bank_status_order_with_updated_actions() {
+        let database =
+            finance_db::Database::open_in_memory().expect("in-memory SQLite should open");
+        let mut savings_page = SavingsPage::default();
+        let context = egui::Context::default();
+        let output = context.run(Default::default(), |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                savings_page.render(context, ui, &database, &[]);
+            });
+        });
+
+        let search = text_positions(&output, "Поиск")[0];
+        let bank = text_positions(&output, "Банк")[0];
+        let status = text_positions(&output, "Статус")[0];
+        assert!(search.x < bank.x && bank.x < status.x);
+        assert_eq!(text_positions(&output, "Применить").len(), 1);
+        assert_eq!(text_positions(&output, "Сбросить фильтры").len(), 1);
+        assert!(text_positions(&output, "Применить фильтры").is_empty());
+        assert!(text_positions(&output, "Сбросить").is_empty());
     }
 
     #[test]
