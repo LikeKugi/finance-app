@@ -542,9 +542,6 @@ impl FinanceApp {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.directory_kind, TransactionKind::Income, "Категории доходов");
             ui.selectable_value(&mut self.directory_kind, TransactionKind::Expense, "Категории расходов");
-            if ui.button("Обновить").clicked() {
-                self.refresh_directories();
-            }
         });
         if self.directory_kind != previous_kind {
             self.category_form = CategoryForm::default();
@@ -816,6 +813,15 @@ impl eframe::App for FinanceApp {
                         .clicked()
                     {
                         self.refresh_transactions(kind);
+                    }
+                } else if self.active_tab == ModuleTab::Directories {
+                    let actions_width = 140.0;
+                    ui.add_space((ui.available_width() - actions_width).max(0.0));
+                    if ui
+                        .add_sized(egui::vec2(140.0, 40.0), egui::Button::new("↻ Обновить"))
+                        .clicked()
+                    {
+                        self.refresh_directories();
                     }
                 }
             });
