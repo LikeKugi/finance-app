@@ -417,7 +417,10 @@ impl FinanceApp {
                         ui.label(&transaction.category_name);
                         ui.label(transaction.amount.to_string());
                         ui.label(transaction.currency.code());
-                        ui.label(&transaction.comment);
+                        ui.scope(|ui| {
+                            ui.set_max_width(220.0);
+                            ui.add(egui::Label::new(&transaction.comment).wrap());
+                        });
                         ui.horizontal(|ui| {
                             if ui.small_button("Изменить").clicked() {
                                 self.edit_transaction(transaction);
@@ -505,8 +508,14 @@ impl FinanceApp {
                         ui.selectable_value(&mut self.transaction_form.currency, Some(currency), currency.code());
                     }
                 });
+        });
+        ui.horizontal(|ui| {
             ui.label("Комментарий");
-            ui.add(egui::TextEdit::singleline(&mut self.transaction_form.comment).desired_width(240.0));
+            ui.add(
+                egui::TextEdit::multiline(&mut self.transaction_form.comment)
+                    .desired_width(480.0)
+                    .desired_rows(3),
+            );
         });
         if !self.transaction_form.amount.trim().is_empty() {
             match parse_amount_expression(&self.transaction_form.amount) {

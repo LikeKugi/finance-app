@@ -302,7 +302,7 @@ pub fn delete_category(
     kind: TransactionKind,
     id: i64,
 ) -> Result<(), DbError> {
-    let (table, transactions) = transaction_tables(kind);
+    let (transactions, table) = transaction_tables(kind);
     let children = connection.query_row(
         &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE parent_id = ?1)"),
         [id],
@@ -586,6 +586,104 @@ mod tests {
             delete_category(&connection, TransactionKind::Expense, category_id).unwrap_err();
 
         assert!(matches!(error, DbError::EntityInUse));
+
+        let transaction_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM expenses WHERE category_id = ?1",
+                [category_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(transaction_count, 1);
+    }
+
+    #[test]
+    fn delete_category_removes_unused_income_category() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let category_id = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Зарплата",
+            None,
+            true,
+        )
+        .unwrap();
+
+        delete_category(&connection, TransactionKind::Income, category_id).unwrap();
+
+        let category_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM income_categories WHERE id = ?1",
+                [category_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(category_count, 0);
+    }
+
+    #[test]
+    fn delete_category_removes_unused_expense_category() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let category_id = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Продукты",
+            None,
+            true,
+        )
+        .unwrap();
+
+        delete_category(&connection, TransactionKind::Expense, category_id).unwrap();
+
+        let category_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM expense_categories WHERE id = ?1",
+                [category_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(category_count, 0);
+    }
+
+    #[test]
+    fn delete_category_is_rejected_when_child_categories_exist() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let parent_id = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Основное",
+            None,
+            true,
+        )
+        .unwrap();
+        let child_id = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Зарплата",
+            Some(parent_id),
+            true,
+        )
+        .unwrap();
+
+        let error =
+            delete_category(&connection, TransactionKind::Income, parent_id).unwrap_err();
+
+        assert!(matches!(error, DbError::EntityInUse));
+        let category_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM income_categories WHERE id IN (?1, ?2)",
+                [parent_id, child_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(category_count, 2);
     }
 
     #[test]
