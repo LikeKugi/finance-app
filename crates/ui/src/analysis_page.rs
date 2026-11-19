@@ -305,11 +305,12 @@ impl AnalysisPage {
 
         if mode == AnalysisMode::All {
             ui.columns(2, |columns| {
-                for (column, kind) in columns
-                    .iter_mut()
-                    .zip([TransactionKind::Income, TransactionKind::Expense])
-                {
+                for (column, (kind, scroll_id)) in columns.iter_mut().zip([
+                    (TransactionKind::Income, "analysis_income_summary_scroll"),
+                    (TransactionKind::Expense, "analysis_expense_summary_scroll"),
+                ]) {
                     egui::ScrollArea::vertical()
+                        .id_salt(scroll_id)
                         .auto_shrink([false, true])
                         .show(column, |ui| Self::render_kind_summary(ui, summary, kind));
                 }
@@ -531,6 +532,16 @@ mod tests {
     fn all_analysis_mode_renders_income_and_expenses_in_separate_columns() {
         let summary = summary_with_both_kinds_and_currencies();
         let output = render_summary_at_width(&summary, AnalysisMode::All, 1_280.0);
+
+        assert!(!output
+            .shapes
+            .iter()
+            .any(|clipped_shape| match &clipped_shape.shape {
+                egui::epaint::Shape::Text(text_shape) => {
+                    text_shape.galley.job.text.contains("ScrollArea ID")
+                }
+                _ => false,
+            }));
 
         let income_rub = text_position(&output, "Доходы — RUB").expect("income heading");
         let income_usd = text_position(&output, "Доходы — USD").expect("income USD heading");
