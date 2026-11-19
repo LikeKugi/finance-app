@@ -37,6 +37,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 5,
         sql: include_str!("../migrations/V5__savings_dates.sql"),
     },
+    Migration {
+        version: 6,
+        sql: include_str!("../migrations/V6__income_card_balances.sql"),
+    },
 ];
 
 struct Migration {
@@ -83,6 +87,14 @@ pub enum DbError {
     InvalidAnalysisDateRange,
     #[error("Начало периода не может быть позже его окончания")]
     InvalidTransactionDateRange,
+    #[error("Выберите дебетовую карту с валютой, совпадающей с валютой дохода")]
+    IncomeCardUnavailable,
+    #[error("Недостаточно средств на карте для отмены зачисления")]
+    InsufficientCardBalance,
+    #[error("Не удалось точно рассчитать баланс карты: переполнение или недостаточная точность")]
+    CardBalanceOverflow,
+    #[error("Карта связана с доходами: нельзя удалить её или изменить её тип и валюту")]
+    IncomeCardInUse,
     #[error(transparent)]
     Domain(#[from] finance_core::DomainError),
 }
@@ -116,8 +128,12 @@ pub fn list_transactions(
     search: &str,
 ) -> Result<Vec<FinancialTransaction>, DbError> {
     let (table, categories) = transaction_tables(kind);
+    let card_column = match kind {
+        TransactionKind::Income => "t.payment_document_id",
+        TransactionKind::Expense => "NULL",
+    };
     let sql = format!(
-        "SELECT t.id, t.date, t.category_id, c.name, t.amount, t.currency, t.comment
+        "SELECT t.id, t.date, t.category_id, c.name, t.amount, t.currency, t.comment, {card_column}
          FROM {table} t JOIN {categories} c ON c.id = t.category_id
          WHERE (?1 IS NULL OR t.date >= ?1)
            AND (?2 IS NULL OR t.date <= ?2)
@@ -149,6 +165,7 @@ pub fn list_transactions(
                 amount,
                 currency,
                 comment: row.get(6)?,
+                payment_document_id: row.get(7)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -330,13 +347,59 @@ pub fn save_transaction(
     currency: Currency,
     comment: &str,
 ) -> Result<i64, DbError> {
+    let card = if kind == TransactionKind::Income {
+        match id {
+            Some(id) => connection.query_row(
+                "SELECT payment_document_id FROM incomes WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )?,
+            None => None,
+        }
+    } else {
+        None
+    };
+    save_transaction_with_card(
+        connection,
+        kind,
+        id,
+        date,
+        category_id,
+        amount,
+        currency,
+        comment,
+        card,
+    )
+}
+
+/// Saves an income and its optional card credit atomically, or an unlinked expense.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Matches the existing transaction API"
+)]
+pub fn save_transaction_with_card(
+    connection: &Connection,
+    kind: TransactionKind,
+    id: Option<i64>,
+    date: NaiveDate,
+    category_id: i64,
+    amount: Decimal,
+    currency: Currency,
+    comment: &str,
+    payment_document_id: Option<i64>,
+) -> Result<i64, DbError> {
     if amount <= Decimal::ZERO {
         return Err(DbError::InvalidAmount);
     }
+    if kind == TransactionKind::Expense && payment_document_id.is_some() {
+        return Err(DbError::IncomeCardUnavailable);
+    }
+    let transaction =
+        rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
     let (table, categories) = transaction_tables(kind);
     let current_category = id
         .map(|id| {
-            connection
+            transaction
                 .query_row(
                     &format!("SELECT category_id FROM {table} WHERE id = ?1"),
                     [id],
@@ -346,7 +409,7 @@ pub fn save_transaction(
         })
         .transpose()?
         .flatten();
-    let category_is_active = connection
+    let category_is_active = transaction
         .query_row(
             &format!("SELECT is_active FROM {categories} WHERE id = ?1"),
             [category_id],
@@ -358,30 +421,122 @@ pub fn save_transaction(
         return Err(DbError::CategoryUnavailable);
     }
 
+    let old_credit = if kind == TransactionKind::Income {
+        match id {
+            Some(id) => {
+                let (card, old_amount): (Option<i64>, String) = transaction.query_row(
+                    "SELECT payment_document_id, amount FROM incomes WHERE id = ?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                card.map(|card| parse_decimal_text(old_amount, 1).map(|amount| (card, amount)))
+                    .transpose()?
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    if let Some(card_id) = payment_document_id {
+        let valid = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM payment_documents WHERE id = ?1 AND card_type = 'debit' AND currency = ?2)",
+            params![card_id, currency.code()], |row| row.get::<_, bool>(0),
+        )?;
+        if !valid {
+            return Err(DbError::IncomeCardUnavailable);
+        }
+    }
+    if let Some((old_card, old_amount)) = old_credit {
+        if Some(old_card) == payment_document_id {
+            let delta = amount
+                .checked_sub(old_amount)
+                .ok_or(DbError::CardBalanceOverflow)?;
+            if delta.checked_add(old_amount) != Some(amount)
+                || amount.checked_sub(delta) != Some(old_amount)
+            {
+                return Err(DbError::CardBalanceOverflow);
+            }
+            adjust_card_balance(&transaction, old_card, delta)?;
+        } else {
+            adjust_card_balance(&transaction, old_card, -old_amount)?;
+            if let Some(new_card) = payment_document_id {
+                adjust_card_balance(&transaction, new_card, amount)?;
+            }
+        }
+    } else if let Some(new_card) = payment_document_id {
+        adjust_card_balance(&transaction, new_card, amount)?;
+    }
     let amount = canonical_amount(amount);
     let date = date.format("%Y-%m-%d").to_string();
-    if let Some(id) = id {
-        let changed = connection.execute(
-            &format!(
-                "UPDATE {table} SET date = ?1, category_id = ?2, amount = ?3,
+    let saved_id = if let Some(id) = id {
+        let changed = if kind == TransactionKind::Income {
+            transaction.execute(
+                "UPDATE incomes SET date = ?1, category_id = ?2, amount = ?3,
+                 currency = ?4, comment = ?5, payment_document_id = ?6 WHERE id = ?7",
+                params![
+                    date,
+                    category_id,
+                    amount,
+                    currency.code(),
+                    comment,
+                    payment_document_id,
+                    id
+                ],
+            )?
+        } else {
+            transaction.execute(
+                &format!(
+                    "UPDATE {table} SET date = ?1, category_id = ?2, amount = ?3,
                  currency = ?4, comment = ?5 WHERE id = ?6"
-            ),
-            params![date, category_id, amount, currency.code(), comment, id],
-        )?;
+                ),
+                params![date, category_id, amount, currency.code(), comment, id],
+            )?
+        };
         if changed == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows.into());
         }
-        Ok(id)
+        id
     } else {
-        connection.execute(
+        transaction.execute(
             &format!(
                 "INSERT INTO {table} (date, category_id, amount, currency, comment)
                  VALUES (?1, ?2, ?3, ?4, ?5)"
             ),
             params![date, category_id, amount, currency.code(), comment],
         )?;
-        Ok(connection.last_insert_rowid())
+        transaction.last_insert_rowid()
+    };
+    if kind == TransactionKind::Income && id.is_none() {
+        transaction.execute(
+            "UPDATE incomes SET payment_document_id = ?1 WHERE id = ?2",
+            params![payment_document_id, saved_id],
+        )?;
     }
+    transaction.commit()?;
+    Ok(saved_id)
+}
+
+fn adjust_card_balance(connection: &Connection, id: i64, delta: Decimal) -> Result<(), DbError> {
+    let text: String = connection.query_row(
+        "SELECT amount FROM payment_documents WHERE id = ?1",
+        [id],
+        |row| row.get(0),
+    )?;
+    let balance = parse_decimal_text(text, 0)?;
+    let updated = balance
+        .checked_add(delta)
+        .ok_or(DbError::CardBalanceOverflow)?;
+    if updated.checked_sub(delta) != Some(balance) || updated.checked_sub(balance) != Some(delta) {
+        return Err(DbError::CardBalanceOverflow);
+    }
+    if updated < Decimal::ZERO {
+        return Err(DbError::InsufficientCardBalance);
+    }
+    connection.execute(
+        "UPDATE payment_documents SET amount = ?1 WHERE id = ?2",
+        params![canonical_amount(updated), id],
+    )?;
+    Ok(())
 }
 
 /// Deletes a transaction by its database identifier.
@@ -390,11 +545,24 @@ pub fn delete_transaction(
     kind: TransactionKind,
     id: i64,
 ) -> Result<(), DbError> {
+    let transaction =
+        rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    if kind == TransactionKind::Income {
+        let (card, amount): (Option<i64>, String) = transaction.query_row(
+            "SELECT payment_document_id, amount FROM incomes WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if let Some(card) = card {
+            adjust_card_balance(&transaction, card, -parse_decimal_text(amount, 1)?)?;
+        }
+    }
     let (table, _) = transaction_tables(kind);
-    let deleted = connection.execute(&format!("DELETE FROM {table} WHERE id = ?1"), [id])?;
+    let deleted = transaction.execute(&format!("DELETE FROM {table} WHERE id = ?1"), [id])?;
     if deleted == 0 {
         return Err(rusqlite::Error::QueryReturnedNoRows.into());
     }
+    transaction.commit()?;
     Ok(())
 }
 
@@ -595,7 +763,7 @@ pub fn list_payment_documents(
         "SELECT document.id, document.bank_id, bank.name, document.payment_system,
                 document.card_type, document.amount, document.due_date,
                 document.grace_period_days, document.affects_deposit_rate,
-                document.min_monthly_spend
+                document.min_monthly_spend, document.currency
          FROM payment_documents AS document
          JOIN banks AS bank ON bank.id = document.bank_id
          WHERE (?1 IS NULL OR document.bank_id = ?1)
@@ -640,6 +808,18 @@ pub fn list_payment_documents(
                     payment_system,
                     card_type,
                     amount: parse_decimal_text(row.get(5)?, 5)?,
+                    currency: row
+                        .get::<_, Option<String>>(10)?
+                        .map(|value| {
+                            value.parse().map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    10,
+                                    Type::Text,
+                                    Box::new(error),
+                                )
+                            })
+                        })
+                        .transpose()?,
                     due_date,
                     grace_period_days: row.get(7)?,
                     affects_deposit_rate: row.get(8)?,
@@ -701,6 +881,16 @@ pub fn save_payment_document(
     }
 
     let transaction = connection.unchecked_transaction()?;
+    if let Some(id) = id {
+        let incompatible = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM incomes WHERE payment_document_id = ?1 AND (?2 <> 'debit' OR currency IS NOT ?3))",
+            params![id, details.card_type.code(), details.currency.map(Currency::code)],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if incompatible {
+            return Err(DbError::IncomeCardInUse);
+        }
+    }
     for savings_id in &details.savings_ids {
         let savings_bank_id = transaction
             .query_row(
@@ -729,8 +919,8 @@ pub fn save_payment_document(
             "UPDATE payment_documents
              SET bank_id = ?1, payment_system = ?2, card_type = ?3, amount = ?4,
                  due_date = ?5, grace_period_days = ?6, affects_deposit_rate = ?7,
-                 min_monthly_spend = ?8
-             WHERE id = ?9",
+                 min_monthly_spend = ?8, currency = ?9
+             WHERE id = ?10",
             params![
                 details.bank_id,
                 details.payment_system.code(),
@@ -740,6 +930,7 @@ pub fn save_payment_document(
                 details.grace_period_days,
                 details.affects_deposit_rate,
                 min_monthly_spend,
+                details.currency.map(Currency::code),
                 id
             ],
         )?;
@@ -751,8 +942,8 @@ pub fn save_payment_document(
         transaction.execute(
             "INSERT INTO payment_documents (
                 bank_id, payment_system, card_type, amount, due_date,
-                grace_period_days, affects_deposit_rate, min_monthly_spend
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                grace_period_days, affects_deposit_rate, min_monthly_spend, currency
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 details.bank_id,
                 details.payment_system.code(),
@@ -761,7 +952,8 @@ pub fn save_payment_document(
                 due_date,
                 details.grace_period_days,
                 details.affects_deposit_rate,
-                min_monthly_spend
+                min_monthly_spend,
+                details.currency.map(Currency::code)
             ],
         )?;
         transaction.last_insert_rowid()
@@ -779,6 +971,13 @@ pub fn save_payment_document(
 
 /// Deletes a payment document and only its associated rate links.
 pub fn delete_payment_document(connection: &Connection, id: i64) -> Result<(), DbError> {
+    if connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM incomes WHERE payment_document_id = ?1)",
+        [id],
+        |row| row.get::<_, bool>(0),
+    )? {
+        return Err(DbError::IncomeCardInUse);
+    }
     let deleted = connection.execute("DELETE FROM payment_documents WHERE id = ?1", [id])?;
     if deleted == 0 {
         return Err(rusqlite::Error::QueryReturnedNoRows.into());
@@ -1170,6 +1369,7 @@ mod tests {
             payment_system: PaymentSystem::MasterCard,
             card_type: PaymentCardType::Debit,
             amount: Decimal::from_str("12345678901234567890.1234").unwrap(),
+            currency: None,
             due_date: None,
             grace_period_days: None,
             affects_deposit_rate: false,
@@ -1237,7 +1437,7 @@ mod tests {
                         )
                         .unwrap();
                 }
-                4 => {}
+                4 | 5 => {}
                 _ => unreachable!(),
             }
         }
@@ -1254,14 +1454,14 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v5-")
+                    .starts_with("data.before-migration-v6-")
             })
             .count()
     }
 
     #[test]
     fn initialize_migrates_supported_versions_and_preserves_backup_and_data() {
-        for version in 1..=4 {
+        for version in 1..=5 {
             let directory = tempfile::tempdir().unwrap();
             let database_path = directory.path().join("data.db");
             drop(create_legacy_database(&database_path, version));
@@ -1272,7 +1472,7 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap();
-            assert_eq!(latest_version, 5);
+            assert_eq!(latest_version, 6);
 
             let income_count = connection
                 .query_row("SELECT COUNT(*) FROM incomes", [], |row| {
@@ -1400,7 +1600,7 @@ mod tests {
                     entry
                         .file_name()
                         .to_string_lossy()
-                        .starts_with("data.before-migration-v5-")
+                        .starts_with("data.before-migration-v6-")
                 })
                 .expect("upgrade should create a backup")
                 .path();
@@ -1586,7 +1786,7 @@ mod tests {
                 row.get::<_, i64>(0)
             })
             .unwrap();
-        assert_eq!(schema_version, 5);
+        assert_eq!(schema_version, 6);
     }
 
     #[test]
@@ -1605,8 +1805,222 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
             .unwrap();
 
-        assert_eq!(migration_count, 5);
+        assert_eq!(migration_count, 6);
         assert_eq!(foreign_keys_enabled, 1);
+    }
+
+    #[test]
+    fn migration_adds_optional_card_currency_and_zero_debit_balance() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+
+        let currency_column_exists = connection
+            .query_row(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pragma_table_info('payment_documents') WHERE name = 'currency'
+                )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap();
+        let income_card_column_exists = connection
+            .query_row(
+                "SELECT EXISTS (
+                    SELECT 1 FROM pragma_table_info('incomes') WHERE name = 'payment_document_id'
+                )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap();
+        assert!(currency_column_exists);
+        assert!(income_card_column_exists);
+
+        save_bank(&connection, None, "Банк", "").unwrap();
+        connection
+            .execute(
+                "INSERT INTO payment_documents (
+                    bank_id, payment_system, card_type, amount, currency
+                ) VALUES (1, 'VISA', 'debit', '0', 'RUB')",
+                [],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn migration_v6_preserves_cards_and_rate_link_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.db");
+        let legacy = create_legacy_database(&path, 5);
+        legacy.execute_batch("INSERT INTO payment_documents (id, bank_id, payment_system, card_type, amount, affects_deposit_rate, min_monthly_spend) VALUES (9, 1, 'MIR', 'debit', '10.25', 1, '20'); INSERT INTO document_rate_links (id, document_id, savings_id) VALUES (17, 9, 1);").unwrap();
+        drop(legacy);
+        let database = initialize(&path).unwrap();
+        let card = database
+            .query_row(
+                "SELECT amount, currency FROM payment_documents WHERE id = 9",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(card, ("10.25".to_owned(), None));
+        let link = database
+            .query_row(
+                "SELECT id, document_id, savings_id FROM document_rate_links",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(link, (17, 9, 1));
+        assert_eq!(
+            database
+                .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert_eq!(migration_backup_count(directory.path()), 1);
+    }
+
+    #[test]
+    fn income_card_credits_follow_edits_transfer_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = initialize(&dir.path().join("data.db")).unwrap();
+        let bank = save_bank(&db, None, "Банк", "").unwrap();
+        let category =
+            save_category(&db, TransactionKind::Income, None, "Доход", None, true).unwrap();
+        let mut details = payment_document_details(bank);
+        details.amount = Decimal::ZERO;
+        details.currency = Some(Currency::Rub);
+        let first = save_payment_document(&db, None, &details).unwrap();
+        details.amount = Decimal::from(5);
+        let second = save_payment_document(&db, None, &details).unwrap();
+        let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let save = |id, amount, card| {
+            super::save_transaction_with_card(
+                &db,
+                TransactionKind::Income,
+                id,
+                date,
+                category,
+                amount,
+                Currency::Rub,
+                "",
+                card,
+            )
+        };
+        let amount = Decimal::from_str("10.25").unwrap();
+        let id = save(None, amount, Some(first)).unwrap();
+        let balance = |card| {
+            db.query_row(
+                "SELECT amount FROM payment_documents WHERE id = ?1",
+                [card],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(balance(first), "10.25");
+        assert_eq!(
+            list_transactions(&db, TransactionKind::Income, None, None, None, "").unwrap()[0]
+                .payment_document_id,
+            Some(first)
+        );
+        save(Some(id), Decimal::from(12), Some(first)).unwrap();
+        assert_eq!(balance(first), "12");
+        save(Some(id), Decimal::from(7), Some(second)).unwrap();
+        assert_eq!(balance(first), "0");
+        assert_eq!(balance(second), "12");
+        super::delete_transaction(&db, TransactionKind::Income, id).unwrap();
+        assert_eq!(balance(second), "5");
+    }
+
+    #[test]
+    fn income_card_rejects_invalid_cards_and_rolls_back_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = initialize(&dir.path().join("data.db")).unwrap();
+        let bank = save_bank(&db, None, "Банк", "").unwrap();
+        let category =
+            save_category(&db, TransactionKind::Income, None, "Доход", None, true).unwrap();
+        let mut details = payment_document_details(bank);
+        details.amount = Decimal::ZERO;
+        details.currency = Some(Currency::Rub);
+        let first = save_payment_document(&db, None, &details).unwrap();
+        details.amount = Decimal::MAX;
+        let full = save_payment_document(&db, None, &details).unwrap();
+        details.card_type = PaymentCardType::Credit;
+        details.due_date = NaiveDate::from_ymd_opt(2024, 2, 1);
+        details.grace_period_days = Some(30);
+        let credit = save_payment_document(&db, None, &details).unwrap();
+        let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let save = |id, amount, currency, card| {
+            super::save_transaction_with_card(
+                &db,
+                TransactionKind::Income,
+                id,
+                date,
+                category,
+                amount,
+                currency,
+                "",
+                Some(card),
+            )
+        };
+        assert!(matches!(
+            save(None, Decimal::ONE, Currency::Rub, credit),
+            Err(DbError::IncomeCardUnavailable)
+        ));
+        assert!(matches!(
+            save(None, Decimal::ONE, Currency::Usd, first),
+            Err(DbError::IncomeCardUnavailable)
+        ));
+        assert!(matches!(
+            save(None, Decimal::ONE, Currency::Rub, full),
+            Err(DbError::CardBalanceOverflow)
+        ));
+        assert!(matches!(
+            save(None, Decimal::from_str("0.1").unwrap(), Currency::Rub, full),
+            Err(DbError::CardBalanceOverflow)
+        ));
+        let id = save(None, Decimal::from(10), Currency::Rub, first).unwrap();
+        assert!(matches!(
+            save(Some(id), Decimal::ONE, Currency::Rub, full),
+            Err(DbError::CardBalanceOverflow)
+        ));
+        let balance: String = db
+            .query_row(
+                "SELECT amount FROM payment_documents WHERE id = ?1",
+                [first],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(balance, "10");
+        assert!(matches!(
+            delete_payment_document(&db, first),
+            Err(DbError::IncomeCardInUse)
+        ));
+        db.execute(
+            "UPDATE payment_documents SET amount = '0' WHERE id = ?1",
+            [first],
+        )
+        .unwrap();
+        assert!(matches!(
+            super::delete_transaction(&db, TransactionKind::Income, id),
+            Err(DbError::InsufficientCardBalance)
+        ));
+        let income = list_transactions(&db, TransactionKind::Income, None, None, None, "").unwrap();
+        assert_eq!(income.len(), 1);
+        assert_eq!(income[0].payment_document_id, Some(first));
+        assert!(db
+            .execute(
+                "UPDATE payment_documents SET currency = 'USD' WHERE id = ?1",
+                [first]
+            )
+            .is_err());
     }
 
     #[test]
@@ -2028,7 +2442,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .contains("before-migration-v5")
+                    .contains("before-migration-v6")
             })
             .count();
 
@@ -2225,7 +2639,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v5-")
+                    .starts_with("data.before-migration-v6-")
             })
             .expect("upgrade from V4 should create a backup")
             .path();
@@ -2237,7 +2651,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(savings_dates, (None, None));
-        assert_eq!(migration_version, 5);
+        assert_eq!(migration_version, 6);
         assert_eq!(backup_version, 4);
     }
 

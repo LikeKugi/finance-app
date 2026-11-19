@@ -1,8 +1,8 @@
 use chrono::NaiveDate;
 use eframe::egui;
 use finance_core::{
-    canonical_amount, parse_amount, Bank, PaymentCardType, PaymentDocument, PaymentDocumentDetails,
-    PaymentSystem, SavingsAccount,
+    canonical_amount, parse_amount, parse_non_negative_decimal, Bank, Currency, PaymentCardType,
+    PaymentDocument, PaymentDocumentDetails, PaymentSystem, SavingsAccount,
 };
 use finance_db::{self, Database};
 
@@ -28,6 +28,7 @@ struct PaymentDocumentForm {
     payment_system: Option<PaymentSystem>,
     card_type: Option<PaymentCardType>,
     amount: String,
+    currency: Option<Currency>,
     due_date: String,
     grace_period_days: String,
     affects_deposit_rate: bool,
@@ -219,22 +220,31 @@ impl PaymentDocumentsPage {
                     .min_col_width(95.0)
                     .show(ui, |ui| {
                         for title in [
+                            "Действия",
                             "Банк",
                             "Платёжная система",
                             "Тип",
                             "Сумма",
+                            "Валюта",
                             "Дата платежа",
                             "Льготный период, дни",
                             "Условие ставки",
                             "Минимум трат",
                             "Связанные накопления",
-                            "Действия",
                         ] {
                             ui.strong(title);
                         }
                         ui.end_row();
 
                         for document in &entries {
+                            let (edit_clicked, delete_clicked) = ui
+                                .horizontal(|ui| {
+                                    (
+                                        ui.small_button("Изменить").clicked(),
+                                        ui.small_button("Удалить").clicked(),
+                                    )
+                                })
+                                .inner;
                             ui.label(&document.bank_name);
                             ui.label(document.payment_system.code());
                             ui.label(document.card_type.title());
@@ -246,6 +256,11 @@ impl PaymentDocumentsPage {
                                 "{amount_label}: {}",
                                 canonical_amount(document.amount)
                             ));
+                            ui.label(
+                                document
+                                    .currency
+                                    .map_or("валюта не указана", Currency::code),
+                            );
                             ui.label(document.due_date.map_or_else(String::new, |date| {
                                 date.format("%Y-%m-%d").to_string()
                             }));
@@ -278,8 +293,6 @@ impl PaymentDocumentsPage {
                                     .collect::<Vec<_>>()
                                     .join(", "),
                             );
-                            let edit_clicked = ui.small_button("Изменить").clicked();
-                            let delete_clicked = ui.small_button("Удалить").clicked();
                             ui.end_row();
 
                             if edit_clicked {
@@ -315,6 +328,7 @@ impl PaymentDocumentsPage {
             payment_system: Some(document.payment_system),
             card_type: Some(document.card_type),
             amount: canonical_amount(document.amount),
+            currency: document.currency,
             due_date: document
                 .due_date
                 .map_or_else(String::new, |date| date.format("%Y-%m-%d").to_string()),
@@ -419,6 +433,23 @@ impl PaymentDocumentsPage {
                     .desired_width(140.0)
                     .hint_text("Например, 100000"),
             );
+            ui.label("Валюта карты");
+            egui::ComboBox::from_id_salt("payment_documents_form_currency")
+                .selected_text(
+                    self.form
+                        .currency
+                        .map_or("валюта не указана", Currency::code),
+                )
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.form.currency, None, "валюта не указана");
+                    for currency in Currency::ALL {
+                        ui.selectable_value(
+                            &mut self.form.currency,
+                            Some(currency),
+                            currency.code(),
+                        );
+                    }
+                });
             if card_type == Some(PaymentCardType::Credit) {
                 ui.label("Дата платежа (ГГГГ-ММ-ДД)");
                 ui.add(
@@ -529,7 +560,11 @@ impl PaymentDocumentsPage {
             .form
             .card_type
             .ok_or_else(|| "Выберите тип карты".to_owned())?;
-        let amount = parse_amount(&self.form.amount).map_err(|error| error.to_string())?;
+        let amount = match card_type {
+            PaymentCardType::Debit => parse_non_negative_decimal(&self.form.amount),
+            PaymentCardType::Credit => parse_amount(&self.form.amount),
+        }
+        .map_err(|error| error.to_string())?;
         let (due_date, grace_period_days) = match card_type {
             PaymentCardType::Debit => (None, None),
             PaymentCardType::Credit => {
@@ -557,6 +592,7 @@ impl PaymentDocumentsPage {
             payment_system,
             card_type,
             amount,
+            currency: self.form.currency,
             due_date,
             grace_period_days,
             affects_deposit_rate: self.form.affects_deposit_rate,
@@ -624,11 +660,11 @@ impl PaymentDocumentsPage {
 #[cfg(test)]
 mod tests {
     use eframe::egui;
+    use finance_core::{Currency, PaymentCardType};
 
     use super::PaymentDocumentsPage;
 
-    #[test]
-    fn payment_documents_table_renders_at_minimum_window_size() {
+    fn database_with_bank() -> finance_db::Database {
         let database = finance_db::Database::open_in_memory().unwrap();
         database
             .execute_batch(include_str!("../../db/migrations/V1__initial.sql"))
@@ -647,12 +683,31 @@ mod tests {
             ))
             .unwrap();
         database
+            .execute_batch(include_str!("../../db/migrations/V5__savings_dates.sql"))
+            .unwrap();
+        database
+            .execute_batch(include_str!(
+                "../../db/migrations/V6__income_card_balances.sql"
+            ))
+            .unwrap();
+        database
+            .execute_batch("INSERT INTO banks (id, name) VALUES (1, 'Банк Альфа');")
+            .unwrap();
+        database
+    }
+
+    #[test]
+    fn payment_documents_table_renders_at_minimum_window_size() {
+        let database = database_with_bank();
+        database
             .execute_batch(
-                "INSERT INTO banks (id, name) VALUES (1, 'Банк Альфа');
-                 INSERT INTO payment_documents (
+                "INSERT INTO payment_documents (
                      id, bank_id, payment_system, card_type, amount, due_date,
                      grace_period_days, affects_deposit_rate, min_monthly_spend
-                 ) VALUES (1, 1, 'MasterCard', 'credit', '50000', '2026-12-01', 55, 0, NULL);",
+                 ) VALUES (1, 1, 'MasterCard', 'credit', '50000', '2026-12-01', 55, 0, NULL);
+                 INSERT INTO payment_documents (
+                     id, bank_id, payment_system, card_type, amount, currency
+                 ) VALUES (2, 1, 'VISA', 'debit', '10', 'USD');",
             )
             .unwrap();
         let banks = finance_db::list_banks(&database).unwrap();
@@ -690,7 +745,66 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(rendered_text.contains(&"Банк Альфа"));
         assert!(rendered_text.contains(&"Кредитный лимит: 50000"));
+        assert!(rendered_text.contains(&"валюта не указана"));
+        assert!(rendered_text.contains(&"USD"));
         assert!(rendered_text.contains(&"Платёжная система"));
         assert!(rendered_text.contains(&"Удалить"));
+    }
+
+    #[test]
+    fn new_debit_card_saves_zero_balance_without_automatic_currency() {
+        let database = database_with_bank();
+        let mut page = PaymentDocumentsPage::default();
+        page.begin_new(&database, Some(1)).unwrap();
+        assert_eq!(page.form.currency, None);
+        page.form.amount = "0".to_owned();
+
+        page.save(&database).unwrap();
+        page.refresh(&database).unwrap();
+        assert_eq!(page.entries[0].currency, None);
+        assert_eq!(page.entries[0].amount.to_string(), "0");
+        page.begin_edit(&database, page.entries[0].id).unwrap();
+        assert_eq!(page.form.currency, None);
+    }
+
+    #[test]
+    fn editing_card_preserves_changes_and_clears_currency() {
+        let database = database_with_bank();
+        let mut page = PaymentDocumentsPage::default();
+        page.begin_new(&database, Some(1)).unwrap();
+        page.form.amount = "10".to_owned();
+        page.form.currency = Some(Currency::Rub);
+        page.save(&database).unwrap();
+        page.refresh(&database).unwrap();
+        let id = page.entries[0].id;
+
+        page.begin_edit(&database, id).unwrap();
+        assert_eq!(page.form.currency, Some(Currency::Rub));
+        page.form.currency = Some(Currency::Usd);
+        page.save(&database).unwrap();
+        page.refresh(&database).unwrap();
+        page.begin_edit(&database, id).unwrap();
+        assert_eq!(page.form.currency, Some(Currency::Usd));
+        page.form.currency = None;
+        page.save(&database).unwrap();
+        page.refresh(&database).unwrap();
+        assert_eq!(page.entries[0].currency, None);
+    }
+
+    #[test]
+    fn negative_debit_balance_and_zero_credit_limit_are_rejected() {
+        let database = database_with_bank();
+        let mut page = PaymentDocumentsPage::default();
+        page.begin_new(&database, Some(1)).unwrap();
+        page.form.amount = "-1".to_owned();
+        assert!(page.save(&database).is_err());
+
+        page.form.card_type = Some(PaymentCardType::Credit);
+        page.form.amount = "0".to_owned();
+        page.form.due_date = "2026-12-01".to_owned();
+        page.form.grace_period_days = "55".to_owned();
+        assert!(page.save(&database).is_err());
+        page.refresh(&database).unwrap();
+        assert!(page.entries.is_empty());
     }
 }

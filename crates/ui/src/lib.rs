@@ -5,7 +5,7 @@ use chrono::NaiveDate;
 use eframe::egui;
 use finance_core::{
     parse_amount_expression, summarize_transaction_balance, Bank, Category, Currency,
-    FinancialTransaction, TransactionBalance, TransactionKind,
+    FinancialTransaction, PaymentCardType, PaymentDocument, TransactionBalance, TransactionKind,
 };
 use finance_db::{self, Database};
 use rust_decimal::Decimal;
@@ -139,6 +139,7 @@ struct TransactionForm {
     amount: String,
     currency: Option<Currency>,
     comment: String,
+    payment_document_id: Option<i64>,
 }
 
 #[derive(Default)]
@@ -168,6 +169,7 @@ struct FinanceApp {
     analysis_expense_categories: Vec<Category>,
     banks: Vec<Bank>,
     transaction_form: TransactionForm,
+    income_cards: Vec<PaymentDocument>,
     category_form: CategoryForm,
     bank_form: BankForm,
     savings_page: SavingsPage,
@@ -212,6 +214,7 @@ impl FinanceApp {
             analysis_expense_categories: Vec::new(),
             banks: Vec::new(),
             transaction_form: TransactionForm::default(),
+            income_cards: Vec::new(),
             category_form: CategoryForm::default(),
             bank_form: BankForm::default(),
             savings_page: SavingsPage::default(),
@@ -382,6 +385,9 @@ impl FinanceApp {
     }
 
     fn start_new_transaction(&mut self) {
+        if self.active_tab == ModuleTab::Income && !self.load_income_cards() {
+            return;
+        }
         self.transaction_date_input.reset();
         self.transaction_form = TransactionForm {
             date: chrono::Local::now()
@@ -400,6 +406,9 @@ impl FinanceApp {
     }
 
     fn edit_transaction(&mut self, transaction: &FinancialTransaction) {
+        if self.active_tab == ModuleTab::Income && !self.load_income_cards() {
+            return;
+        }
         self.transaction_date_input.reset();
         self.transaction_form = TransactionForm {
             id: Some(transaction.id),
@@ -408,8 +417,27 @@ impl FinanceApp {
             amount: transaction.amount.to_string(),
             currency: Some(transaction.currency),
             comment: transaction.comment.clone(),
+            payment_document_id: transaction.payment_document_id,
         };
         self.show_transaction_form = true;
+    }
+
+    fn load_income_cards(&mut self) -> bool {
+        match finance_db::list_payment_documents(
+            &self.database,
+            None,
+            Some(PaymentCardType::Debit),
+            None,
+        ) {
+            Ok(cards) => {
+                self.income_cards = cards;
+                true
+            }
+            Err(error) => {
+                self.show_error(error.to_string());
+                false
+            }
+        }
     }
 
     fn save_transaction(&mut self, kind: TransactionKind) {
@@ -435,7 +463,7 @@ impl FinanceApp {
             self.show_error("Выберите валюту".to_owned());
             return;
         };
-        match finance_db::save_transaction(
+        match finance_db::save_transaction_with_card(
             &self.database,
             kind,
             self.transaction_form.id,
@@ -444,6 +472,7 @@ impl FinanceApp {
             amount,
             currency,
             &self.transaction_form.comment,
+            self.transaction_form.payment_document_id,
         ) {
             Ok(_) => {
                 self.show_transaction_form = false;
@@ -750,6 +779,7 @@ impl FinanceApp {
             "Новая операция"
         });
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 16.0;
             ui.label("Дата");
             date_input(
                 ui,
@@ -758,6 +788,28 @@ impl FinanceApp {
                 &mut self.transaction_date_input,
                 95.0,
             );
+            ui.label("Сумма");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.transaction_form.amount)
+                    .desired_width(180.0)
+                    .hint_text("например: 100 + 200 + 347"),
+            );
+            ui.label("Валюта");
+            let selected_currency = self
+                .transaction_form
+                .currency
+                .map_or("Выберите", Currency::code);
+            egui::ComboBox::from_id_salt("transaction_currency")
+                .selected_text(selected_currency)
+                .show_ui(ui, |ui| {
+                    for currency in Currency::ALL {
+                        ui.selectable_value(
+                            &mut self.transaction_form.currency,
+                            Some(currency),
+                            currency.code(),
+                        );
+                    }
+                });
             ui.label("Категория");
             let category_labels = category_tree_labels(&self.categories);
             let selected_category = self
@@ -792,31 +844,54 @@ impl FinanceApp {
                     }
                 });
         });
-        ui.horizontal(|ui| {
-            ui.label("Сумма");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.transaction_form.amount)
-                    .desired_width(180.0)
-                    .hint_text("например: 100 + 200 + 347"),
-            );
-            ui.label("Валюта");
-            let selected_currency = self
-                .transaction_form
-                .currency
-                .map_or("Выберите", Currency::code);
-            egui::ComboBox::from_id_salt("transaction_currency")
-                .selected_text(selected_currency)
-                .show_ui(ui, |ui| {
-                    for currency in Currency::ALL {
+        ui.add_space(8.0);
+        if kind == TransactionKind::Income {
+            ui.horizontal(|ui| {
+                ui.label("Зачислить на карту");
+                let selected = self
+                    .income_cards
+                    .iter()
+                    .find(|card| Some(card.id) == self.transaction_form.payment_document_id)
+                    .map(income_card_label)
+                    .unwrap_or_else(|| "Без карты".to_owned());
+                egui::ComboBox::from_id_salt("income_card")
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
                         ui.selectable_value(
-                            &mut self.transaction_form.currency,
-                            Some(currency),
-                            currency.code(),
+                            &mut self.transaction_form.payment_document_id,
+                            None,
+                            "Без карты",
                         );
-                    }
-                });
-        });
+                        for card in &self.income_cards {
+                            if card.currency == self.transaction_form.currency
+                                && card.currency.is_some()
+                            {
+                                ui.selectable_value(
+                                    &mut self.transaction_form.payment_document_id,
+                                    Some(card.id),
+                                    income_card_label(card),
+                                );
+                            }
+                        }
+                    });
+                if self.transaction_form.payment_document_id.is_some()
+                    && !self.income_cards.iter().any(|card| {
+                        Some(card.id) == self.transaction_form.payment_document_id
+                            && card.currency == self.transaction_form.currency
+                            && card.currency.is_some()
+                    })
+                {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        "Выберите карту в валюте дохода или отмените выбор карты",
+                    );
+                }
+            });
+            ui.weak("Доступны дебетовые карты с указанной валютой. Для старых карт сначала укажите валюту в платёжных документах.");
+            ui.add_space(8.0);
+        }
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 16.0;
             ui.label("Комментарий");
             ui.add(
                 egui::TextEdit::multiline(&mut self.transaction_form.comment)
@@ -824,26 +899,30 @@ impl FinanceApp {
                     .desired_rows(3),
             );
         });
-        if !self.transaction_form.amount.trim().is_empty() {
-            match parse_amount_expression(&self.transaction_form.amount) {
-                Ok(total) => {
-                    ui.label(format!("Итого: {total}"));
-                }
-                Err(_) => {
-                    ui.colored_label(
-                        egui::Color32::RED,
-                        "Введите положительные суммы, разделённые знаком +",
-                    );
-                }
-            }
-        }
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.button("Сохранить").clicked() {
-                self.save_transaction(kind);
+            ui.spacing_mut().item_spacing.x = 12.0;
+            if !self.transaction_form.amount.trim().is_empty() {
+                match parse_amount_expression(&self.transaction_form.amount) {
+                    Ok(total) => {
+                        ui.label(format!("Итого: {total}"));
+                    }
+                    Err(_) => {
+                        ui.colored_label(
+                            egui::Color32::RED,
+                            "Введите положительные суммы, разделённые знаком +",
+                        );
+                    }
+                }
             }
-            if ui.button("Отмена").clicked() {
-                self.show_transaction_form = false;
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Отмена").clicked() {
+                    self.show_transaction_form = false;
+                }
+                if ui.button("Сохранить").clicked() {
+                    self.save_transaction(kind);
+                }
+            });
         });
     }
 
@@ -1333,6 +1412,16 @@ impl eframe::App for FinanceApp {
     }
 }
 
+fn income_card_label(card: &PaymentDocument) -> String {
+    format!(
+        "{} — {} #{} ({})",
+        card.bank_name,
+        card.payment_system.code(),
+        card.id,
+        card.currency.map_or("валюта не указана", Currency::code)
+    )
+}
+
 fn category_tree_rows(categories: &[Category]) -> Vec<(usize, usize)> {
     let mut category_ids = HashSet::with_capacity(categories.len());
     let mut children_by_parent = HashMap::<i64, Vec<usize>>::new();
@@ -1464,6 +1553,22 @@ mod tests {
                 "../../db/migrations/V2__transactions_and_directories.sql"
             ))
             .expect("transaction migration should apply");
+        database
+            .execute_batch(include_str!("../../db/migrations/V3__savings.sql"))
+            .unwrap();
+        database
+            .execute_batch(include_str!(
+                "../../db/migrations/V4__payment_documents.sql"
+            ))
+            .unwrap();
+        database
+            .execute_batch(include_str!("../../db/migrations/V5__savings_dates.sql"))
+            .unwrap();
+        database
+            .execute_batch(include_str!(
+                "../../db/migrations/V6__income_card_balances.sql"
+            ))
+            .unwrap();
 
         let (category_table, transaction_table, active_tab) = match kind {
             TransactionKind::Income => ("income_categories", "incomes", ModuleTab::Income),
@@ -1497,6 +1602,59 @@ mod tests {
             "fixture should match all filters"
         );
         app
+    }
+
+    #[test]
+    fn income_form_credits_card_and_preserves_selection_when_editing() {
+        let mut app = filtered_transaction_app(TransactionKind::Income);
+        let bank = finance_db::save_bank(&app.database, None, "Банк", "").unwrap();
+        let card = finance_db::save_payment_document(
+            &app.database,
+            None,
+            &finance_core::PaymentDocumentDetails {
+                bank_id: bank,
+                payment_system: finance_core::PaymentSystem::Mir,
+                card_type: finance_core::PaymentCardType::Debit,
+                amount: 0.into(),
+                currency: Some(Currency::Rub),
+                due_date: None,
+                grace_period_days: None,
+                affects_deposit_rate: false,
+                min_monthly_spend: None,
+                savings_ids: Vec::new(),
+            },
+        )
+        .unwrap();
+        app.start_new_transaction();
+        app.transaction_form.date = "2024-01-20".to_owned();
+        app.transaction_form.category_id = Some(1);
+        app.transaction_form.amount = "12.50".to_owned();
+        app.transaction_form.comment = "найти".to_owned();
+        app.transaction_form.payment_document_id = Some(card);
+        app.save_transaction(TransactionKind::Income);
+        assert!(!app.show_transaction_form);
+        let saved = app
+            .transactions
+            .iter()
+            .find(|transaction| transaction.payment_document_id == Some(card))
+            .unwrap()
+            .clone();
+        assert_eq!(
+            finance_db::list_payment_documents(&app.database, None, None, None).unwrap()[0]
+                .amount
+                .to_string(),
+            "12.5"
+        );
+        app.edit_transaction(&saved);
+        assert_eq!(app.transaction_form.payment_document_id, Some(card));
+        app.transaction_form.amount = "15".to_owned();
+        app.save_transaction(TransactionKind::Income);
+        assert_eq!(
+            finance_db::list_payment_documents(&app.database, None, None, None).unwrap()[0]
+                .amount
+                .to_string(),
+            "15"
+        );
     }
 
     #[test]
@@ -1657,6 +1815,32 @@ mod tests {
             ));
         }
         output.expect("transaction screen should render twice")
+    }
+
+    fn render_transaction_form_at_width(
+        app: &mut FinanceApp,
+        context: &egui::Context,
+        kind: TransactionKind,
+        width: f32,
+    ) -> egui::FullOutput {
+        let mut output = None;
+        for _ in 0..2 {
+            output = Some(context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 720.0),
+                    )),
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default().show(context, |ui| {
+                        app.render_transaction_form(ui, kind);
+                    });
+                },
+            ));
+        }
+        output.expect("transaction form should render twice")
     }
 
     fn render_directories_at_width(
@@ -1999,6 +2183,66 @@ mod tests {
                     assert!(actions_header.x < width);
                 } else {
                     assert!(action_positions.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn income_and_expense_forms_keep_requested_field_and_footer_layout() {
+        for kind in [TransactionKind::Income, TransactionKind::Expense] {
+            for width in [1_280.0, 1_920.0] {
+                for (amount, footer_text) in [
+                    ("10 + 20", "Итого: 30"),
+                    ("10 +", "Введите положительные суммы, разделённые знаком +"),
+                ] {
+                    let mut app = filtered_transaction_app(kind);
+                    app.transaction_form = super::TransactionForm {
+                        date: "2024-01-15".to_owned(),
+                        category_id: Some(1),
+                        amount: amount.to_owned(),
+                        currency: Some(Currency::Rub),
+                        comment: "Тестовый комментарий".to_owned(),
+                        ..Default::default()
+                    };
+                    let context = egui::Context::default();
+                    let output = render_transaction_form_at_width(&mut app, &context, kind, width);
+
+                    let date = text_positions(&output, "Дата")[0];
+                    let amount_label = text_positions(&output, "Сумма")[0];
+                    let currency = text_positions(&output, "Валюта")[0];
+                    let category = text_positions(&output, "Категория")[0];
+                    assert!(date.x < amount_label.x);
+                    assert!(amount_label.x < currency.x);
+                    assert!(currency.x < category.x);
+                    assert!(amount_label.x - date.x > 140.0);
+                    assert!(currency.x - amount_label.x > 240.0);
+                    assert!(category.x - currency.x > 130.0);
+                    for field in [amount_label, currency, category] {
+                        assert!(
+                            (field.y - date.y).abs() < 1.0,
+                            "date, amount, currency, and category should share one row at width {width}"
+                        );
+                    }
+
+                    let comment = text_positions(&output, "Комментарий")[0];
+                    assert!(comment.y - date.y > 24.0);
+
+                    let footer = text_positions(&output, footer_text)[0];
+                    let save = text_positions(&output, "Сохранить")[0];
+                    let cancel = text_positions(&output, "Отмена")[0];
+                    assert!(footer.y - comment.y > 56.0);
+                    assert!(
+                        (footer.y - save.y).abs() < 1.0,
+                        "the total or amount error should share the buttons' row at width {width}"
+                    );
+                    assert!((save.y - cancel.y).abs() < 1.0);
+                    assert!(footer.x < save.x);
+                    assert!(save.x < cancel.x);
+                    assert!(
+                        cancel.x > width * 0.75,
+                        "save and cancel buttons should be aligned on the right at width {width}"
+                    );
                 }
             }
         }

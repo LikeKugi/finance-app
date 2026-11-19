@@ -141,6 +141,7 @@ pub struct FinancialTransaction {
     pub amount: Decimal,
     pub currency: Currency,
     pub comment: String,
+    pub payment_document_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -674,6 +675,7 @@ pub struct PaymentDocument {
     pub payment_system: PaymentSystem,
     pub card_type: PaymentCardType,
     pub amount: Decimal,
+    pub currency: Option<Currency>,
     pub due_date: Option<NaiveDate>,
     pub grace_period_days: Option<i64>,
     pub affects_deposit_rate: bool,
@@ -687,6 +689,7 @@ pub struct PaymentDocumentDetails {
     pub payment_system: PaymentSystem,
     pub card_type: PaymentCardType,
     pub amount: Decimal,
+    pub currency: Option<Currency>,
     pub due_date: Option<NaiveDate>,
     pub grace_period_days: Option<i64>,
     pub affects_deposit_rate: bool,
@@ -742,7 +745,7 @@ pub enum DomainError {
     UnknownPaymentSystem(String),
     #[error("Неизвестный тип платёжной карты: {0}")]
     UnknownPaymentCardType(String),
-    #[error("Сумма карты или кредитный лимит должны быть положительными")]
+    #[error("Баланс дебетовой карты не может быть отрицательным, а кредитный лимит должен быть положительным")]
     InvalidPaymentDocumentAmount,
     #[error("Для кредитной карты укажите дату платежа и неотрицательный льготный период; у дебетовой карты эти поля отсутствуют")]
     InvalidPaymentCardTerms,
@@ -761,7 +764,7 @@ pub fn validate_payment_document(
     min_monthly_spend: Option<Decimal>,
     savings_ids: &[i64],
 ) -> Result<(), DomainError> {
-    if amount <= Decimal::ZERO {
+    if amount < Decimal::ZERO || (card_type == PaymentCardType::Credit && amount == Decimal::ZERO) {
         return Err(DomainError::InvalidPaymentDocumentAmount);
     }
 
