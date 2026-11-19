@@ -125,6 +125,8 @@ struct FinanceApp {
     active_tab: ModuleTab,
     transactions: Vec<FinancialTransaction>,
     categories: Vec<Category>,
+    analysis_income_categories: Vec<Category>,
+    analysis_expense_categories: Vec<Category>,
     banks: Vec<Bank>,
     transaction_form: TransactionForm,
     category_form: CategoryForm,
@@ -165,6 +167,8 @@ impl FinanceApp {
             active_tab: ModuleTab::Income,
             transactions: Vec::new(),
             categories: Vec::new(),
+            analysis_income_categories: Vec::new(),
+            analysis_expense_categories: Vec::new(),
             banks: Vec::new(),
             transaction_form: TransactionForm::default(),
             category_form: CategoryForm::default(),
@@ -203,6 +207,9 @@ impl FinanceApp {
         }
         if self.active_tab == ModuleTab::Directories {
             self.refresh_directories();
+        }
+        if self.active_tab == ModuleTab::Analysis {
+            self.refresh_analysis_categories();
         }
     }
 
@@ -274,6 +281,21 @@ impl FinanceApp {
         match finance_db::list_categories(&self.database, kind, include_inactive) {
             Ok(categories) => self.categories = categories,
             Err(error) => self.show_error(error.to_string()),
+        }
+    }
+
+    fn refresh_analysis_categories(&mut self) {
+        let income_categories =
+            finance_db::list_categories(&self.database, TransactionKind::Income, true);
+        let expense_categories =
+            finance_db::list_categories(&self.database, TransactionKind::Expense, true);
+
+        match (income_categories, expense_categories) {
+            (Ok(income_categories), Ok(expense_categories)) => {
+                self.analysis_income_categories = income_categories;
+                self.analysis_expense_categories = expense_categories;
+            }
+            (Err(error), _) | (_, Err(error)) => self.show_error(error.to_string()),
         }
     }
 
@@ -1103,6 +1125,7 @@ impl eframe::App for FinanceApp {
         }
         render_analysis_footer(context, self.active_tab, &self.analysis_page);
 
+        let mut refresh_analysis_categories = false;
         egui::CentralPanel::default().show(context, |ui| {
             ui.horizontal(|ui| {
                 ui.heading(self.active_tab.title());
@@ -1214,11 +1237,19 @@ impl eframe::App for FinanceApp {
                     }
                 }
                 ModuleTab::Analysis => {
-                    self.analysis_page
-                        .render(context, ui, self.database_path.as_deref());
+                    refresh_analysis_categories = self.analysis_page.render(
+                        context,
+                        ui,
+                        self.database_path.as_deref(),
+                        &self.analysis_income_categories,
+                        &self.analysis_expense_categories,
+                    );
                 }
             }
         });
+        if refresh_analysis_categories {
+            self.refresh_analysis_categories();
+        }
         self.render_delete_confirmation(context);
     }
 }
@@ -1568,6 +1599,68 @@ mod tests {
                 (5, "Расходы → Разное".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn analysis_refresh_loads_both_category_lists_including_inactive_categories() {
+        let database =
+            finance_db::Database::open_in_memory().expect("in-memory SQLite should open");
+        database
+            .execute_batch(include_str!("../../db/migrations/V1__initial.sql"))
+            .expect("initial migration should apply");
+        database
+            .execute_batch(include_str!(
+                "../../db/migrations/V2__transactions_and_directories.sql"
+            ))
+            .expect("transaction migration should apply");
+
+        let income_parent = finance_db::save_category(
+            &database,
+            TransactionKind::Income,
+            None,
+            "Доходы",
+            None,
+            true,
+        )
+        .expect("income parent category should save");
+        let income_child = finance_db::save_category(
+            &database,
+            TransactionKind::Income,
+            None,
+            "Премии",
+            Some(income_parent),
+            false,
+        )
+        .expect("inactive income child category should save");
+        let expense_category = finance_db::save_category(
+            &database,
+            TransactionKind::Expense,
+            None,
+            "Покупки",
+            None,
+            true,
+        )
+        .expect("expense category should save");
+
+        let mut app = FinanceApp::new(database);
+        app.active_tab = ModuleTab::Analysis;
+        app.refresh_all();
+
+        assert_eq!(
+            app.analysis_income_categories
+                .iter()
+                .map(|category| category.id)
+                .collect::<Vec<_>>(),
+            vec![income_parent, income_child]
+        );
+        assert_eq!(
+            app.analysis_expense_categories
+                .iter()
+                .map(|category| category.id)
+                .collect::<Vec<_>>(),
+            vec![expense_category]
+        );
+        assert!(!app.analysis_income_categories[1].is_active);
     }
 
     #[test]

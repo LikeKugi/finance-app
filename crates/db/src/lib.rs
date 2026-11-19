@@ -161,6 +161,35 @@ pub fn load_analysis_transactions(
     to: Option<NaiveDate>,
     kind_filter: Option<TransactionKind>,
 ) -> Result<Vec<AnalysisTransaction>, DbError> {
+    load_analysis_transactions_with_filters(database_path, from, to, kind_filter, None, None)
+}
+
+/// Reads report transactions filtered independently by income and expense category.
+pub fn load_analysis_transactions_by_category(
+    database_path: &Path,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+    income_category_id: Option<i64>,
+    expense_category_id: Option<i64>,
+) -> Result<Vec<AnalysisTransaction>, DbError> {
+    load_analysis_transactions_with_filters(
+        database_path,
+        from,
+        to,
+        None,
+        income_category_id,
+        expense_category_id,
+    )
+}
+
+fn load_analysis_transactions_with_filters(
+    database_path: &Path,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+    kind_filter: Option<TransactionKind>,
+    income_category_id: Option<i64>,
+    expense_category_id: Option<i64>,
+) -> Result<Vec<AnalysisTransaction>, DbError> {
     if matches!((from, to), (Some(from), Some(to)) if from > to) {
         return Err(DbError::InvalidAnalysisDateRange);
     }
@@ -180,15 +209,20 @@ pub fn load_analysis_transactions(
         }
 
         let (table, categories) = transaction_tables(kind);
+        let category_id_filter = match kind {
+            TransactionKind::Income => income_category_id,
+            TransactionKind::Expense => expense_category_id,
+        };
         let sql = format!(
             "SELECT t.category_id, c.name, t.amount, t.currency
              FROM {table} t JOIN {categories} c ON c.id = t.category_id
              WHERE (?1 IS NULL OR t.date >= ?1)
                AND (?2 IS NULL OR t.date <= ?2)
+               AND (?3 IS NULL OR t.category_id = ?3)
              ORDER BY t.date, t.id"
         );
         let mut statement = transaction.prepare(&sql)?;
-        let rows = statement.query_map(params![from, to], |row| {
+        let rows = statement.query_map(params![from, to, category_id_filter], |row| {
             let amount_text = row.get::<_, String>(2)?;
             let amount = Decimal::from_str(&amount_text).map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
@@ -943,7 +977,8 @@ mod tests {
     use super::{
         delete_bank, delete_category, delete_payment_document, delete_savings, initialize,
         list_payment_documents, list_savings, list_transactions, load_analysis_transactions,
-        save_bank, save_category, save_payment_document, save_savings, save_transaction, DbError,
+        load_analysis_transactions_by_category, save_bank, save_category, save_payment_document,
+        save_savings, save_transaction, DbError,
     };
 
     fn savings_details(bank_id: i64) -> SavingsDetails {
@@ -1714,6 +1749,109 @@ mod tests {
         assert!(all_kinds
             .iter()
             .any(|entry| entry.amount == Decimal::from(20)));
+    }
+
+    #[test]
+    fn load_analysis_transactions_by_category_filters_income_and_expenses_independently() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let connection = initialize(&database_path).unwrap();
+        let income_category_one = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Доход 1",
+            None,
+            true,
+        )
+        .unwrap();
+        let income_category_two = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Доход 2",
+            None,
+            true,
+        )
+        .unwrap();
+        let expense_category_one = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Расход 1",
+            None,
+            true,
+        )
+        .unwrap();
+        let expense_category_two = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Расход 2",
+            None,
+            true,
+        )
+        .unwrap();
+
+        for (kind, category_id, amount) in [
+            (TransactionKind::Income, income_category_one, 10),
+            (TransactionKind::Income, income_category_two, 20),
+            (TransactionKind::Expense, expense_category_one, 30),
+            (TransactionKind::Expense, expense_category_two, 40),
+        ] {
+            save_transaction(
+                &connection,
+                kind,
+                None,
+                NaiveDate::from_ymd_opt(2027, 1, 15).unwrap(),
+                category_id,
+                Decimal::from(amount),
+                Currency::Rub,
+                "",
+            )
+            .unwrap();
+        }
+
+        let income_filter_only = load_analysis_transactions_by_category(
+            &database_path,
+            None,
+            None,
+            Some(income_category_two),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            income_filter_only
+                .iter()
+                .map(|entry| (entry.kind, entry.category_id))
+                .collect::<Vec<_>>(),
+            vec![
+                (TransactionKind::Income, income_category_two),
+                (TransactionKind::Expense, expense_category_one),
+                (TransactionKind::Expense, expense_category_two),
+            ]
+        );
+
+        let both_filters = load_analysis_transactions_by_category(
+            &database_path,
+            None,
+            None,
+            Some(income_category_two),
+            Some(expense_category_one),
+        )
+        .unwrap();
+        assert_eq!(
+            both_filters
+                .iter()
+                .map(|entry| (entry.kind, entry.category_id))
+                .collect::<Vec<_>>(),
+            vec![
+                (TransactionKind::Income, income_category_two),
+                (TransactionKind::Expense, expense_category_one),
+            ]
+        );
+        assert_eq!(income_category_one, expense_category_one);
+        assert_eq!(income_category_two, expense_category_two);
     }
 
     #[test]

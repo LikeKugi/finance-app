@@ -5,51 +5,26 @@ use std::time::{Duration, Instant};
 
 use chrono::NaiveDate;
 use eframe::egui;
-use finance_core::{summarize_analysis, AnalysisSummary, Currency, TransactionKind};
+use finance_core::{summarize_analysis, AnalysisSummary, Category, Currency, TransactionKind};
 
 use super::date_input::{date_input, DateInputState};
 
 const FILTER_DEBOUNCE: Duration = Duration::from_millis(250);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AnalysisMode {
-    All,
-    Income,
-    Expenses,
-}
-
-impl AnalysisMode {
-    const ALL: [Self; 3] = [Self::All, Self::Income, Self::Expenses];
-
-    const fn title(self) -> &'static str {
-        match self {
-            Self::All => "Все операции",
-            Self::Income => "Доходы",
-            Self::Expenses => "Расходы",
-        }
-    }
-
-    const fn transaction_kind(self) -> Option<TransactionKind> {
-        match self {
-            Self::All => None,
-            Self::Income => Some(TransactionKind::Income),
-            Self::Expenses => Some(TransactionKind::Expense),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AnalysisFilters {
     from: String,
     to: String,
-    mode: AnalysisMode,
+    income_category_id: Option<i64>,
+    expense_category_id: Option<i64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct ParsedFilters {
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
-    kind_filter: Option<TransactionKind>,
+    income_category_id: Option<i64>,
+    expense_category_id: Option<i64>,
 }
 
 struct ScheduledRequest {
@@ -68,7 +43,8 @@ struct PendingRequest {
 pub(super) struct AnalysisPage {
     from_date: String,
     to_date: String,
-    mode: Option<AnalysisMode>,
+    income_category_id: Option<i64>,
+    expense_category_id: Option<i64>,
     from_date_input: DateInputState,
     to_date_input: DateInputState,
     observed_filters: Option<AnalysisFilters>,
@@ -85,7 +61,10 @@ impl AnalysisPage {
         context: &egui::Context,
         ui: &mut egui::Ui,
         database_path: Option<&Path>,
-    ) {
+        income_categories: &[Category],
+        expense_categories: &[Category],
+    ) -> bool {
+        let mut refresh_categories = false;
         ui.horizontal_wrapped(|ui| {
             ui.label("Период с");
             date_input(
@@ -103,22 +82,28 @@ impl AnalysisPage {
                 &mut self.to_date_input,
                 112.0,
             );
-            ui.label("Режим");
-            egui::ComboBox::from_id_salt("analysis_mode")
-                .selected_text(self.mode().title())
-                .show_ui(ui, |ui| {
-                    for mode in AnalysisMode::ALL {
-                        ui.selectable_value(&mut self.mode, Some(mode), mode.title());
-                    }
-                });
+            ui.label("Категория доходов:");
+            Self::render_category_filter(
+                ui,
+                "analysis_income_category_filter",
+                &mut self.income_category_id,
+                income_categories,
+            );
+            ui.label("Категория расходов:");
+            Self::render_category_filter(
+                ui,
+                "analysis_expense_category_filter",
+                &mut self.expense_category_id,
+                expense_categories,
+            );
             if ui.button("Очистить период").clicked() {
                 self.from_date.clear();
                 self.to_date.clear();
                 self.from_date_input.reset();
                 self.to_date_input.reset();
             }
-            let refresh_clicked = ui.button("↻ Обновить").clicked();
-            if refresh_clicked {
+            refresh_categories = ui.button("↻ Обновить").clicked();
+            if refresh_categories {
                 let filters = self.filters();
                 self.schedule(filters, Instant::now());
             }
@@ -135,14 +120,14 @@ impl AnalysisPage {
         if let Some((error_filters, error)) = &self.error {
             if error_filters == &filters {
                 ui.colored_label(egui::Color32::RED, error);
-                return;
+                return refresh_categories;
             }
         }
 
         if let Some((report_filters, summary)) = &self.report {
             if report_filters == &filters {
-                Self::render_summary(ui, summary, filters.mode);
-                return;
+                Self::render_summary(ui, summary);
+                return refresh_categories;
             }
         }
 
@@ -156,6 +141,7 @@ impl AnalysisPage {
             ui.label("Загружаем операции…");
             context.request_repaint_after(Duration::from_millis(100));
         }
+        refresh_categories
     }
 
     pub(super) fn render_footer(&self, ui: &mut egui::Ui) {
@@ -168,16 +154,41 @@ impl AnalysisPage {
         );
     }
 
-    fn mode(&self) -> AnalysisMode {
-        self.mode.unwrap_or(AnalysisMode::All)
-    }
-
     fn filters(&self) -> AnalysisFilters {
         AnalysisFilters {
             from: self.from_date.trim().to_owned(),
             to: self.to_date.trim().to_owned(),
-            mode: self.mode(),
+            income_category_id: self.income_category_id,
+            expense_category_id: self.expense_category_id,
         }
+    }
+
+    fn render_category_filter(
+        ui: &mut egui::Ui,
+        id_salt: &str,
+        selected_category: &mut Option<i64>,
+        categories: &[Category],
+    ) {
+        let category_labels = super::category_tree_labels(categories);
+        let selected_name = selected_category.and_then(|id| {
+            category_labels
+                .iter()
+                .find(|(category_id, _)| *category_id == id)
+                .map(|(_, label)| label.as_str())
+        });
+        if selected_category.is_some() && selected_name.is_none() {
+            *selected_category = None;
+        }
+        let selected_name = selected_name.unwrap_or("Все");
+        egui::ComboBox::from_id_salt(id_salt)
+            .width(220.0)
+            .selected_text(selected_name)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(selected_category, None, "Все");
+                for (category_id, label) in &category_labels {
+                    ui.selectable_value(selected_category, Some(*category_id), label);
+                }
+            });
     }
 
     fn observe_filters(&mut self, filters: AnalysisFilters) {
@@ -270,13 +281,20 @@ impl AnalysisPage {
                 let ParsedFilters {
                     from,
                     to,
-                    kind_filter,
+                    income_category_id,
+                    expense_category_id,
                 } = parsed;
-                let result = finance_db::load_analysis_transactions(&path, from, to, kind_filter)
-                    .map_err(|error| error.to_string())
-                    .and_then(|transactions| {
-                        summarize_analysis(&transactions).map_err(|error| error.to_string())
-                    });
+                let result = finance_db::load_analysis_transactions_by_category(
+                    &path,
+                    from,
+                    to,
+                    income_category_id,
+                    expense_category_id,
+                )
+                .map_err(|error| error.to_string())
+                .and_then(|transactions| {
+                    summarize_analysis(&transactions).map_err(|error| error.to_string())
+                });
                 let _ = sender.send(result);
                 repaint_context.request_repaint();
             });
@@ -298,29 +316,23 @@ impl AnalysisPage {
         }
     }
 
-    fn render_summary(ui: &mut egui::Ui, summary: &AnalysisSummary, mode: AnalysisMode) {
+    fn render_summary(ui: &mut egui::Ui, summary: &AnalysisSummary) {
         if summary.totals.is_empty() {
             ui.label("За выбранный период операций нет.");
             return;
         }
 
-        if mode == AnalysisMode::All {
-            ui.columns(2, |columns| {
-                for (column, (kind, scroll_id)) in columns.iter_mut().zip([
-                    (TransactionKind::Income, "analysis_income_summary_scroll"),
-                    (TransactionKind::Expense, "analysis_expense_summary_scroll"),
-                ]) {
-                    egui::ScrollArea::vertical()
-                        .id_salt(scroll_id)
-                        .auto_shrink([false, true])
-                        .show(column, |ui| Self::render_kind_summary(ui, summary, kind));
-                }
-            });
-        } else if let Some(kind) = mode.transaction_kind() {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                Self::render_kind_summary(ui, summary, kind);
-            });
-        }
+        ui.columns(2, |columns| {
+            for (column, (kind, scroll_id)) in columns.iter_mut().zip([
+                (TransactionKind::Income, "analysis_income_summary_scroll"),
+                (TransactionKind::Expense, "analysis_expense_summary_scroll"),
+            ]) {
+                egui::ScrollArea::vertical()
+                    .id_salt(scroll_id)
+                    .auto_shrink([false, true])
+                    .show(column, |ui| Self::render_kind_summary(ui, summary, kind));
+            }
+        });
     }
 
     fn render_kind_summary(ui: &mut egui::Ui, summary: &AnalysisSummary, kind: TransactionKind) {
@@ -384,7 +396,8 @@ fn parse_filters(filters: &AnalysisFilters) -> Result<ParsedFilters, String> {
     Ok(ParsedFilters {
         from,
         to,
-        kind_filter: filters.mode.transaction_kind(),
+        income_category_id: filters.income_category_id,
+        expense_category_id: filters.expense_category_id,
     })
 }
 
@@ -399,10 +412,10 @@ fn parse_optional_date(value: &str, field_name: &str) -> Result<Option<NaiveDate
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_filters, AnalysisFilters, AnalysisMode, AnalysisPage};
+    use super::{parse_filters, AnalysisFilters, AnalysisPage};
     use eframe::egui;
     use finance_core::{
-        AnalysisCategoryTotal, AnalysisSummary, AnalysisTotal, Currency, TransactionKind,
+        AnalysisCategoryTotal, AnalysisSummary, AnalysisTotal, Category, Currency, TransactionKind,
     };
     use rust_decimal::Decimal;
 
@@ -442,11 +455,7 @@ mod tests {
         AnalysisSummary { categories, totals }
     }
 
-    fn render_summary_at_width(
-        summary: &AnalysisSummary,
-        mode: AnalysisMode,
-        width: f32,
-    ) -> egui::FullOutput {
+    fn render_summary_at_width(summary: &AnalysisSummary, width: f32) -> egui::FullOutput {
         let context = egui::Context::default();
         let mut output = None;
         for _ in 0..2 {
@@ -460,7 +469,7 @@ mod tests {
                 },
                 |context| {
                     egui::CentralPanel::default().show(context, |ui| {
-                        AnalysisPage::render_summary(ui, summary, mode);
+                        AnalysisPage::render_summary(ui, summary);
                     });
                 },
             ));
@@ -493,7 +502,8 @@ mod tests {
         let current_filters = AnalysisFilters {
             from: "2027-01-01".to_owned(),
             to: String::new(),
-            mode: AnalysisMode::All,
+            income_category_id: Some(2),
+            expense_category_id: Some(1),
         };
         page.schedule(current_filters.clone(), std::time::Instant::now());
 
@@ -511,8 +521,84 @@ mod tests {
     }
 
     #[test]
-    fn analysis_filter_defaults_to_all_operation_types() {
-        assert_eq!(AnalysisPage::default().filters().mode, AnalysisMode::All);
+    fn analysis_filters_default_to_all_income_and_expense_categories() {
+        let filters = AnalysisPage::default().filters();
+
+        assert_eq!(filters.income_category_id, None);
+        assert_eq!(filters.expense_category_id, None);
+    }
+
+    #[test]
+    fn analysis_category_filters_keep_selections_independent() {
+        let income_filter = AnalysisPage {
+            income_category_id: Some(4),
+            ..AnalysisPage::default()
+        }
+        .filters();
+        let both_filters = AnalysisPage {
+            income_category_id: Some(4),
+            expense_category_id: Some(4),
+            ..AnalysisPage::default()
+        }
+        .filters();
+
+        assert_eq!(
+            income_filter.income_category_id,
+            both_filters.income_category_id
+        );
+        assert_eq!(income_filter.expense_category_id, None);
+        assert_eq!(both_filters.expense_category_id, Some(4));
+        let parsed = super::parse_filters(&both_filters).unwrap();
+        assert_eq!(parsed.income_category_id, Some(4));
+        assert_eq!(parsed.expense_category_id, Some(4));
+    }
+
+    #[test]
+    fn analysis_category_selects_use_their_own_category_lists() {
+        let income_categories = vec![Category {
+            id: 1,
+            name: "Зарплата".to_owned(),
+            parent_id: None,
+            is_active: false,
+        }];
+        let expense_categories = vec![Category {
+            id: 1,
+            name: "Покупки".to_owned(),
+            parent_id: None,
+            is_active: true,
+        }];
+        let mut page = AnalysisPage {
+            income_category_id: Some(1),
+            expense_category_id: Some(1),
+            ..AnalysisPage::default()
+        };
+        let context = egui::Context::default();
+        let output = context.run(Default::default(), |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                page.render(context, ui, None, &income_categories, &expense_categories);
+            });
+        });
+
+        assert!(has_text(&output, "Зарплата"));
+        assert!(has_text(&output, "Покупки"));
+    }
+
+    #[test]
+    fn analysis_category_select_resets_a_removed_category_to_all() {
+        let mut selected_category = Some(404);
+        let context = egui::Context::default();
+        let _output = context.run(Default::default(), |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                AnalysisPage::render_category_filter(
+                    ui,
+                    "analysis_removed_category_filter",
+                    &mut selected_category,
+                    &[],
+                );
+            });
+        });
+
+        assert_eq!(selected_category, None);
     }
 
     #[test]
@@ -520,7 +606,8 @@ mod tests {
         let filters = AnalysisFilters {
             from: "2027-02-01".to_owned(),
             to: "2027-01-31".to_owned(),
-            mode: AnalysisMode::All,
+            income_category_id: None,
+            expense_category_id: None,
         };
 
         assert_eq!(
@@ -530,9 +617,9 @@ mod tests {
     }
 
     #[test]
-    fn all_analysis_mode_renders_income_and_expenses_in_separate_columns() {
+    fn analysis_renders_income_and_expenses_in_separate_columns() {
         let summary = summary_with_both_kinds_and_currencies();
-        let output = render_summary_at_width(&summary, AnalysisMode::All, 1_280.0);
+        let output = render_summary_at_width(&summary, 1_280.0);
 
         assert!(!output
             .shapes
@@ -556,35 +643,18 @@ mod tests {
     }
 
     #[test]
-    fn single_kind_analysis_mode_renders_only_the_selected_group() {
+    fn analysis_keeps_both_groups_visible_together() {
         let summary = summary_with_both_kinds_and_currencies();
-        for (mode, selected_heading, hidden_heading, selected_category, hidden_category) in [
-            (
-                AnalysisMode::Income,
-                "Доходы — RUB",
-                "Расходы — RUB",
-                "Зарплата",
-                "Покупки",
-            ),
-            (
-                AnalysisMode::Expenses,
-                "Расходы — RUB",
-                "Доходы — RUB",
-                "Покупки",
-                "Зарплата",
-            ),
-        ] {
-            let output = render_summary_at_width(&summary, mode, 1_280.0);
+        let output = render_summary_at_width(&summary, 1_280.0);
 
-            assert!(has_text(&output, selected_heading));
-            assert!(!has_text(&output, hidden_heading));
-            assert!(has_text(&output, selected_category));
-            assert!(!has_text(&output, hidden_category));
-        }
+        assert!(has_text(&output, "Доходы — RUB"));
+        assert!(has_text(&output, "Расходы — RUB"));
+        assert!(has_text(&output, "Зарплата"));
+        assert!(has_text(&output, "Покупки"));
     }
 
     #[test]
-    fn all_analysis_mode_shows_empty_group_message_when_only_one_kind_has_data() {
+    fn analysis_shows_empty_group_message_when_only_one_kind_has_data() {
         let mut summary = summary_with_both_kinds_and_currencies();
         summary
             .categories
@@ -592,7 +662,7 @@ mod tests {
         summary
             .totals
             .retain(|total| total.kind == TransactionKind::Income);
-        let output = render_summary_at_width(&summary, AnalysisMode::All, 1_280.0);
+        let output = render_summary_at_width(&summary, 1_280.0);
 
         assert!(has_text(&output, "Доходы — RUB"));
         assert!(has_text(
@@ -607,7 +677,7 @@ mod tests {
             categories: Vec::new(),
             totals: Vec::new(),
         };
-        let output = render_summary_at_width(&summary, AnalysisMode::All, 1_280.0);
+        let output = render_summary_at_width(&summary, 1_280.0);
 
         assert!(has_text(&output, "За выбранный период операций нет."));
     }
