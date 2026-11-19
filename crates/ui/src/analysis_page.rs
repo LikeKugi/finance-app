@@ -123,6 +123,7 @@ impl AnalysisPage {
                 self.schedule(filters, Instant::now());
             }
         });
+        ui.separator();
 
         let filters = self.filters();
         self.observe_filters(filters.clone());
