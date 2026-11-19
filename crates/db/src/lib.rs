@@ -5,7 +5,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::NaiveDate;
 use finance_core::{
-    canonical_amount, AnalysisTransaction, Bank, Category, Currency, FinancialTransaction,
+    canonical_amount, rebase_exchange_rate, validate_currency_code, validate_exchange_rate,
+    AnalysisTransaction, Bank, Category, Currency, CurrencyDefinition, FinancialTransaction,
     InterestDestination, LinkedSavingsAccount, PaymentCardType, PaymentDocument,
     PaymentDocumentDetails, PaymentSystem, SavingsAccount, SavingsDetails, SavingsTerm,
     TransactionAmount, TransactionKind,
@@ -45,6 +46,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 7,
         sql: include_str!("../migrations/V7__expense_cards.sql"),
     },
+    Migration {
+        version: 8,
+        sql: include_str!("../migrations/V8__currencies.sql"),
+    },
 ];
 
 struct Migration {
@@ -69,6 +74,8 @@ pub enum DbError {
     InvalidMigrationHistory,
     #[error("База данных изменилась во время подготовки обновления; повторите запуск")]
     ConcurrentDatabaseModification,
+    #[error("Проверка внешних ключей после миграции не пройдена: {0}")]
+    ForeignKeyIntegrity(String),
     #[error("Сумма должна быть положительным числом")]
     InvalidAmount,
     #[error("Категория не найдена или неактивна")]
@@ -103,6 +110,14 @@ pub enum DbError {
     IncomeCardInUse,
     #[error("Карта связана с расходами: нельзя удалить её, изменить её валюту или отключить влияние на ставку")]
     ExpenseCardInUse,
+    #[error("Валюта не найдена")]
+    CurrencyNotFound,
+    #[error("Для выбранной основной валюты не задан курс")]
+    PrimaryCurrencyRateUnavailable,
+    #[error("Для основной валюты нельзя задать курс относительно самой себя")]
+    PrimaryCurrencyRateImmutable,
+    #[error("В базе данных должна быть ровно одна основная валюта")]
+    InvalidPrimaryCurrencyConfiguration,
     #[error(transparent)]
     Domain(#[from] finance_core::DomainError),
 }
@@ -124,6 +139,165 @@ pub fn initialize(path: &Path) -> Result<Connection, DbError> {
     apply_migrations(&mut connection, path)?;
 
     Ok(connection)
+}
+
+/// Returns the configured currencies, including the primary currency and known rates.
+pub fn list_currencies(connection: &Connection) -> Result<Vec<CurrencyDefinition>, DbError> {
+    let mut statement = connection.prepare(
+        "SELECT code, name, is_primary, rate_to_primary, rate_date
+         FROM currencies
+         ORDER BY is_primary DESC, code",
+    )?;
+    let currencies = statement
+        .query_map([], |row| {
+            let rate_text = row.get::<_, Option<String>>(3)?;
+            let rate_to_primary = rate_text
+                .map(|rate| {
+                    Decimal::from_str(&rate).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(3, Type::Text, Box::new(error))
+                    })
+                })
+                .transpose()?;
+            let date_text = row.get::<_, Option<String>>(4)?;
+            let rate_date = date_text
+                .map(|date| {
+                    NaiveDate::parse_from_str(&date, "%Y-%m-%d").map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
+                    })
+                })
+                .transpose()?;
+            Ok(CurrencyDefinition {
+                code: row.get(0)?,
+                name: row.get(1)?,
+                is_primary: row.get(2)?,
+                rate_to_primary,
+                rate_date,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(currencies)
+}
+
+/// Adds a currency with no known rate relative to the current primary currency.
+pub fn add_currency(connection: &Connection, code: &str, name: &str) -> Result<(), DbError> {
+    validate_currency_code(code)?;
+    if name.trim().is_empty() {
+        return Err(DbError::EmptyName);
+    }
+    connection.execute(
+        "INSERT INTO currencies (code, name) VALUES (?1, ?2)",
+        params![code, name.trim()],
+    )?;
+    Ok(())
+}
+
+/// Sets a non-primary currency's positive rate and the date the rate applies to.
+pub fn set_currency_exchange_rate(
+    connection: &Connection,
+    code: &str,
+    rate: Decimal,
+    rate_date: NaiveDate,
+) -> Result<(), DbError> {
+    validate_currency_code(code)?;
+    validate_exchange_rate(rate)?;
+    let is_primary = connection
+        .query_row(
+            "SELECT is_primary FROM currencies WHERE code = ?1",
+            [code],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()?
+        .ok_or(DbError::CurrencyNotFound)?;
+    if is_primary {
+        return Err(DbError::PrimaryCurrencyRateImmutable);
+    }
+    connection.execute(
+        "UPDATE currencies SET rate_to_primary = ?1, rate_date = ?2 WHERE code = ?3",
+        params![
+            canonical_amount(rate),
+            rate_date.format("%Y-%m-%d").to_string(),
+            code
+        ],
+    )?;
+    Ok(())
+}
+
+/// Changes the primary currency and rebases all known rates atomically.
+///
+/// The target currency must have a known rate. Currencies without a known rate remain
+/// unknown; transaction amounts are not modified.
+pub fn set_primary_currency(connection: &mut Connection, code: &str) -> Result<(), DbError> {
+    validate_currency_code(code)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let currencies = list_currencies(&transaction)?;
+    if currencies
+        .iter()
+        .filter(|currency| currency.is_primary)
+        .count()
+        != 1
+    {
+        return Err(DbError::InvalidPrimaryCurrencyConfiguration);
+    }
+    let target = currencies
+        .iter()
+        .find(|currency| currency.code == code)
+        .ok_or(DbError::CurrencyNotFound)?;
+    if target.is_primary {
+        transaction.commit()?;
+        return Ok(());
+    }
+    let new_primary_rate = target
+        .rate_to_primary
+        .ok_or(DbError::PrimaryCurrencyRateUnavailable)?;
+    let new_primary_rate_date = target
+        .rate_date
+        .ok_or(DbError::PrimaryCurrencyRateUnavailable)?;
+
+    let mut rebased_currencies = Vec::with_capacity(currencies.len());
+    for currency in &currencies {
+        if currency.code == code {
+            continue;
+        }
+        let Some(old_rate) = currency
+            .rate_to_primary
+            .or_else(|| currency.is_primary.then_some(Decimal::ONE))
+        else {
+            rebased_currencies.push((currency.code.as_str(), None, None));
+            continue;
+        };
+        let rate = rebase_exchange_rate(old_rate, new_primary_rate)?;
+        let rate_date = currency.rate_date.map_or(new_primary_rate_date, |date| {
+            date.min(new_primary_rate_date)
+        });
+        rebased_currencies.push((currency.code.as_str(), Some(rate), Some(rate_date)));
+    }
+
+    for (currency_code, rate, rate_date) in rebased_currencies {
+        let changed = transaction.execute(
+            "UPDATE currencies
+             SET is_primary = 0, rate_to_primary = ?1, rate_date = ?2
+             WHERE code = ?3",
+            params![
+                rate.map(canonical_amount),
+                rate_date.map(|date| date.format("%Y-%m-%d").to_string()),
+                currency_code
+            ],
+        )?;
+        if changed != 1 {
+            return Err(DbError::CurrencyNotFound);
+        }
+    }
+    let changed = transaction.execute(
+        "UPDATE currencies
+         SET is_primary = 1, rate_to_primary = NULL, rate_date = NULL
+         WHERE code = ?1",
+        [code],
+    )?;
+    if changed != 1 {
+        return Err(DbError::CurrencyNotFound);
+    }
+    transaction.commit()?;
+    Ok(())
 }
 
 /// Returns transactions of one type, optionally filtered by inclusive dates, category, and text.
@@ -1340,27 +1514,62 @@ fn apply_migrations(connection: &mut Connection, database_path: &Path) -> Result
         backup_before_migration(connection, database_path, latest_version)?;
     }
 
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if database_data_version(&transaction)? != initial_data_version
-        || detect_migration_version(&transaction)? != current_version
-    {
-        return Err(DbError::ConcurrentDatabaseModification);
+    let rebuilds_currency_tables = MIGRATIONS.iter().any(|migration| {
+        migration.version == 8 && migration.version > current_version.unwrap_or(0)
+    });
+    if rebuilds_currency_tables {
+        connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
     }
 
-    create_migration_history(&transaction)?;
-    for migration in MIGRATIONS
-        .iter()
-        .filter(|migration| migration.version > current_version.unwrap_or(0))
-    {
-        transaction.execute_batch(migration.sql)?;
-        transaction.execute(
-            "INSERT INTO schema_migrations (version) VALUES (?1)",
-            [migration.version],
-        )?;
-    }
+    let migration_result = (|| {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if database_data_version(&transaction)? != initial_data_version
+            || detect_migration_version(&transaction)? != current_version
+        {
+            return Err(DbError::ConcurrentDatabaseModification);
+        }
 
-    transaction.commit()?;
-    Ok(())
+        create_migration_history(&transaction)?;
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version > current_version.unwrap_or(0))
+        {
+            transaction.execute_batch(migration.sql)?;
+            transaction.execute(
+                "INSERT INTO schema_migrations (version) VALUES (?1)",
+                [migration.version],
+            )?;
+        }
+
+        if rebuilds_currency_tables {
+            let foreign_key_violation = transaction
+                .query_row(
+                    "SELECT \"table\", rowid, parent FROM pragma_foreign_key_check LIMIT 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some((table, row_id, parent)) = foreign_key_violation {
+                return Err(DbError::ForeignKeyIntegrity(format!(
+                    "таблица {table}, строка {row_id:?}, ссылка на {parent}"
+                )));
+            }
+        }
+
+        transaction.commit()?;
+        Ok(())
+    })();
+
+    if rebuilds_currency_tables {
+        connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    }
+    migration_result
 }
 
 fn detect_migration_version(connection: &Connection) -> Result<Option<i64>, DbError> {
@@ -1453,18 +1662,20 @@ fn backup_before_migration(
 mod tests {
     use chrono::NaiveDate;
     use finance_core::{
-        Currency, DomainError, InterestDestination, PaymentCardType, PaymentDocumentDetails,
-        PaymentSystem, SavingsDetails, SavingsTerm, TransactionKind,
+        Currency, CurrencyDefinition, DomainError, InterestDestination, PaymentCardType,
+        PaymentDocumentDetails, PaymentSystem, SavingsDetails, SavingsTerm, TransactionKind,
     };
     use rusqlite::Connection;
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
     use super::{
-        delete_bank, delete_category, delete_payment_document, delete_savings, initialize,
-        list_payment_documents, list_savings, list_transaction_amounts, list_transactions,
-        load_analysis_transactions, load_analysis_transactions_by_category, save_bank,
-        save_category, save_payment_document, save_savings, save_transaction, DbError, MIGRATIONS,
+        add_currency, delete_bank, delete_category, delete_payment_document, delete_savings,
+        initialize, list_currencies, list_payment_documents, list_savings,
+        list_transaction_amounts, list_transactions, load_analysis_transactions,
+        load_analysis_transactions_by_category, save_bank, save_category, save_payment_document,
+        save_savings, save_transaction, set_currency_exchange_rate, set_primary_currency, DbError,
+        MIGRATIONS,
     };
 
     fn savings_details(bank_id: i64) -> SavingsDetails {
@@ -1558,7 +1769,7 @@ mod tests {
                         )
                         .unwrap();
                 }
-                4..=6 => {}
+                4..=7 => {}
                 _ => unreachable!(),
             }
         }
@@ -1575,14 +1786,14 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v7-")
+                    .starts_with("data.before-migration-v8-")
             })
             .count()
     }
 
     #[test]
     fn initialize_migrates_supported_versions_and_preserves_backup_and_data() {
-        for version in 1..=6 {
+        for version in 1..=7 {
             let directory = tempfile::tempdir().unwrap();
             let database_path = directory.path().join("data.db");
             drop(create_legacy_database(&database_path, version));
@@ -1593,7 +1804,7 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap();
-            assert_eq!(latest_version, 7);
+            assert_eq!(latest_version, 8);
 
             let income_count = connection
                 .query_row("SELECT COUNT(*) FROM incomes", [], |row| {
@@ -1729,7 +1940,7 @@ mod tests {
                     entry
                         .file_name()
                         .to_string_lossy()
-                        .starts_with("data.before-migration-v7-")
+                        .starts_with("data.before-migration-v8-")
                 })
                 .expect("upgrade should create a backup")
                 .path();
@@ -1915,7 +2126,7 @@ mod tests {
                 row.get::<_, i64>(0)
             })
             .unwrap();
-        assert_eq!(schema_version, 7);
+        assert_eq!(schema_version, 8);
     }
 
     #[test]
@@ -1934,8 +2145,279 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
             .unwrap();
 
-        assert_eq!(migration_count, 7);
+        assert_eq!(migration_count, 8);
         assert_eq!(foreign_keys_enabled, 1);
+    }
+
+    #[test]
+    fn currency_directory_seeds_rub_as_primary_and_usd_without_an_assumed_rate() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+
+        assert_eq!(
+            list_currencies(&connection).unwrap(),
+            vec![
+                CurrencyDefinition {
+                    code: "RUB".to_owned(),
+                    name: "Российский рубль".to_owned(),
+                    is_primary: true,
+                    rate_to_primary: None,
+                    rate_date: None,
+                },
+                CurrencyDefinition {
+                    code: "USD".to_owned(),
+                    name: "Доллар США".to_owned(),
+                    is_primary: false,
+                    rate_to_primary: None,
+                    rate_date: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn currency_schema_accepts_additional_codes_in_transactions_and_cards() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        add_currency(&connection, "EUR", "Евро").unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO income_categories (name) VALUES ('Зарплата');
+                 INSERT INTO expense_categories (name) VALUES ('Покупки');
+                 INSERT INTO banks (name) VALUES ('Банк');
+                 INSERT INTO incomes (date, category_id, amount, currency)
+                    VALUES ('2026-01-01', 1, '12.50', 'EUR');
+                 INSERT INTO expenses (date, category_id, amount, currency)
+                    VALUES ('2026-01-02', 1, '3.25', 'EUR');
+                 INSERT INTO payment_documents (bank_id, payment_system, card_type, amount, currency)
+                    VALUES (1, 'VISA', 'debit', '0', 'EUR');",
+            )
+            .unwrap();
+
+        let currency_rows = connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM incomes WHERE currency = 'EUR'),
+                    (SELECT COUNT(*) FROM expenses WHERE currency = 'EUR'),
+                    (SELECT COUNT(*) FROM payment_documents WHERE currency = 'EUR')",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(currency_rows, (1, 1, 1));
+    }
+
+    #[test]
+    fn currency_directory_rejects_multiple_primary_currencies() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+
+        assert!(connection
+            .execute(
+                "UPDATE currencies SET is_primary = 1 WHERE code = 'USD'",
+                []
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn set_currency_exchange_rate_stores_decimal_value_and_effective_date() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        add_currency(&connection, "EUR", "Евро").unwrap();
+        let rate_date = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+
+        set_currency_exchange_rate(
+            &connection,
+            "EUR",
+            Decimal::from_str("1.0842").unwrap(),
+            rate_date,
+        )
+        .unwrap();
+
+        let euro = list_currencies(&connection)
+            .unwrap()
+            .into_iter()
+            .find(|currency| currency.code == "EUR")
+            .unwrap();
+        assert_eq!(
+            euro.rate_to_primary,
+            Some(Decimal::from_str("1.0842").unwrap())
+        );
+        assert_eq!(euro.rate_date, Some(rate_date));
+    }
+
+    #[test]
+    fn set_currency_exchange_rate_rejects_primary_and_over_precise_rates() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        add_currency(&connection, "EUR", "Евро").unwrap();
+        let rate_date = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+
+        assert!(matches!(
+            set_currency_exchange_rate(&connection, "RUB", Decimal::ONE, rate_date),
+            Err(DbError::PrimaryCurrencyRateImmutable)
+        ));
+        assert!(matches!(
+            set_currency_exchange_rate(
+                &connection,
+                "EUR",
+                Decimal::from_str("1.0000000000001").unwrap(),
+                rate_date,
+            ),
+            Err(DbError::Domain(DomainError::ExchangeRatePrecision))
+        ));
+    }
+
+    #[test]
+    fn set_primary_currency_overflow_rolls_back_without_changing_rates() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut connection = initialize(&directory.path().join("data.db")).unwrap();
+        add_currency(&connection, "EUR", "Евро").unwrap();
+        set_currency_exchange_rate(
+            &connection,
+            "EUR",
+            Decimal::from_str("0.000000000001").unwrap(),
+            NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
+        )
+        .unwrap();
+        set_currency_exchange_rate(
+            &connection,
+            "USD",
+            Decimal::MAX,
+            NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
+        )
+        .unwrap();
+
+        let result = set_primary_currency(&mut connection, "EUR");
+        assert!(matches!(
+            result,
+            Err(DbError::Domain(DomainError::ExchangeRateOverflow))
+        ));
+        let primary = list_currencies(&connection)
+            .unwrap()
+            .into_iter()
+            .find(|currency| currency.is_primary)
+            .unwrap();
+        assert_eq!(primary.code, "RUB");
+    }
+
+    #[test]
+    fn set_primary_currency_rebases_known_rates_and_preserves_unknown_rates() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut connection = initialize(&directory.path().join("data.db")).unwrap();
+        add_currency(&connection, "EUR", "Евро").unwrap();
+        add_currency(&connection, "GBP", "Фунт стерлингов").unwrap();
+        set_currency_exchange_rate(
+            &connection,
+            "USD",
+            Decimal::from(100),
+            NaiveDate::from_ymd_opt(2026, 1, 3).unwrap(),
+        )
+        .unwrap();
+        set_currency_exchange_rate(
+            &connection,
+            "EUR",
+            Decimal::from(120),
+            NaiveDate::from_ymd_opt(2026, 1, 5).unwrap(),
+        )
+        .unwrap();
+
+        set_primary_currency(&mut connection, "EUR").unwrap();
+        let currencies = list_currencies(&connection).unwrap();
+        let currency_by_code =
+            |code: &str| currencies.iter().find(|currency| currency.code == code);
+
+        assert_eq!(
+            currency_by_code("RUB").unwrap().rate_to_primary,
+            Some(Decimal::from_str("0.008333333333333333333333").unwrap())
+        );
+        assert_eq!(
+            currency_by_code("USD").unwrap().rate_to_primary,
+            Some(Decimal::from_str("0.833333333333333333333333").unwrap())
+        );
+        assert_eq!(currency_by_code("GBP").unwrap().rate_to_primary, None);
+        assert!(currency_by_code("EUR").unwrap().is_primary);
+        assert_eq!(
+            currency_by_code("USD").unwrap().rate_date,
+            NaiveDate::from_ymd_opt(2026, 1, 3)
+        );
+
+        let change_to_unknown = set_primary_currency(&mut connection, "GBP");
+        assert!(matches!(
+            change_to_unknown,
+            Err(DbError::PrimaryCurrencyRateUnavailable)
+        ));
+        assert!(list_currencies(&connection)
+            .unwrap()
+            .iter()
+            .any(|currency| currency.code == "EUR" && currency.is_primary));
+    }
+
+    #[test]
+    fn currency_migration_preserves_transactions_cards_and_rate_links() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.db");
+        let legacy = create_legacy_database(&path, 7);
+        legacy
+            .execute_batch(
+                "INSERT INTO payment_documents (
+                    id, bank_id, payment_system, card_type, amount, currency,
+                    affects_deposit_rate, min_monthly_spend
+                 ) VALUES
+                    (9, 1, 'VISA', 'debit', '200', 'USD', 0, NULL),
+                    (10, 1, 'MIR', 'debit', '300', 'RUB', 1, '20');
+                 INSERT INTO document_rate_links (id, document_id, savings_id)
+                    VALUES (17, 10, 1);
+                 UPDATE incomes SET payment_document_id = 9 WHERE id = 1;
+                 UPDATE expenses
+                    SET payment_document_id = 10, affects_deposit_rate = 1 WHERE id = 1;",
+            )
+            .unwrap();
+        drop(legacy);
+
+        let database = initialize(&path).unwrap();
+        let linked_rows = database
+            .query_row(
+                "SELECT
+                    (SELECT payment_document_id FROM incomes WHERE id = 1),
+                    (SELECT payment_document_id FROM expenses WHERE id = 1),
+                    (SELECT id FROM document_rate_links WHERE document_id = 10),
+                    (SELECT currency FROM payment_documents WHERE id = 9)",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            linked_rows,
+            (Some(9), Some(10), Some(17), Some("USD".to_owned()))
+        );
+        assert!(database
+            .execute(
+                "UPDATE payment_documents SET currency = 'EUR' WHERE id = 9",
+                []
+            )
+            .is_err());
+        let foreign_key_violations = database
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!(foreign_key_violations, 0);
     }
 
     #[test]
@@ -2784,7 +3266,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .contains("before-migration-v7")
+                    .contains("before-migration-v8")
             })
             .count();
 
@@ -2981,7 +3463,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v7-")
+                    .starts_with("data.before-migration-v8-")
             })
             .expect("upgrade from V4 should create a backup")
             .path();
@@ -2993,7 +3475,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(savings_dates, (None, None));
-        assert_eq!(migration_version, 7);
+        assert_eq!(migration_version, 8);
         assert_eq!(backup_version, 4);
     }
 

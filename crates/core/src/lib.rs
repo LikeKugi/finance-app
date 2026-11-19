@@ -35,6 +35,63 @@ impl Currency {
     }
 }
 
+/// A currency's stored exchange rate relative to the application's primary currency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrencyDefinition {
+    pub code: String,
+    pub name: String,
+    pub is_primary: bool,
+    pub rate_to_primary: Option<Decimal>,
+    pub rate_date: Option<NaiveDate>,
+}
+
+/// Maximum scale accepted for a manually entered exchange rate.
+pub const MAX_EXCHANGE_RATE_SCALE: u32 = 12;
+const REBASED_EXCHANGE_RATE_SCALE: u32 = 24;
+
+/// Validates an ISO-style three-letter uppercase currency code.
+pub fn validate_currency_code(code: &str) -> Result<(), DomainError> {
+    if code.len() != 3 || !code.bytes().all(|byte| byte.is_ascii_uppercase()) {
+        return Err(DomainError::InvalidCurrencyCode);
+    }
+    Ok(())
+}
+
+/// Validates a positive exchange rate with the supported decimal scale.
+pub fn validate_exchange_rate(rate: Decimal) -> Result<(), DomainError> {
+    if rate <= Decimal::ZERO {
+        return Err(DomainError::InvalidExchangeRate);
+    }
+    if rate.scale() > MAX_EXCHANGE_RATE_SCALE {
+        return Err(DomainError::ExchangeRatePrecision);
+    }
+    Ok(())
+}
+
+/// Converts a currency's rate to a new primary currency's units.
+///
+/// Both rates use the same old primary currency as their denominator. The returned rate
+/// is rounded to 24 places using midpoint-to-even rounding.
+pub fn rebase_exchange_rate(
+    rate: Decimal,
+    new_primary_rate: Decimal,
+) -> Result<Decimal, DomainError> {
+    if rate <= Decimal::ZERO || new_primary_rate <= Decimal::ZERO {
+        return Err(DomainError::InvalidExchangeRate);
+    }
+    let rebased = rate
+        .checked_div(new_primary_rate)
+        .ok_or(DomainError::ExchangeRateOverflow)?
+        .round_dp_with_strategy(
+            REBASED_EXCHANGE_RATE_SCALE,
+            RoundingStrategy::MidpointNearestEven,
+        );
+    if rebased <= Decimal::ZERO {
+        return Err(DomainError::ExchangeRatePrecision);
+    }
+    Ok(rebased)
+}
+
 impl FromStr for Currency {
     type Err = DomainError;
 
@@ -724,6 +781,14 @@ pub enum DomainError {
     DivisionByZero,
     #[error("Неизвестная валюта: {0}")]
     UnknownCurrency(String),
+    #[error("Код валюты должен состоять из трёх заглавных латинских букв")]
+    InvalidCurrencyCode,
+    #[error("Курс валюты должен быть положительным")]
+    InvalidExchangeRate,
+    #[error("Курс валюты должен содержать не более 12 знаков после запятой")]
+    ExchangeRatePrecision,
+    #[error("Не удалось точно пересчитать курс валюты")]
+    ExchangeRateOverflow,
     #[error("Некорректное числовое значение")]
     InvalidDecimalFormat,
     #[error("Название накопления не может быть пустым")]
@@ -972,6 +1037,7 @@ mod tests {
 
     use super::{
         canonical_amount, parse_amount, parse_amount_expression, parse_non_negative_decimal,
+        rebase_exchange_rate, validate_currency_code, validate_exchange_rate,
         validate_payment_document, validate_savings, DomainError, InterestDestination,
         PaymentCardType, PaymentSystem, SavingsTerm,
     };
@@ -1103,6 +1169,56 @@ mod tests {
     #[test]
     fn canonical_amount_removes_unneeded_scale() {
         assert_eq!(canonical_amount(Decimal::new(1200, 2)), "12");
+    }
+
+    #[test]
+    fn rebase_exchange_rate_uses_new_primary_rate() {
+        let rate = rebase_exchange_rate(Decimal::from(90), Decimal::from(120));
+
+        assert_eq!(rate, Ok(Decimal::new(75, 2)));
+    }
+
+    #[test]
+    fn rebase_exchange_rate_rounds_non_terminating_decimal_to_twenty_four_places() {
+        let rate = rebase_exchange_rate(Decimal::ONE, Decimal::from(3));
+
+        assert_eq!(
+            rate,
+            Ok(Decimal::from_str("0.333333333333333333333333").unwrap())
+        );
+    }
+
+    #[test]
+    fn validate_exchange_rate_rejects_non_positive_values() {
+        assert_eq!(
+            validate_exchange_rate(Decimal::ZERO),
+            Err(DomainError::InvalidExchangeRate)
+        );
+    }
+
+    #[test]
+    fn validate_currency_code_accepts_three_uppercase_ascii_letters() {
+        assert_eq!(validate_currency_code("EUR"), Ok(()));
+    }
+
+    #[test]
+    fn validate_currency_code_rejects_lowercase_and_wrong_length() {
+        assert_eq!(
+            validate_currency_code("eur"),
+            Err(DomainError::InvalidCurrencyCode)
+        );
+        assert_eq!(
+            validate_currency_code("US"),
+            Err(DomainError::InvalidCurrencyCode)
+        );
+    }
+
+    #[test]
+    fn validate_exchange_rate_rejects_more_than_twelve_fractional_digits() {
+        assert_eq!(
+            validate_exchange_rate(Decimal::from_str("1.0000000000001").unwrap()),
+            Err(DomainError::ExchangeRatePrecision)
+        );
     }
 
     #[test]
