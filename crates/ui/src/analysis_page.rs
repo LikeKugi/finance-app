@@ -16,6 +16,8 @@ const ANALYSIS_COLUMN_MIN_WIDTHS: [f32; 4] = [170.0, 75.0, 120.0, 75.0];
 const ANALYSIS_COLUMN_GROWTH_WEIGHTS: [f32; 4] = [2.5, 0.8, 1.5, 0.7];
 const ANALYSIS_ROW_HEIGHT: f32 = 30.0;
 const PIE_CHART_DIAMETER: f32 = 160.0;
+const PIE_CHARTS_FOOTER_MAX_HEIGHT: f32 = 190.0;
+const PIE_CHARTS_FOOTER_NOTES_HEIGHT: f32 = 56.0;
 const PIE_CHART_COLORS: [egui::Color32; 8] = [
     egui::Color32::from_rgb(70, 130, 180),
     egui::Color32::from_rgb(231, 111, 81),
@@ -266,6 +268,27 @@ impl AnalysisPage {
     }
 
     pub(super) fn render_footer(&self, ui: &mut egui::Ui) {
+        if let Some(summary) = self.current_report() {
+            let footer_height = PIE_CHARTS_FOOTER_MAX_HEIGHT + PIE_CHARTS_FOOTER_NOTES_HEIGHT;
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), footer_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |footer_ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("analysis_pie_charts_footer_scroll")
+                        .auto_shrink([false, true])
+                        .max_height(PIE_CHARTS_FOOTER_MAX_HEIGHT)
+                        .show(footer_ui, |ui| Self::render_pie_charts(ui, summary));
+                    footer_ui.separator();
+                    Self::render_footer_notes(footer_ui);
+                },
+            );
+        } else {
+            Self::render_footer_notes(ui);
+        }
+    }
+
+    fn render_footer_notes(ui: &mut egui::Ui) {
         ui.label(
             "Доли считаются отдельно для доходов и расходов и только внутри одной валюты. RUB и USD не пересчитываются.",
         );
@@ -273,6 +296,22 @@ impl AnalysisPage {
             egui::Color32::from_rgb(160, 105, 0),
             "Прогноз и оценка процентов не рассчитываются: методика и необходимые исходные данные не согласованы.",
         );
+    }
+
+    fn current_report(&self) -> Option<&AnalysisSummary> {
+        let filters = self.applied_filters.as_ref()?;
+        if self
+            .error
+            .as_ref()
+            .is_some_and(|(error_filters, _)| error_filters == filters)
+        {
+            return None;
+        }
+
+        self.report
+            .as_ref()
+            .filter(|(report_filters, _)| report_filters == filters)
+            .map(|(_, summary)| summary)
     }
 
     fn filters(&self) -> AnalysisFilters {
@@ -550,7 +589,6 @@ impl AnalysisPage {
                 true,
                 false,
             );
-            Self::render_pie_chart(ui, summary, kind, currency);
             ui.add_space(12.0);
         }
 
@@ -562,16 +600,43 @@ impl AnalysisPage {
         }
     }
 
-    fn render_pie_chart(
-        ui: &mut egui::Ui,
-        summary: &AnalysisSummary,
-        kind: TransactionKind,
-        currency: Currency,
-    ) {
-        let Some(slices) = pie_chart_slices(summary, kind, currency) else {
-            ui.label("Не удалось построить диаграмму для этих данных.");
-            return;
-        };
+    fn render_pie_charts(ui: &mut egui::Ui, summary: &AnalysisSummary) {
+        ui.columns(2, |columns| {
+            for (column, kind) in columns
+                .iter_mut()
+                .zip([TransactionKind::Income, TransactionKind::Expense])
+            {
+                let mut has_chart = false;
+                for currency in Currency::ALL {
+                    if !summary
+                        .totals
+                        .iter()
+                        .any(|total| total.kind == kind && total.currency == currency)
+                    {
+                        continue;
+                    }
+
+                    let Some(slices) = pie_chart_slices(summary, kind, currency) else {
+                        column.heading(format!("{} — {}", kind.title(), currency.code()));
+                        column.label("Не удалось построить диаграмму для этих данных.");
+                        continue;
+                    };
+                    if slices.is_empty() {
+                        continue;
+                    }
+
+                    if has_chart {
+                        column.add_space(12.0);
+                    }
+                    column.heading(format!("{} — {}", kind.title(), currency.code()));
+                    Self::render_pie_chart(column, &slices);
+                    has_chart = true;
+                }
+            }
+        });
+    }
+
+    fn render_pie_chart(ui: &mut egui::Ui, slices: &[PieChartSlice<'_>]) {
         let total_share = slices.iter().map(|slice| slice.share).sum::<f32>();
         if slices.is_empty() || !total_share.is_finite() || total_share <= 0.0 {
             return;
@@ -586,7 +651,7 @@ impl AnalysisPage {
             let center = chart_rect.center();
             let radius = PIE_CHART_DIAMETER / 2.0 - 2.0;
             let mut start_angle = -std::f32::consts::FRAC_PI_2;
-            for slice in &slices {
+            for slice in slices {
                 if slice.share <= 0.0 {
                     continue;
                 }
@@ -603,7 +668,7 @@ impl AnalysisPage {
 
             ui.vertical(|ui| {
                 ui.strong("Категории");
-                for slice in &slices {
+                for slice in slices {
                     ui.horizontal(|ui| {
                         let (swatch_rect, _) =
                             ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
@@ -826,6 +891,19 @@ mod tests {
         }
     }
 
+    fn page_with_report(summary: AnalysisSummary) -> AnalysisPage {
+        let filters = AnalysisFilters {
+            from: String::new(),
+            to: String::new(),
+            income_category_id: None,
+            expense_category_id: None,
+        };
+        let mut page = AnalysisPage::default();
+        page.applied_filters = Some(filters.clone());
+        page.report = Some((filters, summary));
+        page
+    }
+
     fn convex_polygon_count(output: &egui::FullOutput) -> usize {
         output
             .shapes
@@ -856,6 +934,58 @@ mod tests {
         output.expect("analysis summary should render twice")
     }
 
+    fn render_analysis_footer(page: &AnalysisPage, width: f32, height: f32) -> egui::FullOutput {
+        let context = egui::Context::default();
+        let mut output = None;
+        for _ in 0..2 {
+            output = Some(context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, height),
+                    )),
+                    ..Default::default()
+                },
+                |context| {
+                    egui::TopBottomPanel::bottom("analysis_footer_test").show(context, |ui| {
+                        ui.separator();
+                        page.render_footer(ui);
+                    });
+                    egui::CentralPanel::default().show(context, |ui| {
+                        ui.label("Содержимое анализа");
+                    });
+                },
+            ));
+        }
+        output.expect("analysis footer should render twice")
+    }
+
+    fn render_pie_charts_at_size(
+        summary: &AnalysisSummary,
+        width: f32,
+        height: f32,
+    ) -> egui::FullOutput {
+        let context = egui::Context::default();
+        let mut output = None;
+        for _ in 0..2 {
+            output = Some(context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, height),
+                    )),
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default().show(context, |ui| {
+                        AnalysisPage::render_pie_charts(ui, summary);
+                    });
+                },
+            ));
+        }
+        output.expect("pie charts should render twice")
+    }
+
     #[test]
     fn pie_chart_slices_are_separated_by_operation_kind_and_currency() {
         let summary = summary_with_both_kinds_and_currencies();
@@ -882,18 +1012,118 @@ mod tests {
     }
 
     #[test]
-    fn pie_chart_renders_single_category_below_its_table() {
+    fn pie_chart_is_not_rendered_in_the_analysis_table() {
         let summary = summary_with_one_category();
         let output = render_summary_at_width(&summary, 1_200.0);
 
-        assert_eq!(convex_polygon_count(&output), 1);
-        assert!(has_text(&output, "Категории"));
-        assert!(has_text(&output, "Зарплата — 100%"));
-        let total_position =
-            text_position(&output, "Итого").expect("the table should render its total share");
-        let legend_position = text_position(&output, "Категории")
-            .expect("the chart should render its legend below the table");
-        assert!(legend_position.y > total_position.y);
+        assert_eq!(convex_polygon_count(&output), 0);
+        assert!(!has_text(&output, "Категории"));
+    }
+
+    #[test]
+    fn footer_renders_each_operation_and_currency_chart_above_the_share_note() {
+        let page = page_with_report(summary_with_both_kinds_and_currencies());
+        let output = render_analysis_footer(&page, 1_280.0, 720.0);
+
+        assert_eq!(convex_polygon_count(&output), 8);
+        assert_eq!(text_count(&output, "Категории"), 2);
+        assert!(has_text(&output, "Доходы — RUB"));
+        assert!(has_text(&output, "Расходы — RUB"));
+        for text in ["Зарплата — 50%", "Покупки — 50%"] {
+            assert!(
+                has_text(&output, text),
+                "expected visible legend item: {text}"
+            );
+        }
+        let charts_position = text_position(&output, "Категории").expect("chart legend");
+        let share_note_position = text_position(
+            &output,
+            "Доли считаются отдельно для доходов и расходов и только внутри одной валюты. RUB и USD не пересчитываются.",
+        )
+        .expect("share note");
+        assert!(charts_position.y < share_note_position.y);
+        assert!(share_note_position.y > 540.0);
+    }
+
+    #[test]
+    fn pie_chart_content_keeps_income_expense_and_currency_groups_separate() {
+        let summary = summary_with_both_kinds_and_currencies();
+        let output = render_pie_charts_at_size(&summary, 1_280.0, 1_200.0);
+
+        assert_eq!(convex_polygon_count(&output), 8);
+        assert_eq!(text_count(&output, "Категории"), 4);
+        for heading in [
+            "Доходы — RUB",
+            "Доходы — USD",
+            "Расходы — RUB",
+            "Расходы — USD",
+        ] {
+            assert!(has_text(&output, heading), "missing chart group: {heading}");
+        }
+    }
+
+    #[test]
+    fn footer_hides_missing_stale_and_failed_reports() {
+        let no_report = render_analysis_footer(&AnalysisPage::default(), 1_280.0, 720.0);
+        assert_eq!(convex_polygon_count(&no_report), 0);
+
+        let mut stale_page = page_with_report(summary_with_both_kinds_and_currencies());
+        stale_page.applied_filters = Some(AnalysisFilters {
+            from: "2026-01-01".to_owned(),
+            to: String::new(),
+            income_category_id: None,
+            expense_category_id: None,
+        });
+        let stale_report = render_analysis_footer(&stale_page, 1_280.0, 720.0);
+        assert_eq!(convex_polygon_count(&stale_report), 0);
+
+        let mut failed_page = page_with_report(summary_with_both_kinds_and_currencies());
+        let filters = failed_page
+            .applied_filters
+            .clone()
+            .expect("applied filters");
+        failed_page.error = Some((filters, "Ошибка загрузки".to_owned()));
+        let failed_report = render_analysis_footer(&failed_page, 1_280.0, 720.0);
+        assert_eq!(convex_polygon_count(&failed_report), 0);
+    }
+
+    #[test]
+    fn footer_chart_area_is_bounded_when_category_legend_is_long() {
+        let categories = (0..100)
+            .map(|id| AnalysisCategoryTotal {
+                kind: TransactionKind::Income,
+                category_id: id,
+                category_name: format!("Категория {id}"),
+                currency: Currency::Rub,
+                amount: Decimal::ONE,
+                transaction_count: 1,
+                share_percent: Decimal::ONE,
+            })
+            .collect();
+        let summary = AnalysisSummary {
+            categories,
+            totals: vec![AnalysisTotal {
+                kind: TransactionKind::Income,
+                currency: Currency::Rub,
+                amount: Decimal::new(100, 0),
+                transaction_count: 100,
+            }],
+        };
+        let output = render_analysis_footer(&page_with_report(summary), 1_280.0, 720.0);
+
+        let share_note_position = text_position(
+            &output,
+            "Доли считаются отдельно для доходов и расходов и только внутри одной валюты. RUB и USD не пересчитываются.",
+        )
+        .expect("share note remains visible after a long legend");
+        let forecast_note_position = text_position(
+            &output,
+            "Прогноз и оценка процентов не рассчитываются: методика и необходимые исходные данные не согласованы.",
+        )
+        .expect("forecast note remains visible after a long legend");
+        assert!(share_note_position.y > 540.0);
+        assert!(forecast_note_position.y > share_note_position.y);
+        assert!(forecast_note_position.y < 720.0);
     }
 
     #[test]
