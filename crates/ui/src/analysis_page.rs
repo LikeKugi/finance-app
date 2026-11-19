@@ -5,13 +5,32 @@ use std::time::{Duration, Instant};
 
 use chrono::NaiveDate;
 use eframe::egui;
-use finance_core::{summarize_analysis, AnalysisSummary, Category, Currency, TransactionKind};
+use finance_core::{
+    summarize_analysis, AnalysisCategoryTotal, AnalysisSummary, Category, Currency, TransactionKind,
+};
+use rust_decimal::prelude::ToPrimitive;
 
 use super::date_input::{date_input, DateInputState};
 
 const ANALYSIS_COLUMN_MIN_WIDTHS: [f32; 4] = [170.0, 75.0, 120.0, 75.0];
 const ANALYSIS_COLUMN_GROWTH_WEIGHTS: [f32; 4] = [2.5, 0.8, 1.5, 0.7];
 const ANALYSIS_ROW_HEIGHT: f32 = 30.0;
+const PIE_CHART_DIAMETER: f32 = 160.0;
+const PIE_CHART_COLORS: [egui::Color32; 8] = [
+    egui::Color32::from_rgb(70, 130, 180),
+    egui::Color32::from_rgb(231, 111, 81),
+    egui::Color32::from_rgb(42, 157, 143),
+    egui::Color32::from_rgb(233, 196, 106),
+    egui::Color32::from_rgb(128, 90, 160),
+    egui::Color32::from_rgb(244, 162, 97),
+    egui::Color32::from_rgb(94, 140, 80),
+    egui::Color32::from_rgb(190, 90, 112),
+];
+
+struct PieChartSlice<'a> {
+    category: &'a AnalysisCategoryTotal,
+    share: f32,
+}
 
 fn analysis_column_widths(available_width: f32, column_spacing: f32) -> [f32; 4] {
     let content_width = (available_width - column_spacing * 3.0).max(0.0);
@@ -531,6 +550,7 @@ impl AnalysisPage {
                 true,
                 false,
             );
+            Self::render_pie_chart(ui, summary, kind, currency);
             ui.add_space(12.0);
         }
 
@@ -540,6 +560,67 @@ impl AnalysisPage {
                 kind.title()
             ));
         }
+    }
+
+    fn render_pie_chart(
+        ui: &mut egui::Ui,
+        summary: &AnalysisSummary,
+        kind: TransactionKind,
+        currency: Currency,
+    ) {
+        let Some(slices) = pie_chart_slices(summary, kind, currency) else {
+            ui.label("Не удалось построить диаграмму для этих данных.");
+            return;
+        };
+        let total_share = slices.iter().map(|slice| slice.share).sum::<f32>();
+        if slices.is_empty() || !total_share.is_finite() || total_share <= 0.0 {
+            return;
+        }
+
+        ui.add_space(8.0);
+        ui.horizontal_top(|ui| {
+            let (chart_rect, _) = ui.allocate_exact_size(
+                egui::vec2(PIE_CHART_DIAMETER, PIE_CHART_DIAMETER),
+                egui::Sense::hover(),
+            );
+            let center = chart_rect.center();
+            let radius = PIE_CHART_DIAMETER / 2.0 - 2.0;
+            let mut start_angle = -std::f32::consts::FRAC_PI_2;
+            for slice in &slices {
+                if slice.share <= 0.0 {
+                    continue;
+                }
+                let end_angle = start_angle + std::f32::consts::TAU * slice.share / total_share;
+                let points = pie_slice_points(center, radius, start_angle, end_angle);
+                let color = pie_chart_color(slice.category.category_id);
+                ui.painter().add(egui::epaint::Shape::convex_polygon(
+                    points,
+                    color,
+                    egui::Stroke::new(1.0_f32, ui.visuals().panel_fill),
+                ));
+                start_angle = end_angle;
+            }
+
+            ui.vertical(|ui| {
+                ui.strong("Категории");
+                for slice in &slices {
+                    ui.horizontal(|ui| {
+                        let (swatch_rect, _) =
+                            ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                        ui.painter().rect_filled(
+                            swatch_rect,
+                            2.0,
+                            pie_chart_color(slice.category.category_id),
+                        );
+                        ui.label(format!(
+                            "{} — {}%",
+                            slice.category.category_name,
+                            slice.category.share_percent.round_dp(2)
+                        ));
+                    });
+                }
+            });
+        });
     }
 
     fn render_summary_row(
@@ -609,6 +690,46 @@ impl AnalysisPage {
     }
 }
 
+fn pie_chart_slices(
+    summary: &AnalysisSummary,
+    kind: TransactionKind,
+    currency: Currency,
+) -> Option<Vec<PieChartSlice<'_>>> {
+    summary
+        .categories
+        .iter()
+        .filter(|category| category.kind == kind && category.currency == currency)
+        .map(|category| {
+            let share = category.share_percent.to_f32()?;
+            if !share.is_finite() || share < 0.0 {
+                return None;
+            }
+            Some(PieChartSlice { category, share })
+        })
+        .collect()
+}
+
+fn pie_chart_color(category_id: i64) -> egui::Color32 {
+    PIE_CHART_COLORS[category_id.rem_euclid(PIE_CHART_COLORS.len() as i64) as usize]
+}
+
+fn pie_slice_points(
+    center: egui::Pos2,
+    radius: f32,
+    start_angle: f32,
+    end_angle: f32,
+) -> Vec<egui::Pos2> {
+    let segments = ((end_angle - start_angle).abs() * 16.0).ceil().max(1.0) as usize;
+    let mut points = Vec::with_capacity(segments + 2);
+    points.push(center);
+    for segment in 0..=segments {
+        let fraction = segment as f32 / segments as f32;
+        let angle = start_angle + (end_angle - start_angle) * fraction;
+        points.push(center + egui::vec2(angle.cos() * radius, angle.sin() * radius));
+    }
+    points
+}
+
 fn parse_filters(filters: &AnalysisFilters) -> Result<ParsedFilters, String> {
     let from = parse_optional_date(&filters.from, "начала")?;
     let to = parse_optional_date(&filters.to, "окончания")?;
@@ -634,7 +755,7 @@ fn parse_optional_date(value: &str, field_name: &str) -> Result<Option<NaiveDate
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_filters, AnalysisFilters, AnalysisPage};
+    use super::{parse_filters, pie_chart_slices, AnalysisFilters, AnalysisPage};
     use eframe::egui;
     use finance_core::{
         AnalysisCategoryTotal, AnalysisSummary, AnalysisTotal, Category, Currency, TransactionKind,
@@ -664,7 +785,7 @@ mod tests {
             currency,
             amount: Decimal::ONE,
             transaction_count: 1,
-            share_percent: Decimal::ONE_HUNDRED,
+            share_percent: Decimal::new(50, 0),
         })
         .collect();
         let totals = [
@@ -677,12 +798,40 @@ mod tests {
         .map(|(kind, currency)| AnalysisTotal {
             kind,
             currency,
-            amount: Decimal::ONE,
-            transaction_count: 1,
+            amount: Decimal::new(2, 0),
+            transaction_count: 2,
         })
         .collect();
 
         AnalysisSummary { categories, totals }
+    }
+
+    fn summary_with_one_category() -> AnalysisSummary {
+        AnalysisSummary {
+            categories: vec![AnalysisCategoryTotal {
+                kind: TransactionKind::Income,
+                category_id: 1,
+                category_name: "Зарплата".to_owned(),
+                currency: Currency::Rub,
+                amount: Decimal::ONE,
+                transaction_count: 1,
+                share_percent: Decimal::ONE_HUNDRED,
+            }],
+            totals: vec![AnalysisTotal {
+                kind: TransactionKind::Income,
+                currency: Currency::Rub,
+                amount: Decimal::ONE,
+                transaction_count: 1,
+            }],
+        }
+    }
+
+    fn convex_polygon_count(output: &egui::FullOutput) -> usize {
+        output
+            .shapes
+            .iter()
+            .filter(|clipped_shape| matches!(clipped_shape.shape, egui::epaint::Shape::Path(_)))
+            .count()
     }
 
     fn render_summary_at_width(summary: &AnalysisSummary, width: f32) -> egui::FullOutput {
@@ -705,6 +854,61 @@ mod tests {
             ));
         }
         output.expect("analysis summary should render twice")
+    }
+
+    #[test]
+    fn pie_chart_slices_are_separated_by_operation_kind_and_currency() {
+        let summary = summary_with_both_kinds_and_currencies();
+
+        let income_rub = pie_chart_slices(&summary, TransactionKind::Income, Currency::Rub)
+            .expect("income shares should be representable for chart geometry");
+        let expense_usd = pie_chart_slices(&summary, TransactionKind::Expense, Currency::Usd)
+            .expect("expense shares should be representable for chart geometry");
+
+        assert_eq!(
+            income_rub
+                .iter()
+                .map(|slice| slice.category.category_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Зарплата", "Премия"]
+        );
+        assert_eq!(
+            expense_usd
+                .iter()
+                .map(|slice| slice.category.category_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Расход USD", "Платеж USD"]
+        );
+    }
+
+    #[test]
+    fn pie_chart_renders_single_category_below_its_table() {
+        let summary = summary_with_one_category();
+        let output = render_summary_at_width(&summary, 1_200.0);
+
+        assert_eq!(convex_polygon_count(&output), 1);
+        assert!(has_text(&output, "Категории"));
+        assert!(has_text(&output, "Зарплата — 100%"));
+        let total_position =
+            text_position(&output, "Итого").expect("the table should render its total share");
+        let legend_position = text_position(&output, "Категории")
+            .expect("the chart should render its legend below the table");
+        assert!(legend_position.y > total_position.y);
+    }
+
+    #[test]
+    fn empty_analysis_summary_has_no_pie_chart() {
+        let summary = AnalysisSummary {
+            categories: Vec::new(),
+            totals: Vec::new(),
+        };
+        let slices = pie_chart_slices(&summary, TransactionKind::Income, Currency::Rub)
+            .expect("an empty report should produce an empty chart");
+        let output = render_summary_at_width(&summary, 1_200.0);
+
+        assert!(slices.is_empty());
+        assert_eq!(convex_polygon_count(&output), 0);
+        assert!(!has_text(&output, "Категории"));
     }
 
     fn text_position(output: &egui::FullOutput, text: &str) -> Option<egui::Pos2> {
@@ -1274,7 +1478,7 @@ mod tests {
                 let category_position = text_position(&output, category).expect("category row");
                 let share_position = text_position_on_row(
                     &output,
-                    "100%",
+                    "50%",
                     category_position.y,
                     category_position.x,
                     width / 2.0,
