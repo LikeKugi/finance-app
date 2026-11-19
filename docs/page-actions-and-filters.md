@@ -29,7 +29,7 @@ On Savings, refresh also reloads the bank list and returns the results table to 
 
 ### Analysis
 
-- Filters appear in a horizontally scrollable row above the report.
+- Filters appear in a row above the report and wrap onto additional lines when they do not fit.
 - Date and category edits remain pending until `Применить` is clicked. The report continues to reflect the last applied filter set.
 - Each of the four filters has an `×` control. Clearing one immediately applies the other values currently in the controls, including edits that were not yet applied.
 - `Сбросить фильтры` clears all filters and immediately reloads the report without conditions; it is disabled when no filters are active.

@@ -71,11 +71,12 @@ impl AnalysisPage {
         let mut clear_to_date = false;
         let mut clear_income_category = false;
         let mut clear_expense_category = false;
-        egui::ScrollArea::horizontal()
-            .id_salt("analysis_filters_scroll_area")
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
+        let filter_height = ui.spacing().interact_size.y;
+        ui.horizontal_wrapped(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(252.0, filter_height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
                     ui.label("Период с");
                     date_input(
                         ui,
@@ -91,6 +92,12 @@ impl AnalysisPage {
                     {
                         clear_from_date = true;
                     }
+                },
+            );
+            ui.allocate_ui_with_layout(
+                egui::vec2(252.0, filter_height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
                     ui.label("по");
                     date_input(
                         ui,
@@ -106,6 +113,12 @@ impl AnalysisPage {
                     {
                         clear_to_date = true;
                     }
+                },
+            );
+            ui.allocate_ui_with_layout(
+                egui::vec2(420.0, filter_height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
                     ui.label("Категория доходов:");
                     Self::render_category_filter(
                         ui,
@@ -120,6 +133,12 @@ impl AnalysisPage {
                     {
                         clear_income_category = true;
                     }
+                },
+            );
+            ui.allocate_ui_with_layout(
+                egui::vec2(420.0, filter_height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
                     ui.label("Категория расходов:");
                     Self::render_category_filter(
                         ui,
@@ -134,6 +153,12 @@ impl AnalysisPage {
                     {
                         clear_expense_category = true;
                     }
+                },
+            );
+            ui.allocate_ui_with_layout(
+                egui::vec2(230.0, filter_height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
                     if ui.button("Применить").clicked() {
                         apply_filters = true;
                     }
@@ -146,8 +171,9 @@ impl AnalysisPage {
                     {
                         reset_filters = true;
                     }
-                });
-            });
+                },
+            );
+        });
         ui.separator();
 
         if reset_filters {
@@ -609,6 +635,48 @@ mod tests {
         }
     }
 
+    fn render_analysis_page_at_width(width: f32) -> egui::FullOutput {
+        let mut page = page_with_selected_filters();
+        let income_categories = vec![Category {
+            id: 1,
+            name: "Зарплата".to_owned(),
+            parent_id: None,
+            is_active: true,
+        }];
+        let expense_categories = vec![Category {
+            id: 2,
+            name: "Покупки".to_owned(),
+            parent_id: None,
+            is_active: true,
+        }];
+        let context = egui::Context::default();
+        let mut output = None;
+        for _ in 0..2 {
+            output = Some(context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 720.0),
+                    )),
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default().show(context, |ui| {
+                        page.render(
+                            context,
+                            ui,
+                            None,
+                            &income_categories,
+                            &expense_categories,
+                            false,
+                        );
+                    });
+                },
+            ));
+        }
+        output.expect("analysis page should render twice")
+    }
+
     #[test]
     fn stale_analysis_result_does_not_replace_current_filter_result() {
         let mut page = AnalysisPage::default();
@@ -780,6 +848,61 @@ mod tests {
         assert!(has_text(&output, "Применить"));
         assert!(has_text(&output, "Сбросить фильтры"));
         assert!(!has_text(&output, "Очистить период"));
+    }
+
+    #[test]
+    fn analysis_filters_wrap_when_available_width_is_limited() {
+        let wide_output = render_analysis_page_at_width(2_000.0);
+        let narrow_output = render_analysis_page_at_width(900.0);
+        let filter_labels = [
+            "Период с",
+            "по",
+            "Категория доходов:",
+            "Категория расходов:",
+            "Применить",
+            "Сбросить фильтры",
+        ];
+
+        for (width, output) in [(2_000.0, &wide_output), (900.0, &narrow_output)] {
+            for label in filter_labels {
+                assert!(
+                    has_text(output, label),
+                    "missing filter control at width {width}: {label}"
+                );
+            }
+            assert!(has_text(output, "2027-01-01"));
+            assert!(has_text(output, "2027-01-31"));
+            assert_eq!(text_count(output, "×"), 4);
+        }
+
+        let wide_positions: Vec<_> = [
+            "2027-01-01",
+            "2027-01-31",
+            "Зарплата",
+            "Покупки",
+            "Применить",
+            "Сбросить фильтры",
+        ]
+        .iter()
+        .map(|label| text_position(&wide_output, label).expect("filter label"))
+        .collect();
+        let min_y = wide_positions
+            .iter()
+            .map(|position| position.y)
+            .fold(f32::INFINITY, f32::min);
+        let max_y = wide_positions
+            .iter()
+            .map(|position| position.y)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(max_y - min_y < 6.0);
+
+        let start_y = text_position(&narrow_output, "2027-01-01")
+            .expect("start date filter")
+            .y;
+        let expense_category_y = text_position(&narrow_output, "Покупки")
+            .expect("expense category selection")
+            .y;
+        assert!(expense_category_y > start_y);
     }
 
     #[test]
