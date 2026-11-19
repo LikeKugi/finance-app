@@ -9,8 +9,6 @@ use finance_core::{summarize_analysis, AnalysisSummary, Category, Currency, Tran
 
 use super::date_input::{date_input, DateInputState};
 
-const FILTER_DEBOUNCE: Duration = Duration::from_millis(250);
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AnalysisFilters {
     from: String,
@@ -45,6 +43,7 @@ pub(super) struct AnalysisPage {
     to_date: String,
     income_category_id: Option<i64>,
     expense_category_id: Option<i64>,
+    applied_filters: Option<AnalysisFilters>,
     from_date_input: DateInputState,
     to_date_input: DateInputState,
     observed_filters: Option<AnalysisFilters>,
@@ -66,51 +65,109 @@ impl AnalysisPage {
         refresh: bool,
     ) -> bool {
         let refresh_categories = refresh;
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Период с");
-            date_input(
-                ui,
-                "analysis_from_date",
-                &mut self.from_date,
-                &mut self.from_date_input,
-                112.0,
-            );
-            ui.label("по");
-            date_input(
-                ui,
-                "analysis_to_date",
-                &mut self.to_date,
-                &mut self.to_date_input,
-                112.0,
-            );
-            ui.label("Категория доходов:");
-            Self::render_category_filter(
-                ui,
-                "analysis_income_category_filter",
-                &mut self.income_category_id,
-                income_categories,
-            );
-            ui.label("Категория расходов:");
-            Self::render_category_filter(
-                ui,
-                "analysis_expense_category_filter",
-                &mut self.expense_category_id,
-                expense_categories,
-            );
-            if ui.button("Очистить период").clicked() {
-                self.from_date.clear();
-                self.to_date.clear();
-                self.from_date_input.reset();
-                self.to_date_input.reset();
-            }
-        });
+        let mut apply_filters = false;
+        let mut reset_filters = false;
+        let mut clear_from_date = false;
+        let mut clear_to_date = false;
+        let mut clear_income_category = false;
+        let mut clear_expense_category = false;
+        egui::ScrollArea::horizontal()
+            .id_salt("analysis_filters_scroll_area")
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Период с");
+                    date_input(
+                        ui,
+                        "analysis_from_date",
+                        &mut self.from_date,
+                        &mut self.from_date_input,
+                        112.0,
+                    );
+                    if ui
+                        .add_enabled(!self.from_date.trim().is_empty(), egui::Button::new("×"))
+                        .on_hover_text("Очистить начальную дату")
+                        .clicked()
+                    {
+                        clear_from_date = true;
+                    }
+                    ui.label("по");
+                    date_input(
+                        ui,
+                        "analysis_to_date",
+                        &mut self.to_date,
+                        &mut self.to_date_input,
+                        112.0,
+                    );
+                    if ui
+                        .add_enabled(!self.to_date.trim().is_empty(), egui::Button::new("×"))
+                        .on_hover_text("Очистить конечную дату")
+                        .clicked()
+                    {
+                        clear_to_date = true;
+                    }
+                    ui.label("Категория доходов:");
+                    Self::render_category_filter(
+                        ui,
+                        "analysis_income_category_filter",
+                        &mut self.income_category_id,
+                        income_categories,
+                    );
+                    if ui
+                        .add_enabled(self.income_category_id.is_some(), egui::Button::new("×"))
+                        .on_hover_text("Очистить категорию доходов")
+                        .clicked()
+                    {
+                        clear_income_category = true;
+                    }
+                    ui.label("Категория расходов:");
+                    Self::render_category_filter(
+                        ui,
+                        "analysis_expense_category_filter",
+                        &mut self.expense_category_id,
+                        expense_categories,
+                    );
+                    if ui
+                        .add_enabled(self.expense_category_id.is_some(), egui::Button::new("×"))
+                        .on_hover_text("Очистить категорию расходов")
+                        .clicked()
+                    {
+                        clear_expense_category = true;
+                    }
+                    if ui.button("Применить").clicked() {
+                        apply_filters = true;
+                    }
+                    if ui
+                        .add_enabled(
+                            self.has_active_filters(),
+                            egui::Button::new("Сбросить фильтры"),
+                        )
+                        .clicked()
+                    {
+                        reset_filters = true;
+                    }
+                });
+            });
         ui.separator();
 
-        let filters = self.filters();
-        if refresh {
-            self.schedule(filters.clone(), Instant::now());
+        if reset_filters {
+            self.reset_filters();
+            self.apply_pending_filters();
+        } else if clear_from_date {
+            self.clear_from_date_filter();
+        } else if clear_to_date {
+            self.clear_to_date_filter();
+        } else if clear_income_category {
+            self.clear_income_category_filter();
+        } else if clear_expense_category {
+            self.clear_expense_category_filter();
+        } else if apply_filters || refresh || self.applied_filters.is_none() {
+            self.apply_pending_filters();
         }
-        self.observe_filters(filters.clone());
+        let filters = self
+            .applied_filters
+            .clone()
+            .unwrap_or_else(|| self.filters());
         if let Some(database_path) = database_path {
             self.poll_request(&filters);
             self.start_scheduled_request(context, database_path);
@@ -162,6 +219,51 @@ impl AnalysisPage {
         }
     }
 
+    fn has_active_filters(&self) -> bool {
+        let filters = self.filters();
+        !filters.from.is_empty()
+            || !filters.to.is_empty()
+            || filters.income_category_id.is_some()
+            || filters.expense_category_id.is_some()
+    }
+
+    fn apply_pending_filters(&mut self) {
+        let filters = self.filters();
+        self.applied_filters = Some(filters.clone());
+        self.schedule(filters, Instant::now());
+    }
+
+    fn clear_from_date_filter(&mut self) {
+        self.from_date.clear();
+        self.from_date_input.reset();
+        self.apply_pending_filters();
+    }
+
+    fn clear_to_date_filter(&mut self) {
+        self.to_date.clear();
+        self.to_date_input.reset();
+        self.apply_pending_filters();
+    }
+
+    fn clear_income_category_filter(&mut self) {
+        self.income_category_id = None;
+        self.apply_pending_filters();
+    }
+
+    fn clear_expense_category_filter(&mut self) {
+        self.expense_category_id = None;
+        self.apply_pending_filters();
+    }
+
+    fn reset_filters(&mut self) {
+        self.from_date.clear();
+        self.to_date.clear();
+        self.income_category_id = None;
+        self.expense_category_id = None;
+        self.from_date_input.reset();
+        self.to_date_input.reset();
+    }
+
     fn render_category_filter(
         ui: &mut egui::Ui,
         id_salt: &str,
@@ -188,12 +290,6 @@ impl AnalysisPage {
                     ui.selectable_value(selected_category, Some(*category_id), label);
                 }
             });
-    }
-
-    fn observe_filters(&mut self, filters: AnalysisFilters) {
-        if self.observed_filters.as_ref() != Some(&filters) {
-            self.schedule(filters, Instant::now() + FILTER_DEBOUNCE);
-        }
     }
 
     fn schedule(&mut self, filters: AnalysisFilters, starts_at: Instant) {
@@ -492,6 +588,27 @@ mod tests {
         text_position(output, text).is_some()
     }
 
+    fn text_count(output: &egui::FullOutput, text: &str) -> usize {
+        output
+            .shapes
+            .iter()
+            .filter(|clipped_shape| match &clipped_shape.shape {
+                egui::epaint::Shape::Text(text_shape) => text_shape.galley.job.text == text,
+                _ => false,
+            })
+            .count()
+    }
+
+    fn page_with_selected_filters() -> AnalysisPage {
+        AnalysisPage {
+            from_date: "2027-01-01".to_owned(),
+            to_date: "2027-01-31".to_owned(),
+            income_category_id: Some(1),
+            expense_category_id: Some(2),
+            ..AnalysisPage::default()
+        }
+    }
+
     #[test]
     fn stale_analysis_result_does_not_replace_current_filter_result() {
         let mut page = AnalysisPage::default();
@@ -525,6 +642,144 @@ mod tests {
 
         assert_eq!(filters.income_category_id, None);
         assert_eq!(filters.expense_category_id, None);
+    }
+
+    #[test]
+    fn analysis_filter_edits_wait_until_apply_is_requested() {
+        let mut page = AnalysisPage::default();
+        page.apply_pending_filters();
+        let initial_generation = page.generation;
+        let initial_filters = page.applied_filters.clone();
+        let income_categories = vec![Category {
+            id: 3,
+            name: "Зарплата".to_owned(),
+            parent_id: None,
+            is_active: true,
+        }];
+        let context = egui::Context::default();
+
+        page.from_date = "2027-01-01".to_owned();
+        page.income_category_id = Some(3);
+        let _output = context.run(Default::default(), |context| {
+            egui::CentralPanel::default().show(context, |ui| {
+                page.render(context, ui, None, &income_categories, &[], false);
+            });
+        });
+
+        assert_eq!(page.generation, initial_generation);
+        assert_eq!(page.applied_filters, initial_filters);
+
+        page.apply_pending_filters();
+
+        assert_eq!(page.applied_filters, Some(page.filters()));
+        assert_eq!(page.generation, initial_generation + 1);
+    }
+
+    #[test]
+    fn clearing_analysis_start_date_applies_other_pending_filters() {
+        let mut page = page_with_selected_filters();
+
+        page.clear_from_date_filter();
+
+        assert_eq!(page.applied_filters, Some(page.filters()));
+        assert!(page.from_date.is_empty());
+        assert_eq!(page.to_date, "2027-01-31");
+        assert_eq!(page.income_category_id, Some(1));
+        assert_eq!(page.expense_category_id, Some(2));
+    }
+
+    #[test]
+    fn clearing_analysis_end_date_preserves_other_filters() {
+        let mut page = page_with_selected_filters();
+
+        page.clear_to_date_filter();
+
+        assert_eq!(page.applied_filters, Some(page.filters()));
+        assert!(page.to_date.is_empty());
+        assert_eq!(page.from_date, "2027-01-01");
+        assert_eq!(page.income_category_id, Some(1));
+        assert_eq!(page.expense_category_id, Some(2));
+    }
+
+    #[test]
+    fn clearing_analysis_income_category_preserves_other_filters() {
+        let mut page = page_with_selected_filters();
+
+        page.clear_income_category_filter();
+
+        assert_eq!(page.applied_filters, Some(page.filters()));
+        assert!(page.income_category_id.is_none());
+        assert_eq!(page.expense_category_id, Some(2));
+        assert_eq!(page.from_date, "2027-01-01");
+        assert_eq!(page.to_date, "2027-01-31");
+    }
+
+    #[test]
+    fn clearing_analysis_expense_category_preserves_other_filters() {
+        let mut page = page_with_selected_filters();
+
+        page.clear_expense_category_filter();
+
+        assert_eq!(page.applied_filters, Some(page.filters()));
+        assert!(page.expense_category_id.is_none());
+        assert_eq!(page.income_category_id, Some(1));
+        assert_eq!(page.from_date, "2027-01-01");
+        assert_eq!(page.to_date, "2027-01-31");
+    }
+
+    #[test]
+    fn resetting_analysis_filters_clears_all_values() {
+        let mut page = page_with_selected_filters();
+
+        page.reset_filters();
+        page.apply_pending_filters();
+
+        assert_eq!(page.applied_filters, Some(page.filters()));
+        assert!(!page.has_active_filters());
+    }
+
+    #[test]
+    fn analysis_filter_controls_render_apply_reset_and_one_clear_button_per_filter() {
+        let mut page = page_with_selected_filters();
+        let income_categories = vec![Category {
+            id: 1,
+            name: "Зарплата".to_owned(),
+            parent_id: None,
+            is_active: true,
+        }];
+        let expense_categories = vec![Category {
+            id: 2,
+            name: "Покупки".to_owned(),
+            parent_id: None,
+            is_active: true,
+        }];
+        let context = egui::Context::default();
+        let output = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(2_000.0, 720.0),
+                )),
+                ..Default::default()
+            },
+            |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    page.render(
+                        context,
+                        ui,
+                        None,
+                        &income_categories,
+                        &expense_categories,
+                        false,
+                    );
+                });
+            },
+        );
+
+        assert_eq!(text_count(&output, "×"), 4);
+        assert!(has_text(&output, "Применить"));
+        assert!(has_text(&output, "Сбросить фильтры"));
+        assert!(!has_text(&output, "Очистить период"));
     }
 
     #[test]

@@ -252,6 +252,18 @@ mod tests {
     }
 
     #[test]
+    fn reset_clears_the_calendar_month_and_observed_date() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 18).expect("valid date");
+        let mut state = DateInputState::default();
+        state.sync_to_value("2024-12-25", today);
+
+        state.reset();
+
+        assert!(state.visible_month.is_none());
+        assert!(state.observed_value.is_none());
+    }
+
+    #[test]
     fn checked_month_navigation_crosses_year_boundaries() {
         let december = NaiveDate::from_ymd_opt(2024, 12, 1).expect("valid month");
         let january = NaiveDate::from_ymd_opt(2025, 1, 1).expect("valid month");
