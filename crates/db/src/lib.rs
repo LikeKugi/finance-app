@@ -41,6 +41,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 6,
         sql: include_str!("../migrations/V6__income_card_balances.sql"),
     },
+    Migration {
+        version: 7,
+        sql: include_str!("../migrations/V7__expense_cards.sql"),
+    },
 ];
 
 struct Migration {
@@ -89,12 +93,16 @@ pub enum DbError {
     InvalidTransactionDateRange,
     #[error("Выберите дебетовую карту с валютой, совпадающей с валютой дохода")]
     IncomeCardUnavailable,
+    #[error("Валюта расхода должна совпадать с валютой карты; для учёта расхода карта также должна влиять на ставку")]
+    ExpenseCardUnavailable,
     #[error("Недостаточно средств на карте для отмены зачисления")]
     InsufficientCardBalance,
     #[error("Не удалось точно рассчитать баланс карты: переполнение или недостаточная точность")]
     CardBalanceOverflow,
     #[error("Карта связана с доходами: нельзя удалить её или изменить её тип и валюту")]
     IncomeCardInUse,
+    #[error("Карта связана с расходами: нельзя удалить её, изменить её валюту или отключить влияние на ставку")]
+    ExpenseCardInUse,
     #[error(transparent)]
     Domain(#[from] finance_core::DomainError),
 }
@@ -128,12 +136,13 @@ pub fn list_transactions(
     search: &str,
 ) -> Result<Vec<FinancialTransaction>, DbError> {
     let (table, categories) = transaction_tables(kind);
-    let card_column = match kind {
-        TransactionKind::Income => "t.payment_document_id",
-        TransactionKind::Expense => "NULL",
+    let (card_column, rate_effect_column) = match kind {
+        TransactionKind::Income => ("t.payment_document_id", "0"),
+        TransactionKind::Expense => ("t.payment_document_id", "t.affects_deposit_rate"),
     };
     let sql = format!(
-        "SELECT t.id, t.date, t.category_id, c.name, t.amount, t.currency, t.comment, {card_column}
+        "SELECT t.id, t.date, t.category_id, c.name, t.amount, t.currency, t.comment,
+                {card_column}, {rate_effect_column}
          FROM {table} t JOIN {categories} c ON c.id = t.category_id
          WHERE (?1 IS NULL OR t.date >= ?1)
            AND (?2 IS NULL OR t.date <= ?2)
@@ -166,6 +175,7 @@ pub fn list_transactions(
                 currency,
                 comment: row.get(6)?,
                 payment_document_id: row.get(7)?,
+                affects_deposit_rate: row.get(8)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -347,19 +357,23 @@ pub fn save_transaction(
     currency: Currency,
     comment: &str,
 ) -> Result<i64, DbError> {
-    let card = if kind == TransactionKind::Income {
-        match id {
-            Some(id) => connection.query_row(
+    let (card, affects_deposit_rate) = match (kind, id) {
+        (TransactionKind::Income, Some(id)) => (
+            connection.query_row(
                 "SELECT payment_document_id FROM incomes WHERE id = ?1",
                 [id],
                 |row| row.get(0),
             )?,
-            None => None,
-        }
-    } else {
-        None
+            false,
+        ),
+        (TransactionKind::Expense, Some(id)) => connection.query_row(
+            "SELECT payment_document_id, affects_deposit_rate FROM expenses WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?,
+        (_, None) => (None, false),
     };
-    save_transaction_with_card(
+    save_transaction_with_card_and_rate_effect(
         connection,
         kind,
         id,
@@ -369,10 +383,11 @@ pub fn save_transaction(
         currency,
         comment,
         card,
+        affects_deposit_rate,
     )
 }
 
-/// Saves an income and its optional card credit atomically, or an unlinked expense.
+/// Saves a transaction with an optional payment document; rate-counted expenses require a qualifying card.
 #[expect(
     clippy::too_many_arguments,
     reason = "Matches the existing transaction API"
@@ -388,11 +403,45 @@ pub fn save_transaction_with_card(
     comment: &str,
     payment_document_id: Option<i64>,
 ) -> Result<i64, DbError> {
+    save_transaction_with_card_and_rate_effect(
+        connection,
+        kind,
+        id,
+        date,
+        category_id,
+        amount,
+        currency,
+        comment,
+        payment_document_id,
+        false,
+    )
+}
+
+/// Saves a transaction with its optional card and whether an expense counts toward deposit-rate conditions.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Matches the established transaction API while adding the expense rate flag"
+)]
+pub fn save_transaction_with_card_and_rate_effect(
+    connection: &Connection,
+    kind: TransactionKind,
+    id: Option<i64>,
+    date: NaiveDate,
+    category_id: i64,
+    amount: Decimal,
+    currency: Currency,
+    comment: &str,
+    payment_document_id: Option<i64>,
+    affects_deposit_rate: bool,
+) -> Result<i64, DbError> {
     if amount <= Decimal::ZERO {
         return Err(DbError::InvalidAmount);
     }
-    if kind == TransactionKind::Expense && payment_document_id.is_some() {
-        return Err(DbError::IncomeCardUnavailable);
+    if kind == TransactionKind::Income && affects_deposit_rate {
+        return Err(DbError::ExpenseCardUnavailable);
+    }
+    if kind == TransactionKind::Expense && affects_deposit_rate && payment_document_id.is_none() {
+        return Err(DbError::ExpenseCardUnavailable);
     }
     let transaction =
         rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
@@ -438,33 +487,53 @@ pub fn save_transaction_with_card(
         None
     };
     if let Some(card_id) = payment_document_id {
-        let valid = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM payment_documents WHERE id = ?1 AND card_type = 'debit' AND currency = ?2)",
-            params![card_id, currency.code()], |row| row.get::<_, bool>(0),
-        )?;
+        let valid = match kind {
+            TransactionKind::Income => transaction.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM payment_documents
+                    WHERE id = ?1 AND card_type = 'debit' AND currency = ?2
+                )",
+                params![card_id, currency.code()],
+                |row| row.get::<_, bool>(0),
+            )?,
+            TransactionKind::Expense => transaction.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM payment_documents
+                    WHERE id = ?1 AND currency = ?2
+                      AND (?3 = 0 OR affects_deposit_rate = 1)
+                )",
+                params![card_id, currency.code(), affects_deposit_rate],
+                |row| row.get::<_, bool>(0),
+            )?,
+        };
         if !valid {
-            return Err(DbError::IncomeCardUnavailable);
+            return Err(match kind {
+                TransactionKind::Income => DbError::IncomeCardUnavailable,
+                TransactionKind::Expense => DbError::ExpenseCardUnavailable,
+            });
         }
     }
-    if let Some((old_card, old_amount)) = old_credit {
-        if Some(old_card) == payment_document_id {
-            let delta = amount
-                .checked_sub(old_amount)
-                .ok_or(DbError::CardBalanceOverflow)?;
-            if delta.checked_add(old_amount) != Some(amount)
-                || amount.checked_sub(delta) != Some(old_amount)
-            {
-                return Err(DbError::CardBalanceOverflow);
+    if kind == TransactionKind::Income {
+        if let Some((old_card, old_amount)) = old_credit {
+            if Some(old_card) == payment_document_id {
+                let delta = amount
+                    .checked_sub(old_amount)
+                    .ok_or(DbError::CardBalanceOverflow)?;
+                if delta.checked_add(old_amount) != Some(amount)
+                    || amount.checked_sub(delta) != Some(old_amount)
+                {
+                    return Err(DbError::CardBalanceOverflow);
+                }
+                adjust_card_balance(&transaction, old_card, delta)?;
+            } else {
+                adjust_card_balance(&transaction, old_card, -old_amount)?;
+                if let Some(new_card) = payment_document_id {
+                    adjust_card_balance(&transaction, new_card, amount)?;
+                }
             }
-            adjust_card_balance(&transaction, old_card, delta)?;
-        } else {
-            adjust_card_balance(&transaction, old_card, -old_amount)?;
-            if let Some(new_card) = payment_document_id {
-                adjust_card_balance(&transaction, new_card, amount)?;
-            }
+        } else if let Some(new_card) = payment_document_id {
+            adjust_card_balance(&transaction, new_card, amount)?;
         }
-    } else if let Some(new_card) = payment_document_id {
-        adjust_card_balance(&transaction, new_card, amount)?;
     }
     let amount = canonical_amount(amount);
     let date = date.format("%Y-%m-%d").to_string();
@@ -487,9 +556,19 @@ pub fn save_transaction_with_card(
             transaction.execute(
                 &format!(
                     "UPDATE {table} SET date = ?1, category_id = ?2, amount = ?3,
-                 currency = ?4, comment = ?5 WHERE id = ?6"
+                 currency = ?4, comment = ?5, payment_document_id = ?6,
+                 affects_deposit_rate = ?7 WHERE id = ?8"
                 ),
-                params![date, category_id, amount, currency.code(), comment, id],
+                params![
+                    date,
+                    category_id,
+                    amount,
+                    currency.code(),
+                    comment,
+                    payment_document_id,
+                    affects_deposit_rate,
+                    id
+                ],
             )?
         };
         if changed == 0 {
@@ -497,13 +576,29 @@ pub fn save_transaction_with_card(
         }
         id
     } else {
-        transaction.execute(
-            &format!(
-                "INSERT INTO {table} (date, category_id, amount, currency, comment)
-                 VALUES (?1, ?2, ?3, ?4, ?5)"
-            ),
-            params![date, category_id, amount, currency.code(), comment],
-        )?;
+        if kind == TransactionKind::Income {
+            transaction.execute(
+                "INSERT INTO incomes (date, category_id, amount, currency, comment)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![date, category_id, amount, currency.code(), comment],
+            )?;
+        } else {
+            transaction.execute(
+                "INSERT INTO expenses (
+                    date, category_id, amount, currency, comment,
+                    payment_document_id, affects_deposit_rate
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    date,
+                    category_id,
+                    amount,
+                    currency.code(),
+                    comment,
+                    payment_document_id,
+                    affects_deposit_rate
+                ],
+            )?;
+        }
         transaction.last_insert_rowid()
     };
     if kind == TransactionKind::Income && id.is_none() {
@@ -890,6 +985,25 @@ pub fn save_payment_document(
         if incompatible {
             return Err(DbError::IncomeCardInUse);
         }
+        let incompatible_expenses = transaction.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM expenses
+                WHERE payment_document_id = ?1
+                  AND (
+                      currency IS NOT ?2
+                      OR (affects_deposit_rate = 1 AND ?3 = 0)
+                  )
+            )",
+            params![
+                id,
+                details.currency.map(Currency::code),
+                details.affects_deposit_rate
+            ],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if incompatible_expenses {
+            return Err(DbError::ExpenseCardInUse);
+        }
     }
     for savings_id in &details.savings_ids {
         let savings_bank_id = transaction
@@ -977,6 +1091,13 @@ pub fn delete_payment_document(connection: &Connection, id: i64) -> Result<(), D
         |row| row.get::<_, bool>(0),
     )? {
         return Err(DbError::IncomeCardInUse);
+    }
+    if connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM expenses WHERE payment_document_id = ?1)",
+        [id],
+        |row| row.get::<_, bool>(0),
+    )? {
+        return Err(DbError::ExpenseCardInUse);
     }
     let deleted = connection.execute("DELETE FROM payment_documents WHERE id = ?1", [id])?;
     if deleted == 0 {
@@ -1437,7 +1558,7 @@ mod tests {
                         )
                         .unwrap();
                 }
-                4 | 5 => {}
+                4..=6 => {}
                 _ => unreachable!(),
             }
         }
@@ -1454,14 +1575,14 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v6-")
+                    .starts_with("data.before-migration-v7-")
             })
             .count()
     }
 
     #[test]
     fn initialize_migrates_supported_versions_and_preserves_backup_and_data() {
-        for version in 1..=5 {
+        for version in 1..=6 {
             let directory = tempfile::tempdir().unwrap();
             let database_path = directory.path().join("data.db");
             drop(create_legacy_database(&database_path, version));
@@ -1472,7 +1593,7 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap();
-            assert_eq!(latest_version, 6);
+            assert_eq!(latest_version, 7);
 
             let income_count = connection
                 .query_row("SELECT COUNT(*) FROM incomes", [], |row| {
@@ -1553,6 +1674,14 @@ mod tests {
                         "проверка расхода".into()
                     )
                 );
+                let expense_card_state = connection
+                    .query_row(
+                        "SELECT payment_document_id, affects_deposit_rate FROM expenses WHERE id = 1",
+                        [],
+                        |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, bool>(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(expense_card_state, (None, false));
             }
 
             let savings_count = connection
@@ -1600,7 +1729,7 @@ mod tests {
                     entry
                         .file_name()
                         .to_string_lossy()
-                        .starts_with("data.before-migration-v6-")
+                        .starts_with("data.before-migration-v7-")
                 })
                 .expect("upgrade should create a backup")
                 .path();
@@ -1786,7 +1915,7 @@ mod tests {
                 row.get::<_, i64>(0)
             })
             .unwrap();
-        assert_eq!(schema_version, 6);
+        assert_eq!(schema_version, 7);
     }
 
     #[test]
@@ -1805,7 +1934,7 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
             .unwrap();
 
-        assert_eq!(migration_count, 6);
+        assert_eq!(migration_count, 7);
         assert_eq!(foreign_keys_enabled, 1);
     }
 
@@ -1956,6 +2085,10 @@ mod tests {
         details.due_date = NaiveDate::from_ymd_opt(2024, 2, 1);
         details.grace_period_days = Some(30);
         let credit = save_payment_document(&db, None, &details).unwrap();
+        let mut no_currency_details = payment_document_details(bank);
+        no_currency_details.amount = Decimal::ZERO;
+        no_currency_details.currency = None;
+        let no_currency = save_payment_document(&db, None, &no_currency_details).unwrap();
         let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
         let save = |id, amount, currency, card| {
             super::save_transaction_with_card(
@@ -1988,6 +2121,29 @@ mod tests {
         ));
         let id = save(None, Decimal::from(10), Currency::Rub, first).unwrap();
         assert!(matches!(
+            save(Some(id), Decimal::from(20), Currency::Usd, first),
+            Err(DbError::IncomeCardUnavailable)
+        ));
+        assert!(matches!(
+            save(None, Decimal::ONE, Currency::Rub, no_currency),
+            Err(DbError::IncomeCardUnavailable)
+        ));
+        assert!(db
+            .execute(
+                "INSERT INTO incomes (date, category_id, amount, currency, comment, payment_document_id)
+                 VALUES ('2024-01-01', ?1, '1', 'USD', '', ?2)",
+                rusqlite::params![category, first]
+            )
+            .is_err());
+        assert!(db
+            .execute("UPDATE incomes SET currency = 'USD' WHERE id = ?1", [id])
+            .is_err());
+        let unchanged =
+            list_transactions(&db, TransactionKind::Income, None, None, None, "").unwrap();
+        assert_eq!(unchanged.len(), 1);
+        assert_eq!(unchanged[0].currency, Currency::Rub);
+        assert_eq!(unchanged[0].amount, Decimal::from(10));
+        assert!(matches!(
             save(Some(id), Decimal::ONE, Currency::Rub, full),
             Err(DbError::CardBalanceOverflow)
         ));
@@ -2019,6 +2175,192 @@ mod tests {
             .execute(
                 "UPDATE payment_documents SET currency = 'USD' WHERE id = ?1",
                 [first]
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn expenses_can_reference_cards_and_count_rate_without_changing_card_balances() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = initialize(&directory.path().join("data.db")).unwrap();
+        let bank_id = save_bank(&database, None, "Банк", "").unwrap();
+        let savings_id = save_savings(&database, None, &savings_details(bank_id)).unwrap();
+        let category_id = save_category(
+            &database,
+            TransactionKind::Expense,
+            None,
+            "Покупки",
+            None,
+            true,
+        )
+        .unwrap();
+
+        let mut debit_details = payment_document_details(bank_id);
+        debit_details.amount = Decimal::from(200);
+        debit_details.currency = Some(Currency::Rub);
+        debit_details.affects_deposit_rate = true;
+        debit_details.min_monthly_spend = Some(Decimal::from(100));
+        debit_details.savings_ids = vec![savings_id];
+        let debit_card_id = save_payment_document(&database, None, &debit_details).unwrap();
+
+        let mut credit_details = payment_document_details(bank_id);
+        credit_details.card_type = PaymentCardType::Credit;
+        credit_details.amount = Decimal::from(5000);
+        credit_details.currency = Some(Currency::Rub);
+        credit_details.due_date = NaiveDate::from_ymd_opt(2024, 2, 1);
+        credit_details.grace_period_days = Some(30);
+        credit_details.affects_deposit_rate = true;
+        credit_details.min_monthly_spend = Some(Decimal::from(100));
+        credit_details.savings_ids = vec![savings_id];
+        let credit_card_id = save_payment_document(&database, None, &credit_details).unwrap();
+
+        let mut unqualified_details = payment_document_details(bank_id);
+        unqualified_details.amount = Decimal::from(1000);
+        unqualified_details.currency = Some(Currency::Rub);
+        let unqualified_card_id =
+            save_payment_document(&database, None, &unqualified_details).unwrap();
+        let mut usd_details = payment_document_details(bank_id);
+        usd_details.amount = Decimal::ZERO;
+        usd_details.currency = Some(Currency::Usd);
+        let usd_card_id = save_payment_document(&database, None, &usd_details).unwrap();
+        let mut no_currency_details = payment_document_details(bank_id);
+        no_currency_details.amount = Decimal::ZERO;
+        no_currency_details.currency = None;
+        let no_currency_card_id =
+            save_payment_document(&database, None, &no_currency_details).unwrap();
+
+        let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let save = |id, currency, card_id, affects_deposit_rate| {
+            super::save_transaction_with_card_and_rate_effect(
+                &database,
+                TransactionKind::Expense,
+                id,
+                date,
+                category_id,
+                Decimal::from(42),
+                currency,
+                "магазин",
+                card_id,
+                affects_deposit_rate,
+            )
+        };
+
+        assert!(matches!(
+            save(None, Currency::Rub, None, true),
+            Err(DbError::ExpenseCardUnavailable)
+        ));
+        assert!(matches!(
+            save(None, Currency::Rub, Some(unqualified_card_id), true),
+            Err(DbError::ExpenseCardUnavailable)
+        ));
+        assert!(matches!(
+            save(None, Currency::Rub, Some(usd_card_id), false),
+            Err(DbError::ExpenseCardUnavailable)
+        ));
+        assert!(matches!(
+            save(None, Currency::Rub, Some(no_currency_card_id), false),
+            Err(DbError::ExpenseCardUnavailable)
+        ));
+
+        let expense_id = save(None, Currency::Rub, Some(debit_card_id), true).unwrap();
+        assert!(matches!(
+            save(Some(expense_id), Currency::Rub, Some(usd_card_id), false),
+            Err(DbError::ExpenseCardUnavailable)
+        ));
+        let listed =
+            list_transactions(&database, TransactionKind::Expense, None, None, None, "").unwrap();
+        assert_eq!(listed[0].payment_document_id, Some(debit_card_id));
+        assert!(listed[0].affects_deposit_rate);
+
+        save_transaction(
+            &database,
+            TransactionKind::Expense,
+            Some(expense_id),
+            date,
+            category_id,
+            Decimal::from(24),
+            Currency::Rub,
+            "изменённый расход",
+        )
+        .unwrap();
+        let preserved =
+            list_transactions(&database, TransactionKind::Expense, None, None, None, "").unwrap();
+        assert_eq!(preserved[0].payment_document_id, Some(debit_card_id));
+        assert!(preserved[0].affects_deposit_rate);
+
+        save(Some(expense_id), Currency::Rub, Some(credit_card_id), true).unwrap();
+        let moved =
+            list_transactions(&database, TransactionKind::Expense, None, None, None, "").unwrap();
+        assert_eq!(moved[0].payment_document_id, Some(credit_card_id));
+        assert!(moved[0].affects_deposit_rate);
+        assert_eq!(
+            list_payment_documents(&database, None, None, None)
+                .unwrap()
+                .iter()
+                .find(|card| card.id == debit_card_id)
+                .unwrap()
+                .amount,
+            Decimal::from(200)
+        );
+        assert_eq!(
+            list_payment_documents(&database, None, None, None)
+                .unwrap()
+                .iter()
+                .find(|card| card.id == credit_card_id)
+                .unwrap()
+                .amount,
+            Decimal::from(5000)
+        );
+
+        assert!(matches!(
+            delete_payment_document(&database, credit_card_id),
+            Err(DbError::ExpenseCardInUse)
+        ));
+        let mut disabled_rate = credit_details;
+        disabled_rate.affects_deposit_rate = false;
+        disabled_rate.min_monthly_spend = None;
+        disabled_rate.savings_ids.clear();
+        assert!(matches!(
+            save_payment_document(&database, Some(credit_card_id), &disabled_rate),
+            Err(DbError::ExpenseCardInUse)
+        ));
+        assert!(database
+            .execute(
+                "UPDATE payment_documents SET currency = 'USD' WHERE id = ?1",
+                [credit_card_id]
+            )
+            .is_err());
+        assert!(database
+            .execute(
+                "UPDATE payment_documents SET affects_deposit_rate = 0 WHERE id = ?1",
+                [credit_card_id]
+            )
+            .is_err());
+        assert!(database
+            .execute(
+                "INSERT INTO expenses (date, category_id, amount, currency, comment, payment_document_id, affects_deposit_rate)
+                 VALUES ('2024-01-15', ?1, '1', 'USD', '', ?2, 0)",
+                rusqlite::params![category_id, credit_card_id]
+            )
+            .is_err());
+        assert!(database
+            .execute(
+                "UPDATE expenses SET currency = 'USD' WHERE id = ?1",
+                [expense_id]
+            )
+            .is_err());
+        assert!(database
+            .execute(
+                "INSERT INTO expenses (date, category_id, amount, currency, comment, affects_deposit_rate)
+                 VALUES ('2024-01-15', ?1, '1', 'RUB', '', 1)",
+                [category_id]
+            )
+            .is_err());
+        assert!(database
+            .execute(
+                "INSERT INTO expenses (date, category_id, amount, currency, comment, payment_document_id, affects_deposit_rate)
+                 VALUES ('2024-01-15', ?1, '1', 'RUB', '', ?2, 1)",
+                rusqlite::params![category_id, unqualified_card_id]
             )
             .is_err());
     }
@@ -2442,7 +2784,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .contains("before-migration-v6")
+                    .contains("before-migration-v7")
             })
             .count();
 
@@ -2639,7 +2981,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v6-")
+                    .starts_with("data.before-migration-v7-")
             })
             .expect("upgrade from V4 should create a backup")
             .path();
@@ -2651,7 +2993,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(savings_dates, (None, None));
-        assert_eq!(migration_version, 6);
+        assert_eq!(migration_version, 7);
         assert_eq!(backup_version, 4);
     }
 

@@ -140,6 +140,7 @@ struct TransactionForm {
     currency: Option<Currency>,
     comment: String,
     payment_document_id: Option<i64>,
+    affects_deposit_rate: bool,
 }
 
 #[derive(Default)]
@@ -169,7 +170,7 @@ struct FinanceApp {
     analysis_expense_categories: Vec<Category>,
     banks: Vec<Bank>,
     transaction_form: TransactionForm,
-    income_cards: Vec<PaymentDocument>,
+    transaction_cards: Vec<PaymentDocument>,
     category_form: CategoryForm,
     bank_form: BankForm,
     savings_page: SavingsPage,
@@ -214,7 +215,7 @@ impl FinanceApp {
             analysis_expense_categories: Vec::new(),
             banks: Vec::new(),
             transaction_form: TransactionForm::default(),
-            income_cards: Vec::new(),
+            transaction_cards: Vec::new(),
             category_form: CategoryForm::default(),
             bank_form: BankForm::default(),
             savings_page: SavingsPage::default(),
@@ -385,7 +386,11 @@ impl FinanceApp {
     }
 
     fn start_new_transaction(&mut self) {
-        if self.active_tab == ModuleTab::Income && !self.load_income_cards() {
+        if self
+            .active_tab
+            .transaction_kind()
+            .is_some_and(|kind| !self.load_transaction_cards(kind))
+        {
             return;
         }
         self.transaction_date_input.reset();
@@ -406,7 +411,11 @@ impl FinanceApp {
     }
 
     fn edit_transaction(&mut self, transaction: &FinancialTransaction) {
-        if self.active_tab == ModuleTab::Income && !self.load_income_cards() {
+        if self
+            .active_tab
+            .transaction_kind()
+            .is_some_and(|kind| !self.load_transaction_cards(kind))
+        {
             return;
         }
         self.transaction_date_input.reset();
@@ -418,19 +427,20 @@ impl FinanceApp {
             currency: Some(transaction.currency),
             comment: transaction.comment.clone(),
             payment_document_id: transaction.payment_document_id,
+            affects_deposit_rate: transaction.affects_deposit_rate,
         };
         self.show_transaction_form = true;
     }
 
-    fn load_income_cards(&mut self) -> bool {
+    fn load_transaction_cards(&mut self, kind: TransactionKind) -> bool {
         match finance_db::list_payment_documents(
             &self.database,
             None,
-            Some(PaymentCardType::Debit),
+            (kind == TransactionKind::Income).then_some(PaymentCardType::Debit),
             None,
         ) {
             Ok(cards) => {
-                self.income_cards = cards;
+                self.transaction_cards = cards;
                 true
             }
             Err(error) => {
@@ -463,7 +473,7 @@ impl FinanceApp {
             self.show_error("Выберите валюту".to_owned());
             return;
         };
-        match finance_db::save_transaction_with_card(
+        match finance_db::save_transaction_with_card_and_rate_effect(
             &self.database,
             kind,
             self.transaction_form.id,
@@ -473,6 +483,7 @@ impl FinanceApp {
             currency,
             &self.transaction_form.comment,
             self.transaction_form.payment_document_id,
+            self.transaction_form.affects_deposit_rate,
         ) {
             Ok(_) => {
                 self.show_transaction_form = false;
@@ -849,10 +860,10 @@ impl FinanceApp {
             ui.horizontal(|ui| {
                 ui.label("Зачислить на карту");
                 let selected = self
-                    .income_cards
+                    .transaction_cards
                     .iter()
                     .find(|card| Some(card.id) == self.transaction_form.payment_document_id)
-                    .map(income_card_label)
+                    .map(payment_document_label)
                     .unwrap_or_else(|| "Без карты".to_owned());
                 egui::ComboBox::from_id_salt("income_card")
                     .selected_text(selected)
@@ -862,20 +873,20 @@ impl FinanceApp {
                             None,
                             "Без карты",
                         );
-                        for card in &self.income_cards {
+                        for card in &self.transaction_cards {
                             if card.currency == self.transaction_form.currency
                                 && card.currency.is_some()
                             {
                                 ui.selectable_value(
                                     &mut self.transaction_form.payment_document_id,
                                     Some(card.id),
-                                    income_card_label(card),
+                                    payment_document_label(card),
                                 );
                             }
                         }
                     });
                 if self.transaction_form.payment_document_id.is_some()
-                    && !self.income_cards.iter().any(|card| {
+                    && !self.transaction_cards.iter().any(|card| {
                         Some(card.id) == self.transaction_form.payment_document_id
                             && card.currency == self.transaction_form.currency
                             && card.currency.is_some()
@@ -888,6 +899,66 @@ impl FinanceApp {
                 }
             });
             ui.weak("Доступны дебетовые карты с указанной валютой. Для старых карт сначала укажите валюту в платёжных документах.");
+            ui.add_space(8.0);
+        } else {
+            ui.horizontal(|ui| {
+                ui.label("Оплачено картой");
+                let selected = self
+                    .transaction_cards
+                    .iter()
+                    .find(|card| Some(card.id) == self.transaction_form.payment_document_id)
+                    .map(payment_document_label)
+                    .unwrap_or_else(|| "Без карты".to_owned());
+                egui::ComboBox::from_id_salt("expense_card")
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.transaction_form.payment_document_id,
+                            None,
+                            "Без карты",
+                        );
+                        for card in &self.transaction_cards {
+                            if card.currency == self.transaction_form.currency
+                                && card.currency.is_some()
+                            {
+                                ui.selectable_value(
+                                    &mut self.transaction_form.payment_document_id,
+                                    Some(card.id),
+                                    payment_document_label(card),
+                                );
+                            }
+                        }
+                    });
+                if self.transaction_form.payment_document_id.is_some()
+                    && !self.transaction_cards.iter().any(|card| {
+                        Some(card.id) == self.transaction_form.payment_document_id
+                            && card.currency == self.transaction_form.currency
+                            && card.currency.is_some()
+                    })
+                {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        "Выберите карту в валюте расхода или отмените выбор карты",
+                    );
+                }
+            });
+            let rate_eligible = self.transaction_cards.iter().any(|card| {
+                Some(card.id) == self.transaction_form.payment_document_id
+                    && card.currency == self.transaction_form.currency
+                    && card.currency.is_some()
+                    && card.affects_deposit_rate
+            });
+            ui.add_enabled(
+                rate_eligible || self.transaction_form.affects_deposit_rate,
+                egui::Checkbox::new(
+                    &mut self.transaction_form.affects_deposit_rate,
+                    "Учитывать расход при расчёте процентов по вкладам",
+                ),
+            );
+            if !rate_eligible {
+                ui.weak("Для учёта выберите карту с совпадающей валютой и включённым влиянием на ставку.");
+            }
+            ui.weak("Связь с картой и отметка не изменяют её баланс; оценка процентов пока не рассчитывается.");
             ui.add_space(8.0);
         }
         ui.horizontal(|ui| {
@@ -1412,7 +1483,7 @@ impl eframe::App for FinanceApp {
     }
 }
 
-fn income_card_label(card: &PaymentDocument) -> String {
+fn payment_document_label(card: &PaymentDocument) -> String {
     format!(
         "{} — {} #{} ({})",
         card.bank_name,
@@ -1569,6 +1640,9 @@ mod tests {
                 "../../db/migrations/V6__income_card_balances.sql"
             ))
             .unwrap();
+        database
+            .execute_batch(include_str!("../../db/migrations/V7__expense_cards.sql"))
+            .unwrap();
 
         let (category_table, transaction_table, active_tab) = match kind {
             TransactionKind::Income => ("income_categories", "incomes", ModuleTab::Income),
@@ -1655,6 +1729,134 @@ mod tests {
                 .to_string(),
             "15"
         );
+    }
+
+    #[test]
+    fn expense_form_saves_card_and_rate_flag_and_restores_them_for_editing() {
+        let mut app = filtered_transaction_app(TransactionKind::Expense);
+        let bank = finance_db::save_bank(&app.database, None, "Банк", "").unwrap();
+        let savings = finance_db::save_savings(
+            &app.database,
+            None,
+            &finance_core::SavingsDetails {
+                bank_id: bank,
+                title: "Резерв".to_owned(),
+                amount: 1000.into(),
+                base_rate: 5.into(),
+                rate_after_threshold: None,
+                threshold_amount: None,
+                opened_date: None,
+                interest_accrual_date: None,
+                term_type: finance_core::SavingsTerm::Unlimited,
+                term_end_date: None,
+                interest_destination: finance_core::InterestDestination::Withdraw,
+                is_active: true,
+            },
+        )
+        .unwrap();
+        let card = finance_db::save_payment_document(
+            &app.database,
+            None,
+            &finance_core::PaymentDocumentDetails {
+                bank_id: bank,
+                payment_system: finance_core::PaymentSystem::Mir,
+                card_type: finance_core::PaymentCardType::Credit,
+                amount: 5000.into(),
+                currency: Some(Currency::Rub),
+                due_date: NaiveDate::from_ymd_opt(2024, 2, 1),
+                grace_period_days: Some(30),
+                affects_deposit_rate: true,
+                min_monthly_spend: Some(1000.into()),
+                savings_ids: vec![savings],
+            },
+        )
+        .unwrap();
+
+        app.start_new_transaction();
+        app.transaction_form.date = "2024-01-20".to_owned();
+        app.transaction_form.category_id = Some(1);
+        app.transaction_form.amount = "12.50".to_owned();
+        app.transaction_form.comment = "найти расход по карте".to_owned();
+        app.transaction_form.payment_document_id = Some(card);
+        app.transaction_form.affects_deposit_rate = true;
+        app.save_transaction(TransactionKind::Expense);
+
+        let saved = app
+            .transactions
+            .iter()
+            .find(|transaction| transaction.payment_document_id == Some(card))
+            .unwrap()
+            .clone();
+        assert!(saved.affects_deposit_rate);
+        app.edit_transaction(&saved);
+        assert_eq!(app.transaction_form.payment_document_id, Some(card));
+        assert!(app.transaction_form.affects_deposit_rate);
+
+        app.transaction_form.affects_deposit_rate = false;
+        app.save_transaction(TransactionKind::Expense);
+        let updated = finance_db::list_transactions(
+            &app.database,
+            TransactionKind::Expense,
+            None,
+            None,
+            None,
+            "",
+        )
+        .unwrap()
+        .into_iter()
+        .find(|transaction| transaction.payment_document_id == Some(card))
+        .unwrap();
+        assert!(!updated.affects_deposit_rate);
+    }
+
+    #[test]
+    fn transaction_form_rejects_card_currency_mismatch_after_currency_changes() {
+        for kind in [TransactionKind::Income, TransactionKind::Expense] {
+            let mut app = filtered_transaction_app(kind);
+            let bank = finance_db::save_bank(&app.database, None, "Банк", "").unwrap();
+            let card = finance_db::save_payment_document(
+                &app.database,
+                None,
+                &finance_core::PaymentDocumentDetails {
+                    bank_id: bank,
+                    payment_system: finance_core::PaymentSystem::Mir,
+                    card_type: finance_core::PaymentCardType::Debit,
+                    amount: 0.into(),
+                    currency: Some(Currency::Usd),
+                    due_date: None,
+                    grace_period_days: None,
+                    affects_deposit_rate: false,
+                    min_monthly_spend: None,
+                    savings_ids: Vec::new(),
+                },
+            )
+            .unwrap();
+            let transaction_count =
+                finance_db::list_transactions(&app.database, kind, None, None, None, "")
+                    .unwrap()
+                    .len();
+
+            app.start_new_transaction();
+            app.transaction_form.date = "2024-01-20".to_owned();
+            app.transaction_form.category_id = Some(1);
+            app.transaction_form.amount = "12.50".to_owned();
+            app.transaction_form.currency = Some(Currency::Usd);
+            app.transaction_form.payment_document_id = Some(card);
+            app.transaction_form.currency = Some(Currency::Rub);
+            app.save_transaction(kind);
+
+            assert!(app.show_transaction_form);
+            assert!(app
+                .message
+                .as_ref()
+                .is_some_and(|(message, is_error)| *is_error && message.contains("валют")));
+            assert_eq!(
+                finance_db::list_transactions(&app.database, kind, None, None, None, "")
+                    .unwrap()
+                    .len(),
+                transaction_count
+            );
+        }
     }
 
     #[test]

@@ -691,6 +691,9 @@ mod tests {
             ))
             .unwrap();
         database
+            .execute_batch(include_str!("../../db/migrations/V7__expense_cards.sql"))
+            .unwrap();
+        database
             .execute_batch("INSERT INTO banks (id, name) VALUES (1, 'Банк Альфа');")
             .unwrap();
         database
