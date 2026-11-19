@@ -1,11 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use chrono::NaiveDate;
 use eframe::egui;
 use finance_core::{
     parse_amount_expression, summarize_transaction_balance, Bank, Category, Currency,
-    FinancialTransaction, PaymentCardType, PaymentDocument, TransactionBalance, TransactionKind,
+    CurrencyDefinition, FinancialTransaction, PaymentCardType, PaymentDocument, TransactionBalance,
+    TransactionKind,
 };
 use finance_db::{self, Database};
 use rust_decimal::Decimal;
@@ -125,11 +127,18 @@ impl ModuleTab {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DirectoryRightTab {
+    Banks,
+    Currencies,
+}
+
+#[derive(Clone)]
 enum DeleteTarget {
     Transaction(TransactionKind, i64),
     Category(TransactionKind, i64),
     Bank(i64),
+    Currency(String),
 }
 
 #[derive(Default)]
@@ -159,6 +168,15 @@ struct BankForm {
     comment: String,
 }
 
+#[derive(Default)]
+struct CurrencyForm {
+    code: String,
+    name: String,
+    rate: String,
+    rate_date: String,
+    editing_rate: bool,
+}
+
 struct FinanceApp {
     database: Database,
     database_path: Option<PathBuf>,
@@ -170,14 +188,18 @@ struct FinanceApp {
     analysis_income_categories: Vec<Category>,
     analysis_expense_categories: Vec<Category>,
     banks: Vec<Bank>,
+    currencies: Vec<CurrencyDefinition>,
+    used_currencies: HashSet<String>,
     transaction_form: TransactionForm,
     transaction_cards: Vec<PaymentDocument>,
     category_form: CategoryForm,
     bank_form: BankForm,
+    currency_form: CurrencyForm,
     savings_page: SavingsPage,
     payment_documents_page: PaymentDocumentsPage,
     analysis_page: AnalysisPage,
     directory_kind: TransactionKind,
+    directory_right_tab: DirectoryRightTab,
     search: String,
     from_date: String,
     to_date: String,
@@ -188,6 +210,7 @@ struct FinanceApp {
     show_transaction_form: bool,
     show_category_form: bool,
     show_bank_form: bool,
+    show_currency_form: bool,
     pending_delete: Option<DeleteTarget>,
     message: Option<(String, bool)>,
 }
@@ -215,14 +238,18 @@ impl FinanceApp {
             analysis_income_categories: Vec::new(),
             analysis_expense_categories: Vec::new(),
             banks: Vec::new(),
+            currencies: Vec::new(),
+            used_currencies: HashSet::new(),
             transaction_form: TransactionForm::default(),
             transaction_cards: Vec::new(),
             category_form: CategoryForm::default(),
             bank_form: BankForm::default(),
+            currency_form: CurrencyForm::default(),
             savings_page: SavingsPage::default(),
             payment_documents_page: PaymentDocumentsPage::default(),
             analysis_page: AnalysisPage::default(),
             directory_kind: TransactionKind::Income,
+            directory_right_tab: DirectoryRightTab::Banks,
             search: String::new(),
             from_date: String::new(),
             to_date: String::new(),
@@ -233,6 +260,7 @@ impl FinanceApp {
             show_transaction_form: false,
             show_category_form: false,
             show_bank_form: false,
+            show_currency_form: false,
             pending_delete: None,
             message: None,
         };
@@ -374,6 +402,14 @@ impl FinanceApp {
         self.refresh_categories(self.directory_kind, true);
         match finance_db::list_banks(&self.database) {
             Ok(banks) => self.banks = banks,
+            Err(error) => self.show_error(error.to_string()),
+        }
+        match finance_db::list_currencies(&self.database) {
+            Ok(currencies) => self.currencies = currencies,
+            Err(error) => self.show_error(error.to_string()),
+        }
+        match finance_db::list_used_currency_codes(&self.database) {
+            Ok(currencies) => self.used_currencies = currencies.into_iter().collect(),
             Err(error) => self.show_error(error.to_string()),
         }
     }
@@ -529,6 +565,81 @@ impl FinanceApp {
         }
     }
 
+    fn save_currency(&mut self) {
+        let result = if self.currency_form.editing_rate {
+            let rate_text = self.currency_form.rate.trim().replace(',', ".");
+            let rate = match Decimal::from_str(&rate_text) {
+                Ok(rate) => rate,
+                Err(_) => {
+                    self.show_error("Введите корректный положительный курс".to_owned());
+                    return;
+                }
+            };
+            let rate_date =
+                match NaiveDate::parse_from_str(self.currency_form.rate_date.trim(), "%Y-%m-%d") {
+                    Ok(date) => date,
+                    Err(_) => {
+                        self.show_error("Введите дату курса в формате ГГГГ-ММ-ДД".to_owned());
+                        return;
+                    }
+                };
+            finance_db::set_currency_exchange_rate(
+                &self.database,
+                &self.currency_form.code,
+                rate,
+                rate_date,
+            )
+        } else {
+            let code = self.currency_form.code.trim().to_ascii_uppercase();
+            finance_db::add_currency(&self.database, &code, &self.currency_form.name)
+        };
+
+        match result {
+            Ok(()) => {
+                self.show_currency_form = false;
+                self.show_success(if self.currency_form.editing_rate {
+                    "Курс валюты сохранён"
+                } else {
+                    "Валюта добавлена"
+                });
+                self.currency_form = CurrencyForm::default();
+                self.refresh_directories();
+            }
+            Err(error) => self.show_error(error.to_string()),
+        }
+    }
+
+    fn edit_currency_rate(&mut self, currency: &CurrencyDefinition) {
+        self.currency_form = CurrencyForm {
+            code: currency.code.clone(),
+            rate: currency
+                .rate_to_primary
+                .map_or_else(String::new, |rate| rate.to_string()),
+            rate_date: currency.rate_date.map_or_else(
+                || {
+                    chrono::Local::now()
+                        .date_naive()
+                        .format("%Y-%m-%d")
+                        .to_string()
+                },
+                |date| date.format("%Y-%m-%d").to_string(),
+            ),
+            editing_rate: true,
+            ..CurrencyForm::default()
+        };
+        self.show_currency_form = true;
+    }
+
+    fn change_primary_currency(&mut self, code: &str) {
+        match finance_db::set_primary_currency(&mut self.database, code) {
+            Ok(()) => {
+                self.show_success("Основная валюта изменена; суммы операций не пересчитаны");
+                self.refresh_directories();
+            }
+            Err(error) => self.show_error(error.to_string()),
+        }
+    }
+
     fn confirm_delete(&mut self) {
         let Some(target) = self.pending_delete.take() else {
             return;
@@ -541,6 +652,7 @@ impl FinanceApp {
                 finance_db::delete_category(&self.database, kind, id)
             }
             DeleteTarget::Bank(id) => finance_db::delete_bank(&self.database, id),
+            DeleteTarget::Currency(code) => finance_db::delete_currency(&self.database, &code),
         };
         match result {
             Ok(()) => {
@@ -1000,6 +1112,7 @@ impl FinanceApp {
 
     fn render_directories(&mut self, ui: &mut egui::Ui) -> (egui::Id, egui::Id) {
         let previous_kind = self.directory_kind;
+        let previous_right_tab = self.directory_right_tab;
         ui.horizontal(|ui| {
             ui.selectable_value(
                 &mut self.directory_kind,
@@ -1016,6 +1129,11 @@ impl FinanceApp {
             self.category_form = CategoryForm::default();
             self.show_category_form = false;
             self.refresh_categories(self.directory_kind, true);
+        }
+        if self.directory_right_tab != previous_right_tab {
+            self.show_bank_form = false;
+            self.show_currency_form = false;
+            self.currency_form = CurrencyForm::default();
         }
         let mut scroll_area_ids = None;
         ui.columns(2, |columns| {
@@ -1111,91 +1229,214 @@ impl FinanceApp {
                     }
                 }
             });
+            let right_title = match self.directory_right_tab {
+                DirectoryRightTab::Banks => "Банки",
+                DirectoryRightTab::Currencies => "Валюты",
+            };
             columns[1].horizontal(|ui| {
-                ui.heading("Банки");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("＋ Добавить банк").clicked() {
-                        self.bank_form = BankForm::default();
-                        self.show_bank_form = true;
-                    }
-                });
-            });
-            let bank_scroll_area = egui::ScrollArea::vertical()
-                .auto_shrink([false, true])
-                .id_salt(DIRECTORY_BANKS_SCROLL_AREA_ID);
-            let bank_scroll_output = bank_scroll_area.show(&mut columns[1], |ui| {
-                let banks = self.banks.clone();
-                let table_width = ui.available_width();
-                let name_width = (table_width - 145.0).max(100.0);
-                let row_height = 22.0;
-                ui.allocate_ui_with_layout(
-                    egui::vec2(table_width, row_height),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(name_width, row_height),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                ui.label(egui::RichText::new("Банк").strong());
-                            },
-                        );
-                        ui.strong("Действия");
+                ui.heading(right_title);
+                ui.selectable_value(
+                    &mut self.directory_right_tab,
+                    DirectoryRightTab::Banks,
+                    "Банки",
+                );
+                ui.selectable_value(
+                    &mut self.directory_right_tab,
+                    DirectoryRightTab::Currencies,
+                    "Валюты",
+                );
+                ui.with_layout(
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| match self.directory_right_tab {
+                        DirectoryRightTab::Banks => {
+                            if ui.button("＋ Добавить банк").clicked() {
+                                self.bank_form = BankForm::default();
+                                self.show_bank_form = true;
+                            }
+                        }
+                        DirectoryRightTab::Currencies => {
+                            if ui.button("＋ Добавить валюту").clicked() {
+                                self.currency_form = CurrencyForm::default();
+                                self.show_currency_form = true;
+                            }
+                        }
                     },
                 );
-
-                for (row_index, bank) in banks.iter().enumerate() {
-                    let mut edit_clicked = false;
-                    let mut delete_clicked = false;
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(table_width, row_height),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            if row_index % 2 == 1 {
-                                ui.painter().rect_filled(
-                                    ui.max_rect(),
-                                    0.0,
-                                    ui.visuals().faint_bg_color,
-                                );
-                            }
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(name_width, row_height),
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| {
-                                    ui.label(&bank.name);
-                                },
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    delete_clicked = ui.small_button("Удалить").clicked();
-                                    edit_clicked = ui.small_button("Изменить").clicked();
-                                },
-                            );
-                        },
-                    );
-                    if edit_clicked {
-                        self.bank_form = BankForm {
-                            id: Some(bank.id),
-                            name: bank.name.clone(),
-                            comment: bank.comment.clone(),
-                        };
-                        self.show_bank_form = true;
-                    }
-                    if delete_clicked {
-                        self.pending_delete = Some(DeleteTarget::Bank(bank.id));
-                    }
-                }
             });
-            scroll_area_ids = Some((category_scroll_output.id, bank_scroll_output.id));
+            let right_scroll_area = egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .id_salt(DIRECTORY_BANKS_SCROLL_AREA_ID);
+            let right_scroll_output =
+                right_scroll_area.show(&mut columns[1], |ui| match self.directory_right_tab {
+                    DirectoryRightTab::Banks => {
+                        self.render_bank_directory(ui);
+                    }
+                    DirectoryRightTab::Currencies => {
+                        self.render_currency_directory(ui);
+                    }
+                });
+            scroll_area_ids = Some((category_scroll_output.id, right_scroll_output.id));
         });
 
+        if self.directory_right_tab != previous_right_tab {
+            self.show_bank_form = false;
+            self.show_currency_form = false;
+            self.currency_form = CurrencyForm::default();
+        }
         if self.show_category_form {
             self.render_category_form(ui);
         }
         if self.show_bank_form {
             self.render_bank_form(ui);
         }
+        if self.show_currency_form {
+            self.render_currency_form(ui);
+        }
         scroll_area_ids.expect("directory columns should render both scroll areas")
+    }
+
+    fn render_bank_directory(&mut self, ui: &mut egui::Ui) {
+        let banks = self.banks.clone();
+        let table_width = ui.available_width();
+        let name_width = (table_width - 145.0).max(100.0);
+        let row_height = 22.0;
+        ui.allocate_ui_with_layout(
+            egui::vec2(table_width, row_height),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(name_width, row_height),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.label(egui::RichText::new("Банк").strong());
+                    },
+                );
+                ui.strong("Действия");
+            },
+        );
+
+        for (row_index, bank) in banks.iter().enumerate() {
+            let mut edit_clicked = false;
+            let mut delete_clicked = false;
+            ui.allocate_ui_with_layout(
+                egui::vec2(table_width, row_height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    if row_index % 2 == 1 {
+                        ui.painter()
+                            .rect_filled(ui.max_rect(), 0.0, ui.visuals().faint_bg_color);
+                    }
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(name_width, row_height),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.label(&bank.name);
+                        },
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        delete_clicked = ui.small_button("Удалить").clicked();
+                        edit_clicked = ui.small_button("Изменить").clicked();
+                    });
+                },
+            );
+            if edit_clicked {
+                self.bank_form = BankForm {
+                    id: Some(bank.id),
+                    name: bank.name.clone(),
+                    comment: bank.comment.clone(),
+                };
+                self.show_bank_form = true;
+            }
+            if delete_clicked {
+                self.pending_delete = Some(DeleteTarget::Bank(bank.id));
+            }
+        }
+    }
+
+    fn render_currency_directory(&mut self, ui: &mut egui::Ui) {
+        let currencies = self.currencies.clone();
+        let used_currencies = self.used_currencies.clone();
+        let primary_code = currencies
+            .iter()
+            .find(|currency| currency.is_primary)
+            .map_or("—", |currency| currency.code.as_str())
+            .to_owned();
+        let table_width = ui.available_width();
+        let row_height = 44.0;
+
+        ui.label(egui::RichText::new("Валюта и курс к основной").strong());
+        for (row_index, currency) in currencies.iter().enumerate() {
+            let mut edit_rate_clicked = false;
+            let mut primary_clicked = false;
+            let mut delete_clicked = false;
+            ui.allocate_ui_with_layout(
+                egui::vec2(table_width, row_height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    if row_index % 2 == 1 {
+                        ui.painter()
+                            .rect_filled(ui.max_rect(), 0.0, ui.visuals().faint_bg_color);
+                    }
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.strong(&currency.code);
+                            ui.label(&currency.name);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    delete_clicked = ui
+                                        .add_enabled(
+                                            !currency.is_primary
+                                                && !used_currencies.contains(&currency.code),
+                                            egui::Button::new("Удалить").small(),
+                                        )
+                                        .on_disabled_hover_text(
+                                            if currency.is_primary {
+                                                "Сначала выберите другую основную валюту"
+                                            } else {
+                                                "Валюта используется; сначала удалите связанные финансовые записи"
+                                            },
+                                        )
+                                        .clicked();
+                                    if currency.is_primary {
+                                        ui.weak("Основная");
+                                    } else {
+                                        primary_clicked = ui
+                                            .add_enabled(
+                                                currency.rate_to_primary.is_some(),
+                                                egui::Button::new("Сделать основной").small(),
+                                            )
+                                            .on_disabled_hover_text(
+                                                "Сначала задайте курс этой валюты",
+                                            )
+                                            .clicked();
+                                    }
+                                    edit_rate_clicked = ui
+                                        .add_enabled(
+                                            !currency.is_primary,
+                                            egui::Button::new("Изменить курс").small(),
+                                        )
+                                        .clicked();
+                                },
+                            );
+                        });
+                        ui.weak(currency_rate_label(currency, &primary_code));
+                    });
+                },
+            );
+            if edit_rate_clicked {
+                self.edit_currency_rate(currency);
+            }
+            if primary_clicked {
+                self.change_primary_currency(&currency.code);
+            }
+            if delete_clicked {
+                self.pending_delete = Some(DeleteTarget::Currency(currency.code.clone()));
+            }
+        }
+        ui.add_space(8.0);
+        ui.weak("Курс означает количество единиц основной валюты за 1 единицу выбранной валюты.");
+        ui.weak("Дополнительные валюты пока нельзя выбирать в формах доходов и расходов (поддерживаются RUB и USD).");
     }
 
     fn render_category_form(&mut self, ui: &mut egui::Ui) {
@@ -1263,18 +1504,62 @@ impl FinanceApp {
         });
     }
 
+    fn render_currency_form(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        if self.currency_form.editing_rate {
+            let primary_code = self
+                .currencies
+                .iter()
+                .find(|currency| currency.is_primary)
+                .map_or("—", |currency| currency.code.as_str());
+            ui.heading(format!(
+                "Курс {} к {}",
+                self.currency_form.code, primary_code
+            ));
+            ui.horizontal(|ui| {
+                ui.label("За 1 единицу валюты");
+                ui.text_edit_singleline(&mut self.currency_form.rate);
+                ui.label("Дата курса (ГГГГ-ММ-ДД)");
+                ui.text_edit_singleline(&mut self.currency_form.rate_date);
+            });
+        } else {
+            ui.heading("Новая валюта");
+            ui.horizontal(|ui| {
+                ui.label("Код (3 заглавные латинские буквы)");
+                ui.text_edit_singleline(&mut self.currency_form.code);
+                ui.label("Название");
+                ui.text_edit_singleline(&mut self.currency_form.name);
+            });
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Сохранить").clicked() {
+                self.save_currency();
+            }
+            if ui.button("Отмена").clicked() {
+                self.show_currency_form = false;
+                self.currency_form = CurrencyForm::default();
+            }
+        });
+    }
+
     fn render_delete_confirmation(&mut self, context: &egui::Context) {
-        let Some(target) = self.pending_delete else {
+        let Some(target) = self.pending_delete.clone() else {
             return;
+        };
+        let confirmation_text = match &target {
+            DeleteTarget::Currency(code) => format!(
+                "Удалить валюту {code}? Основную валюту и валюты, используемые записями, удалить нельзя."
+            ),
+            _ => "Удалить выбранную запись? Это действие нельзя отменить.".to_owned(),
         };
         egui::Window::new("Подтверждение удаления")
             .collapsible(false)
             .resizable(false)
             .show(context, |ui| {
-                ui.label("Удалить выбранную запись? Это действие нельзя отменить.");
+                ui.label(confirmation_text);
                 ui.horizontal(|ui| {
                     if ui.button("Удалить").clicked() {
-                        self.pending_delete = Some(target);
+                        self.pending_delete = Some(target.clone());
                         self.confirm_delete();
                     }
                     if ui.button("Отмена").clicked() {
@@ -1548,6 +1833,22 @@ fn category_tree_labels(categories: &[Category]) -> Vec<(i64, String)> {
         .collect()
 }
 
+fn currency_rate_label(currency: &CurrencyDefinition, primary_code: &str) -> String {
+    if currency.is_primary {
+        return "Основная валюта".to_owned();
+    }
+    match (currency.rate_to_primary, currency.rate_date) {
+        (Some(rate), Some(date)) => format!(
+            "1 {} = {} {} · курс от {}",
+            currency.code,
+            rate,
+            primary_code,
+            date.format("%d.%m.%Y")
+        ),
+        _ => "Курс не задан".to_owned(),
+    }
+}
+
 fn transaction_balance_period_label(from: Option<NaiveDate>, to: Option<NaiveDate>) -> String {
     match (from, to) {
         (None, None) => "за весь период".to_owned(),
@@ -1598,12 +1899,12 @@ mod tests {
     use finance_core::{Currency, TransactionBalance};
 
     use super::{
-        category_tree_labels, category_tree_rows, render_analysis_footer,
+        category_tree_labels, category_tree_rows, currency_rate_label, render_analysis_footer,
         render_transaction_balance_footer, transaction_column_widths, AnalysisPage, Category,
-        FinanceApp, ModuleTab, SavingsPage, TransactionKind, DIRECTORY_BANKS_SCROLL_AREA_ID,
-        DIRECTORY_CATEGORIES_SCROLL_AREA_ID, DIVISION_ROUNDING_WARNING, TABLE_ROW_HEIGHT,
-        TRANSACTION_COLUMN_MIN_WIDTHS, TRANSACTION_FILTERS_SCROLL_AREA_ID,
-        TRANSACTION_TABLE_SCROLL_AREA_ID,
+        CurrencyForm, DirectoryRightTab, FinanceApp, ModuleTab, SavingsPage, TransactionKind,
+        DIRECTORY_BANKS_SCROLL_AREA_ID, DIRECTORY_CATEGORIES_SCROLL_AREA_ID,
+        DIVISION_ROUNDING_WARNING, TABLE_ROW_HEIGHT, TRANSACTION_COLUMN_MIN_WIDTHS,
+        TRANSACTION_FILTERS_SCROLL_AREA_ID, TRANSACTION_TABLE_SCROLL_AREA_ID,
     };
 
     fn category(id: i64, parent_id: Option<i64>, is_active: bool) -> Category {
@@ -1677,6 +1978,27 @@ mod tests {
             1,
             "fixture should match all filters"
         );
+        app
+    }
+
+    fn directory_app() -> FinanceApp {
+        let database = finance_db::Database::open_in_memory().unwrap();
+        for migration in [
+            include_str!("../../db/migrations/V1__initial.sql"),
+            include_str!("../../db/migrations/V2__transactions_and_directories.sql"),
+            include_str!("../../db/migrations/V3__savings.sql"),
+            include_str!("../../db/migrations/V4__payment_documents.sql"),
+            include_str!("../../db/migrations/V5__savings_dates.sql"),
+            include_str!("../../db/migrations/V6__income_card_balances.sql"),
+            include_str!("../../db/migrations/V7__expense_cards.sql"),
+            include_str!("../../db/migrations/V8__currencies.sql"),
+        ] {
+            database.execute_batch(migration).unwrap();
+        }
+
+        let mut app = FinanceApp::new(database);
+        app.active_tab = ModuleTab::Directories;
+        app.refresh_directories();
         app
     }
 
@@ -2482,29 +2804,87 @@ mod tests {
     }
 
     #[test]
+    fn currency_directory_adds_currency_edits_rate_and_keeps_primary_first() {
+        let mut app = directory_app();
+        app.directory_right_tab = DirectoryRightTab::Currencies;
+        app.currency_form = CurrencyForm {
+            code: "EUR".to_owned(),
+            name: "Евро".to_owned(),
+            ..CurrencyForm::default()
+        };
+        app.show_currency_form = true;
+        app.save_currency();
+
+        let euro = app
+            .currencies
+            .iter()
+            .find(|currency| currency.code == "EUR")
+            .cloned()
+            .unwrap();
+        app.edit_currency_rate(&euro);
+        app.currency_form.rate = "95.125".to_owned();
+        app.currency_form.rate_date = "2026-02-01".to_owned();
+        app.save_currency();
+
+        let euro = app
+            .currencies
+            .iter()
+            .find(|currency| currency.code == "EUR")
+            .unwrap();
+        assert_eq!(
+            euro.rate_to_primary.map(|rate| rate.to_string()),
+            Some("95.125".to_owned())
+        );
+        assert_eq!(
+            currency_rate_label(euro, "RUB"),
+            "1 EUR = 95.125 RUB · курс от 01.02.2026"
+        );
+
+        let context = egui::Context::default();
+        let output = render_directories_at_width(&mut app, &context, 1280.0);
+        assert!(text_positions(&output, "Валюта и курс к основной").len() == 1);
+        let rub_y = text_positions(&output, "RUB")[0].y;
+        let usd_y = text_positions(&output, "USD")[0].y;
+        assert!(rub_y < usd_y, "the primary currency should render first");
+
+        app.change_primary_currency("EUR");
+        assert_eq!(app.currencies[0].code, "EUR");
+        assert!(app.currencies[0].is_primary);
+    }
+
+    #[test]
+    fn currency_directory_marks_transaction_currency_as_used() {
+        let mut app = directory_app();
+        finance_db::add_currency(&app.database, "EUR", "Евро").unwrap();
+        app.database
+            .execute_batch(
+                "INSERT INTO income_categories (name) VALUES ('Зарплата');
+                 INSERT INTO incomes (date, category_id, amount, currency)
+                    VALUES ('2026-01-01', 1, '12.50', 'EUR');",
+            )
+            .unwrap();
+
+        app.refresh_directories();
+
+        assert!(app.used_currencies.contains("EUR"));
+        assert!(matches!(
+            finance_db::delete_currency(&app.database, "EUR"),
+            Err(finance_db::DbError::CurrencyInUse)
+        ));
+    }
+
+    #[test]
     fn directory_scroll_areas_have_distinct_ids_when_rendered() {
-        let database =
-            finance_db::Database::open_in_memory().expect("in-memory SQLite should open");
-        database
-            .execute_batch(include_str!("../../db/migrations/V1__initial.sql"))
-            .expect("initial migration should apply");
-        database
-            .execute_batch(include_str!(
-                "../../db/migrations/V2__transactions_and_directories.sql"
-            ))
-            .expect("directory migration should apply");
-        database
+        let mut app = directory_app();
+        app.database
             .execute(
                 "INSERT INTO income_categories (name) VALUES ('Тестовая категория')",
                 [],
             )
             .expect("test category should be inserted");
-        database
+        app.database
             .execute("INSERT INTO banks (name) VALUES ('Тестовый банк')", [])
             .expect("test bank should be inserted");
-
-        let mut app = FinanceApp::new(database);
-        app.active_tab = ModuleTab::Directories;
         app.refresh_directories();
 
         let context = egui::Context::default();
@@ -2526,37 +2906,25 @@ mod tests {
 
     #[test]
     fn directory_name_columns_are_left_aligned_after_second_frame() {
-        let database =
-            finance_db::Database::open_in_memory().expect("in-memory SQLite should open");
-        database
-            .execute_batch(include_str!("../../db/migrations/V1__initial.sql"))
-            .expect("initial migration should apply");
-        database
-            .execute_batch(include_str!(
-                "../../db/migrations/V2__transactions_and_directories.sql"
-            ))
-            .expect("directory migration should apply");
-        database
+        let mut app = directory_app();
+        app.database
             .execute(
                 "INSERT INTO income_categories (name) VALUES ('Корневая категория')",
                 [],
             )
             .expect("root category should be inserted");
-        database
+        app.database
             .execute(
                 "INSERT INTO income_categories (name, parent_id) VALUES ('Дочерняя категория', 1)",
                 [],
             )
             .expect("child category should be inserted");
-        database
+        app.database
             .execute(
                 "INSERT INTO banks (name) VALUES ('Первый банк'), ('Второй банк')",
                 [],
             )
             .expect("test banks should be inserted");
-
-        let mut app = FinanceApp::new(database);
-        app.active_tab = ModuleTab::Directories;
         app.refresh_directories();
 
         let context = egui::Context::default();

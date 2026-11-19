@@ -112,6 +112,12 @@ pub enum DbError {
     ExpenseCardInUse,
     #[error("Валюта не найдена")]
     CurrencyNotFound,
+    #[error("Основную валюту нельзя удалить; сначала выберите другую основную валюту")]
+    PrimaryCurrencyCannotDelete,
+    #[error("Валюта используется доходами, расходами или платёжными документами")]
+    CurrencyInUse,
+    #[error("Валюта с таким кодом уже существует")]
+    CurrencyAlreadyExists,
     #[error("Для выбранной основной валюты не задан курс")]
     PrimaryCurrencyRateUnavailable,
     #[error("Для основной валюты нельзя задать курс относительно самой себя")]
@@ -178,16 +184,79 @@ pub fn list_currencies(connection: &Connection) -> Result<Vec<CurrencyDefinition
     Ok(currencies)
 }
 
+/// Lists currencies referenced by income, expense, or payment-document records.
+pub fn list_used_currency_codes(connection: &Connection) -> Result<Vec<String>, DbError> {
+    let mut statement = connection.prepare(
+        "SELECT currency FROM incomes
+         UNION SELECT currency FROM expenses
+         UNION SELECT currency FROM payment_documents WHERE currency IS NOT NULL
+         ORDER BY currency",
+    )?;
+    let currencies = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(currencies)
+}
+
 /// Adds a currency with no known rate relative to the current primary currency.
 pub fn add_currency(connection: &Connection, code: &str, name: &str) -> Result<(), DbError> {
     validate_currency_code(code)?;
     if name.trim().is_empty() {
         return Err(DbError::EmptyName);
     }
-    connection.execute(
+    match connection.execute(
         "INSERT INTO currencies (code, name) VALUES (?1, ?2)",
         params![code, name.trim()],
+    ) {
+        Ok(_) => {}
+        Err(rusqlite::Error::SqliteFailure(error, _))
+            if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            return Err(DbError::CurrencyAlreadyExists);
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+/// Deletes a currency only when it is neither primary nor referenced by financial records.
+pub fn delete_currency(connection: &Connection, code: &str) -> Result<(), DbError> {
+    validate_currency_code(code)?;
+    let is_primary = connection
+        .query_row(
+            "SELECT is_primary FROM currencies WHERE code = ?1",
+            [code],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()?
+        .ok_or(DbError::CurrencyNotFound)?;
+    if is_primary {
+        return Err(DbError::PrimaryCurrencyCannotDelete);
+    }
+
+    let is_in_use = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM incomes WHERE currency = ?1)
+             OR EXISTS(SELECT 1 FROM expenses WHERE currency = ?1)
+             OR EXISTS(SELECT 1 FROM payment_documents WHERE currency = ?1)",
+        [code],
+        |row| row.get::<_, bool>(0),
     )?;
+    if is_in_use {
+        return Err(DbError::CurrencyInUse);
+    }
+
+    let deleted = match connection.execute("DELETE FROM currencies WHERE code = ?1", [code]) {
+        Ok(deleted) => deleted,
+        Err(rusqlite::Error::SqliteFailure(error, _))
+            if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            return Err(DbError::CurrencyInUse);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if deleted == 0 {
+        return Err(DbError::CurrencyNotFound);
+    }
     Ok(())
 }
 
@@ -1670,8 +1739,8 @@ mod tests {
     use std::str::FromStr;
 
     use super::{
-        add_currency, delete_bank, delete_category, delete_payment_document, delete_savings,
-        initialize, list_currencies, list_payment_documents, list_savings,
+        add_currency, delete_bank, delete_category, delete_currency, delete_payment_document,
+        delete_savings, initialize, list_currencies, list_payment_documents, list_savings,
         list_transaction_amounts, list_transactions, load_analysis_transactions,
         load_analysis_transactions_by_category, save_bank, save_category, save_payment_document,
         save_savings, save_transaction, set_currency_exchange_rate, set_primary_currency, DbError,
@@ -2173,6 +2242,88 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn delete_currency_removes_unused_non_primary_currency() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        add_currency(&connection, "EUR", "Евро").unwrap();
+
+        delete_currency(&connection, "EUR").unwrap();
+
+        assert!(!list_currencies(&connection)
+            .unwrap()
+            .iter()
+            .any(|currency| currency.code == "EUR"));
+    }
+
+    #[test]
+    fn delete_currency_rejects_primary_currency() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+
+        assert!(matches!(
+            delete_currency(&connection, "RUB"),
+            Err(DbError::PrimaryCurrencyCannotDelete)
+        ));
+    }
+
+    #[test]
+    fn delete_currency_rejects_currency_used_by_income() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        add_currency(&connection, "EUR", "Евро").unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO income_categories (name) VALUES ('Зарплата');
+                 INSERT INTO incomes (date, category_id, amount, currency)
+                    VALUES ('2026-01-01', 1, '12.50', 'EUR');",
+            )
+            .unwrap();
+
+        assert!(matches!(
+            delete_currency(&connection, "EUR"),
+            Err(DbError::CurrencyInUse)
+        ));
+    }
+
+    #[test]
+    fn delete_currency_rejects_currency_used_by_expense() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        add_currency(&connection, "EUR", "Евро").unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO expense_categories (name) VALUES ('Покупки');
+                 INSERT INTO expenses (date, category_id, amount, currency)
+                    VALUES ('2026-01-01', 1, '12.50', 'EUR');",
+            )
+            .unwrap();
+
+        assert!(matches!(
+            delete_currency(&connection, "EUR"),
+            Err(DbError::CurrencyInUse)
+        ));
+    }
+
+    #[test]
+    fn delete_currency_rejects_currency_used_by_payment_document() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        add_currency(&connection, "EUR", "Евро").unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO banks (name) VALUES ('Банк');
+                 INSERT INTO payment_documents (bank_id, payment_system, card_type, amount, currency)
+                    VALUES (1, 'VISA', 'debit', '0', 'EUR');",
+            )
+            .unwrap();
+
+        assert!(matches!(
+            delete_currency(&connection, "EUR"),
+            Err(DbError::CurrencyInUse)
+        ));
     }
 
     #[test]
