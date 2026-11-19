@@ -34,7 +34,7 @@ fn main() -> Result<()> {
             database_path.display()
         )
     })?;
-    finance_ui::run(database)
+    finance_ui::run(database, database_path)
         .map_err(|error| anyhow::anyhow!("Не удалось запустить окно приложения: {error:?}"))?;
     tracing::info!("Завершение FinanceApp");
 

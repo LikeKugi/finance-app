@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use chrono::NaiveDate;
 use eframe::egui;
@@ -23,10 +24,12 @@ fn transaction_column_widths(available_width: f32) -> [f32; 6] {
     })
 }
 
+mod analysis_page;
 mod date_input;
 mod payment_documents_page;
 mod savings_page;
 
+use analysis_page::AnalysisPage;
 use date_input::{date_input, DateInputState};
 use payment_documents_page::PaymentDocumentsPage;
 use savings_page::SavingsPage;
@@ -105,6 +108,7 @@ struct BankForm {
 
 struct FinanceApp {
     database: Database,
+    database_path: Option<PathBuf>,
     active_tab: ModuleTab,
     transactions: Vec<FinancialTransaction>,
     categories: Vec<Category>,
@@ -114,6 +118,7 @@ struct FinanceApp {
     bank_form: BankForm,
     savings_page: SavingsPage,
     payment_documents_page: PaymentDocumentsPage,
+    analysis_page: AnalysisPage,
     directory_kind: TransactionKind,
     search: String,
     from_date: String,
@@ -135,9 +140,15 @@ const DIRECTORY_CATEGORIES_SCROLL_AREA_ID: &str = "directory_categories_scroll_a
 const DIRECTORY_BANKS_SCROLL_AREA_ID: &str = "directory_banks_scroll_area";
 
 impl FinanceApp {
+    #[cfg(test)]
     fn new(database: Database) -> Self {
+        Self::with_database_path(database, None)
+    }
+
+    fn with_database_path(database: Database, database_path: Option<PathBuf>) -> Self {
         let mut app = Self {
             database,
+            database_path,
             active_tab: ModuleTab::Income,
             transactions: Vec::new(),
             categories: Vec::new(),
@@ -147,6 +158,7 @@ impl FinanceApp {
             bank_form: BankForm::default(),
             savings_page: SavingsPage::default(),
             payment_documents_page: PaymentDocumentsPage::default(),
+            analysis_page: AnalysisPage::default(),
             directory_kind: TransactionKind::Income,
             search: String::new(),
             from_date: String::new(),
@@ -1188,7 +1200,8 @@ impl eframe::App for FinanceApp {
                     }
                 }
                 ModuleTab::Analysis => {
-                    ui.label("Этот раздел пока не реализован.");
+                    self.analysis_page
+                        .render(context, ui, self.database_path.as_deref());
                 }
             }
         });
@@ -1260,7 +1273,7 @@ fn parse_optional_date(value: &str) -> Result<Option<NaiveDate>, String> {
 }
 
 /// Starts the native desktop window with the initialized local database.
-pub fn run(database: Database) -> eframe::Result<()> {
+pub fn run(database: Database, database_path: PathBuf) -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 720.0])
@@ -1271,7 +1284,12 @@ pub fn run(database: Database) -> eframe::Result<()> {
     eframe::run_native(
         "FinanceApp — управление финансами",
         options,
-        Box::new(move |_creation_context| Ok(Box::new(FinanceApp::new(database)))),
+        Box::new(move |_creation_context| {
+            Ok(Box::new(FinanceApp::with_database_path(
+                database,
+                Some(database_path),
+            )))
+        }),
     )
 }
 

@@ -5,11 +5,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::NaiveDate;
 use finance_core::{
-    canonical_amount, Bank, Category, Currency, FinancialTransaction, InterestDestination,
-    LinkedSavingsAccount, PaymentCardType, PaymentDocument, PaymentDocumentDetails, PaymentSystem,
-    SavingsAccount, SavingsDetails, SavingsTerm, TransactionKind,
+    canonical_amount, AnalysisTransaction, Bank, Category, Currency, FinancialTransaction,
+    InterestDestination, LinkedSavingsAccount, PaymentCardType, PaymentDocument,
+    PaymentDocumentDetails, PaymentSystem, SavingsAccount, SavingsDetails, SavingsTerm,
+    TransactionKind,
 };
-use rusqlite::{params, types::Type, Connection, OptionalExtension};
+use rusqlite::{
+    params, types::Type, Connection, OpenFlags, OptionalExtension, TransactionBehavior,
+};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 
@@ -66,6 +69,8 @@ pub enum DbError {
     PaymentDocumentSavingsUnavailable,
     #[error("Банк платёжного документа и выбранных накоплений должен совпадать")]
     PaymentDocumentSavingsBankMismatch,
+    #[error("Начало периода не может быть позже его окончания")]
+    InvalidAnalysisDateRange,
     #[error(transparent)]
     Domain(#[from] finance_core::DomainError),
 }
@@ -147,6 +152,64 @@ pub fn list_transactions(
             })
             .collect())
     }
+}
+
+/// Reads report transactions through a read-only connection and one snapshot transaction.
+pub fn load_analysis_transactions(
+    database_path: &Path,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+    kind_filter: Option<TransactionKind>,
+) -> Result<Vec<AnalysisTransaction>, DbError> {
+    if matches!((from, to), (Some(from), Some(to)) if from > to) {
+        return Err(DbError::InvalidAnalysisDateRange);
+    }
+
+    let mut connection =
+        Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+    let from = from.map(|date| date.format("%Y-%m-%d").to_string());
+    let to = to.map(|date| date.format("%Y-%m-%d").to_string());
+    let mut entries = Vec::new();
+
+    for kind in [TransactionKind::Income, TransactionKind::Expense] {
+        if kind_filter.is_some_and(|filter| filter != kind) {
+            continue;
+        }
+
+        let (table, categories) = transaction_tables(kind);
+        let sql = format!(
+            "SELECT t.category_id, c.name, t.amount, t.currency
+             FROM {table} t JOIN {categories} c ON c.id = t.category_id
+             WHERE (?1 IS NULL OR t.date >= ?1)
+               AND (?2 IS NULL OR t.date <= ?2)
+             ORDER BY t.date, t.id"
+        );
+        let mut statement = transaction.prepare(&sql)?;
+        let rows = statement.query_map(params![from, to], |row| {
+            let amount_text = row.get::<_, String>(2)?;
+            let amount = Decimal::from_str(&amount_text).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+            })?;
+            let currency_text = row.get::<_, String>(3)?;
+            let currency = Currency::from_str(&currency_text).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(3, Type::Text, Box::new(error))
+            })?;
+            Ok(AnalysisTransaction {
+                kind,
+                category_id: row.get(0)?,
+                category_name: row.get(1)?,
+                amount,
+                currency,
+            })
+        })?;
+        entries.extend(rows.collect::<Result<Vec<_>, _>>()?);
+    }
+
+    transaction.commit()?;
+    Ok(entries)
 }
 
 /// Creates or updates an income or expense, retaining the decimal as canonical text.
@@ -879,8 +942,8 @@ mod tests {
 
     use super::{
         delete_bank, delete_category, delete_payment_document, delete_savings, initialize,
-        list_payment_documents, list_savings, list_transactions, save_bank, save_category,
-        save_payment_document, save_savings, save_transaction, DbError,
+        list_payment_documents, list_savings, list_transactions, load_analysis_transactions,
+        save_bank, save_category, save_payment_document, save_savings, save_transaction, DbError,
     };
 
     fn savings_details(bank_id: i64) -> SavingsDetails {
@@ -1549,6 +1612,153 @@ mod tests {
 
         assert!(matches!(
             list_payment_documents(&connection, None, None, None),
+            Err(DbError::Sqlite(rusqlite::Error::FromSqlConversionFailure(
+                ..
+            )))
+        ));
+    }
+
+    #[test]
+    fn load_analysis_transactions_filters_inclusive_dates_and_kind() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let connection = initialize(&database_path).unwrap();
+        let income_category = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Зарплата",
+            None,
+            true,
+        )
+        .unwrap();
+        let expense_category = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Покупки",
+            None,
+            true,
+        )
+        .unwrap();
+        for (kind, category_id, day, amount, currency) in [
+            (
+                TransactionKind::Income,
+                income_category,
+                NaiveDate::from_ymd_opt(2026, 12, 31).unwrap(),
+                Decimal::from(99),
+                Currency::Rub,
+            ),
+            (
+                TransactionKind::Income,
+                income_category,
+                NaiveDate::from_ymd_opt(2027, 1, 1).unwrap(),
+                Decimal::from(10),
+                Currency::Rub,
+            ),
+            (
+                TransactionKind::Income,
+                income_category,
+                NaiveDate::from_ymd_opt(2027, 1, 31).unwrap(),
+                Decimal::from(20),
+                Currency::Usd,
+            ),
+            (
+                TransactionKind::Expense,
+                expense_category,
+                NaiveDate::from_ymd_opt(2027, 1, 15).unwrap(),
+                Decimal::from(30),
+                Currency::Rub,
+            ),
+            (
+                TransactionKind::Expense,
+                expense_category,
+                NaiveDate::from_ymd_opt(2027, 2, 1).unwrap(),
+                Decimal::from(40),
+                Currency::Rub,
+            ),
+        ] {
+            save_transaction(
+                &connection,
+                kind,
+                None,
+                day,
+                category_id,
+                amount,
+                currency,
+                "",
+            )
+            .unwrap();
+        }
+
+        let all_kinds = load_analysis_transactions(
+            &database_path,
+            NaiveDate::from_ymd_opt(2027, 1, 1),
+            NaiveDate::from_ymd_opt(2027, 1, 31),
+            None,
+        )
+        .unwrap();
+        let income_only = load_analysis_transactions(
+            &database_path,
+            NaiveDate::from_ymd_opt(2027, 1, 1),
+            NaiveDate::from_ymd_opt(2027, 1, 31),
+            Some(TransactionKind::Income),
+        )
+        .unwrap();
+
+        assert_eq!(all_kinds.len(), 3);
+        assert_eq!(income_only.len(), 2);
+        assert!(all_kinds
+            .iter()
+            .any(|entry| entry.amount == Decimal::from(10)));
+        assert!(all_kinds
+            .iter()
+            .any(|entry| entry.amount == Decimal::from(20)));
+    }
+
+    #[test]
+    fn load_analysis_transactions_does_not_create_missing_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("missing.db");
+
+        assert!(load_analysis_transactions(&database_path, None, None, None).is_err());
+        assert!(!database_path.exists());
+    }
+
+    #[test]
+    fn load_analysis_transactions_reports_corrupted_decimal() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let connection = initialize(&database_path).unwrap();
+        let category_id = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Зарплата",
+            None,
+            true,
+        )
+        .unwrap();
+        save_transaction(
+            &connection,
+            TransactionKind::Income,
+            None,
+            NaiveDate::from_ymd_opt(2027, 1, 1).unwrap(),
+            category_id,
+            Decimal::ONE,
+            Currency::Rub,
+            "",
+        )
+        .unwrap();
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints = ON;")
+            .unwrap();
+        connection
+            .execute("UPDATE incomes SET amount = 'не число'", [])
+            .unwrap();
+
+        assert!(matches!(
+            load_analysis_transactions(&database_path, None, None, None),
             Err(DbError::Sqlite(rusqlite::Error::FromSqlConversionFailure(
                 ..
             )))

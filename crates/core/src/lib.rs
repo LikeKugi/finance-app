@@ -3,7 +3,7 @@ use std::str::FromStr;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TransactionKind {
     Income,
     Expense,
@@ -18,7 +18,7 @@ impl TransactionKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Currency {
     Rub,
     Usd,
@@ -141,6 +141,271 @@ pub struct FinancialTransaction {
     pub amount: Decimal,
     pub currency: Currency,
     pub comment: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisTransaction {
+    pub kind: TransactionKind,
+    pub category_id: i64,
+    pub category_name: String,
+    pub amount: Decimal,
+    pub currency: Currency,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisCategoryTotal {
+    pub kind: TransactionKind,
+    pub category_id: i64,
+    pub category_name: String,
+    pub currency: Currency,
+    pub amount: Decimal,
+    pub transaction_count: usize,
+    pub share_percent: Decimal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisTotal {
+    pub kind: TransactionKind,
+    pub currency: Currency,
+    pub amount: Decimal,
+    pub transaction_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisSummary {
+    pub categories: Vec<AnalysisCategoryTotal>,
+    pub totals: Vec<AnalysisTotal>,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum AnalysisError {
+    #[error("Сумма операции для анализа должна быть положительной")]
+    InvalidAmount,
+    #[error("Переполнение при расчёте анализа")]
+    Overflow,
+    #[error("Не удалось определить итог для доли категории")]
+    MissingTotal,
+}
+
+/// Aggregates transactions by kind, category, and currency without conversion.
+pub fn summarize_analysis(
+    transactions: &[AnalysisTransaction],
+) -> Result<AnalysisSummary, AnalysisError> {
+    use std::collections::BTreeMap;
+
+    let mut categories = BTreeMap::<(TransactionKind, Currency, i64), AnalysisCategoryTotal>::new();
+    let mut totals = BTreeMap::<(TransactionKind, Currency), AnalysisTotal>::new();
+
+    for transaction in transactions {
+        if transaction.amount <= Decimal::ZERO {
+            return Err(AnalysisError::InvalidAmount);
+        }
+
+        let category = categories
+            .entry((
+                transaction.kind,
+                transaction.currency,
+                transaction.category_id,
+            ))
+            .or_insert_with(|| AnalysisCategoryTotal {
+                kind: transaction.kind,
+                category_id: transaction.category_id,
+                category_name: transaction.category_name.clone(),
+                currency: transaction.currency,
+                amount: Decimal::ZERO,
+                transaction_count: 0,
+                share_percent: Decimal::ZERO,
+            });
+        category.amount = category
+            .amount
+            .checked_add(transaction.amount)
+            .ok_or(AnalysisError::Overflow)?;
+        category.transaction_count = category
+            .transaction_count
+            .checked_add(1)
+            .ok_or(AnalysisError::Overflow)?;
+
+        let total = totals
+            .entry((transaction.kind, transaction.currency))
+            .or_insert_with(|| AnalysisTotal {
+                kind: transaction.kind,
+                currency: transaction.currency,
+                amount: Decimal::ZERO,
+                transaction_count: 0,
+            });
+        total.amount = total
+            .amount
+            .checked_add(transaction.amount)
+            .ok_or(AnalysisError::Overflow)?;
+        total.transaction_count = total
+            .transaction_count
+            .checked_add(1)
+            .ok_or(AnalysisError::Overflow)?;
+    }
+
+    for category in categories.values_mut() {
+        let total = totals
+            .get(&(category.kind, category.currency))
+            .ok_or(AnalysisError::MissingTotal)?;
+        category.share_percent = category
+            .amount
+            .checked_div(total.amount)
+            .and_then(|share| share.checked_mul(Decimal::ONE_HUNDRED))
+            .ok_or(AnalysisError::Overflow)?;
+    }
+
+    Ok(AnalysisSummary {
+        categories: categories.into_values().collect(),
+        totals: totals.into_values().collect(),
+    })
+}
+
+#[cfg(test)]
+mod analysis_tests {
+    use rust_decimal::Decimal;
+
+    use super::{
+        summarize_analysis, AnalysisError, AnalysisTransaction, Currency, TransactionKind,
+    };
+
+    #[test]
+    fn summarize_analysis_separates_categories_by_transaction_kind() {
+        let transactions = [
+            AnalysisTransaction {
+                kind: TransactionKind::Income,
+                category_id: 1,
+                category_name: "Категория дохода".to_owned(),
+                amount: Decimal::from(30),
+                currency: Currency::Rub,
+            },
+            AnalysisTransaction {
+                kind: TransactionKind::Expense,
+                category_id: 1,
+                category_name: "Категория расхода".to_owned(),
+                amount: Decimal::from(20),
+                currency: Currency::Rub,
+            },
+        ];
+
+        let summary = summarize_analysis(&transactions).unwrap();
+
+        assert_eq!(summary.categories.len(), 2);
+        assert_eq!(summary.totals.len(), 2);
+        assert_ne!(summary.categories[0].kind, summary.categories[1].kind);
+    }
+
+    #[test]
+    fn summarize_analysis_keeps_currency_totals_separate() {
+        let transactions = [
+            AnalysisTransaction {
+                kind: TransactionKind::Income,
+                category_id: 1,
+                category_name: "Зарплата".to_owned(),
+                amount: Decimal::new(1250, 2),
+                currency: Currency::Rub,
+            },
+            AnalysisTransaction {
+                kind: TransactionKind::Income,
+                category_id: 1,
+                category_name: "Зарплата".to_owned(),
+                amount: Decimal::from(5),
+                currency: Currency::Usd,
+            },
+        ];
+
+        let summary = summarize_analysis(&transactions).unwrap();
+
+        assert_eq!(summary.totals.len(), 2);
+        assert_eq!(summary.categories.len(), 2);
+        assert_eq!(summary.categories[0].share_percent, Decimal::from(100));
+    }
+
+    #[test]
+    fn summarize_analysis_aggregates_exact_amounts_and_shares() {
+        let transactions = [
+            AnalysisTransaction {
+                kind: TransactionKind::Expense,
+                category_id: 1,
+                category_name: "Жильё".to_owned(),
+                amount: Decimal::new(1250, 2),
+                currency: Currency::Rub,
+            },
+            AnalysisTransaction {
+                kind: TransactionKind::Expense,
+                category_id: 1,
+                category_name: "Жильё".to_owned(),
+                amount: Decimal::new(750, 2),
+                currency: Currency::Rub,
+            },
+            AnalysisTransaction {
+                kind: TransactionKind::Expense,
+                category_id: 2,
+                category_name: "Питание".to_owned(),
+                amount: Decimal::from(5),
+                currency: Currency::Rub,
+            },
+        ];
+
+        let summary = summarize_analysis(&transactions).unwrap();
+
+        assert_eq!(summary.categories[0].amount, Decimal::from(20));
+        assert_eq!(summary.categories[0].transaction_count, 2);
+        assert_eq!(summary.categories[0].share_percent, Decimal::from(80));
+        assert_eq!(summary.totals[0].amount, Decimal::from(25));
+        assert_eq!(summary.totals[0].transaction_count, 3);
+    }
+
+    #[test]
+    fn summarize_analysis_returns_empty_summary_for_no_transactions() {
+        assert_eq!(
+            summarize_analysis(&[]),
+            Ok(super::AnalysisSummary {
+                categories: Vec::new(),
+                totals: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn summarize_analysis_reports_amount_overflow() {
+        let transactions = [
+            AnalysisTransaction {
+                kind: TransactionKind::Income,
+                category_id: 1,
+                category_name: "Зарплата".to_owned(),
+                amount: Decimal::MAX,
+                currency: Currency::Rub,
+            },
+            AnalysisTransaction {
+                kind: TransactionKind::Income,
+                category_id: 1,
+                category_name: "Зарплата".to_owned(),
+                amount: Decimal::ONE,
+                currency: Currency::Rub,
+            },
+        ];
+
+        assert_eq!(
+            summarize_analysis(&transactions),
+            Err(AnalysisError::Overflow)
+        );
+    }
+
+    #[test]
+    fn summarize_analysis_rejects_non_positive_amounts() {
+        let transaction = AnalysisTransaction {
+            kind: TransactionKind::Income,
+            category_id: 1,
+            category_name: "Зарплата".to_owned(),
+            amount: Decimal::ZERO,
+            currency: Currency::Rub,
+        };
+
+        assert_eq!(
+            summarize_analysis(&[transaction]),
+            Err(AnalysisError::InvalidAmount)
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
