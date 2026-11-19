@@ -24,9 +24,11 @@ fn transaction_column_widths(available_width: f32) -> [f32; 6] {
 }
 
 mod date_input;
+mod payment_documents_page;
 mod savings_page;
 
 use date_input::{date_input, DateInputState};
+use payment_documents_page::PaymentDocumentsPage;
 use savings_page::SavingsPage;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -111,6 +113,7 @@ struct FinanceApp {
     category_form: CategoryForm,
     bank_form: BankForm,
     savings_page: SavingsPage,
+    payment_documents_page: PaymentDocumentsPage,
     directory_kind: TransactionKind,
     search: String,
     from_date: String,
@@ -143,6 +146,7 @@ impl FinanceApp {
             category_form: CategoryForm::default(),
             bank_form: BankForm::default(),
             savings_page: SavingsPage::default(),
+            payment_documents_page: PaymentDocumentsPage::default(),
             directory_kind: TransactionKind::Income,
             search: String::new(),
             from_date: String::new(),
@@ -169,6 +173,9 @@ impl FinanceApp {
         if self.active_tab == ModuleTab::Savings {
             self.refresh_savings();
         }
+        if self.active_tab == ModuleTab::PaymentDocuments {
+            self.refresh_payment_documents();
+        }
         if self.active_tab == ModuleTab::Directories {
             self.refresh_directories();
         }
@@ -183,6 +190,19 @@ impl FinanceApp {
             }
         }
         if let Err(error) = self.savings_page.refresh(&self.database) {
+            self.show_error(error.to_string());
+        }
+    }
+
+    fn refresh_payment_documents(&mut self) {
+        match finance_db::list_banks(&self.database) {
+            Ok(banks) => self.banks = banks,
+            Err(error) => {
+                self.show_error(error.to_string());
+                return;
+            }
+        }
+        if let Err(error) = self.payment_documents_page.refresh(&self.database) {
             self.show_error(error.to_string());
         }
     }
@@ -1108,6 +1128,29 @@ impl eframe::App for FinanceApp {
                     {
                         self.refresh_savings();
                     }
+                } else if self.active_tab == ModuleTab::PaymentDocuments {
+                    let actions_width = 140.0 * 2.0 + ui.spacing().item_spacing.x;
+                    ui.add_space((ui.available_width() - actions_width).max(0.0));
+                    if ui
+                        .add_enabled_ui(!self.banks.is_empty(), |ui| {
+                            ui.add_sized(egui::vec2(140.0, 40.0), egui::Button::new("＋ Добавить"))
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        if let Err(error) = self
+                            .payment_documents_page
+                            .begin_new(&self.database, self.banks.first().map(|bank| bank.id))
+                        {
+                            self.show_error(error.to_string());
+                        }
+                    }
+                    if ui
+                        .add_sized(egui::vec2(140.0, 40.0), egui::Button::new("↻ Обновить"))
+                        .clicked()
+                    {
+                        self.refresh_payment_documents();
+                    }
                 }
             });
             ui.separator();
@@ -1136,7 +1179,15 @@ impl eframe::App for FinanceApp {
                         self.message = Some(message);
                     }
                 }
-                ModuleTab::PaymentDocuments | ModuleTab::Analysis => {
+                ModuleTab::PaymentDocuments => {
+                    if let Some(message) =
+                        self.payment_documents_page
+                            .render(context, ui, &self.database, &self.banks)
+                    {
+                        self.message = Some(message);
+                    }
+                }
+                ModuleTab::Analysis => {
                     ui.label("Этот раздел пока не реализован.");
                 }
             }

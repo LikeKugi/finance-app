@@ -1,6 +1,6 @@
 # FinanceApp
 
-FinanceApp is a local desktop application for personal and family finance management. The current implementation provides a native Russian-language window, local SQLite persistence, and functional income, expense, directory, and savings modules.
+FinanceApp is a local desktop application for personal and family finance management. The current implementation provides a native Russian-language window, local SQLite persistence, and functional income, expense, directory, savings, and payment document modules.
 
 ## Workspace
 
@@ -9,9 +9,13 @@ FinanceApp is a local desktop application for personal and family finance manage
 - `finance-ui` — native `eframe` tables and Russian-language workflows.
 - `finance-db` — SQLite connection setup, embedded migrations, and repositories.
 
-Income and expense records support create, edit, delete with confirmation, inclusive date filters, category filters, text search, and exact RUB/USD totals. Directories support bank and hierarchical income/expense category management, activation, and deletion safeguards for categories in use. Savings support create, edit, delete with confirmation, bank/status/text filters, term and interest-destination fields, and exact decimal storage. Payment Documents, Analysis, and exports are not implemented yet.
+Income and expense records support create, edit, delete with confirmation, inclusive date filters, category filters, text search, and exact RUB/USD totals. Directories support bank and hierarchical income/expense category management, activation, and deletion safeguards for categories in use. Savings support create, edit, delete with confirmation, bank/status/text filters, term and interest-destination fields, and exact decimal storage. Payment documents support create, edit, delete with confirmation, bank/system/card-type filters, credit payment dates and grace periods, and links to savings at the same bank. Analysis and exports are not implemented yet.
 
 Savings amounts have no currency field in the current schema. The savings page therefore displays the entered amount without a currency symbol and does not calculate accrued interest or potential income: opening dates, balance history, bank-specific accrual rules, and verified card-spend conditions are not available. A threshold rate is presented as conditional, not as confirmed yield.
+
+Payment document amounts are stored as exact decimal text without a currency. For debit cards, the amount is the current balance; for credit cards, it is the credit limit and is not included in user-owned funds. Rate-influence settings describe a conditional opportunity only: the app does not associate expenses with cards, verify monthly spend thresholds, or calculate resulting yield. Payment systems are stored using the exact values `VISA`, `MasterCard`, and `MIR`; card numbers and last digits are not stored.
+
+Schema migration V4 adds payment documents and their savings links. When upgrading an existing versioned database, FinanceApp creates an adjacent consistent SQLite backup before applying pending migrations.
 
 Transaction dates and the income/expense date filters can be entered manually in `YYYY-MM-DD` format or selected from the calendar button. Date filters remain optional and can be cleared by deleting their text.
 

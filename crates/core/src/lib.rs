@@ -187,6 +187,123 @@ impl SavingsDetails {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaymentSystem {
+    Visa,
+    MasterCard,
+    Mir,
+}
+
+impl PaymentSystem {
+    pub const ALL: [Self; 3] = [Self::Visa, Self::MasterCard, Self::Mir];
+
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Visa => "VISA",
+            Self::MasterCard => "MasterCard",
+            Self::Mir => "MIR",
+        }
+    }
+}
+
+impl FromStr for PaymentSystem {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "VISA" => Ok(Self::Visa),
+            "MasterCard" => Ok(Self::MasterCard),
+            "MIR" => Ok(Self::Mir),
+            _ => Err(DomainError::UnknownPaymentSystem(value.to_owned())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaymentCardType {
+    Debit,
+    Credit,
+}
+
+impl PaymentCardType {
+    pub const ALL: [Self; 2] = [Self::Debit, Self::Credit];
+
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Debit => "debit",
+            Self::Credit => "credit",
+        }
+    }
+
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Debit => "Дебетовая",
+            Self::Credit => "Кредитная",
+        }
+    }
+}
+
+impl FromStr for PaymentCardType {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "debit" => Ok(Self::Debit),
+            "credit" => Ok(Self::Credit),
+            _ => Err(DomainError::UnknownPaymentCardType(value.to_owned())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedSavingsAccount {
+    pub id: i64,
+    pub title: String,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaymentDocument {
+    pub id: i64,
+    pub bank_id: i64,
+    pub bank_name: String,
+    pub payment_system: PaymentSystem,
+    pub card_type: PaymentCardType,
+    pub amount: Decimal,
+    pub due_date: Option<NaiveDate>,
+    pub grace_period_days: Option<i64>,
+    pub affects_deposit_rate: bool,
+    pub min_monthly_spend: Option<Decimal>,
+    pub linked_savings: Vec<LinkedSavingsAccount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaymentDocumentDetails {
+    pub bank_id: i64,
+    pub payment_system: PaymentSystem,
+    pub card_type: PaymentCardType,
+    pub amount: Decimal,
+    pub due_date: Option<NaiveDate>,
+    pub grace_period_days: Option<i64>,
+    pub affects_deposit_rate: bool,
+    pub min_monthly_spend: Option<Decimal>,
+    pub savings_ids: Vec<i64>,
+}
+
+impl PaymentDocumentDetails {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        validate_payment_document(
+            self.amount,
+            self.card_type,
+            self.due_date,
+            self.grace_period_days,
+            self.affects_deposit_rate,
+            self.min_monthly_spend,
+            &self.savings_ids,
+        )
+    }
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum DomainError {
     #[error("Сумма должна быть положительным числом")]
@@ -217,6 +334,53 @@ pub enum DomainError {
     UnknownSavingsTerm(String),
     #[error("Неизвестное назначение процентов: {0}")]
     UnknownInterestDestination(String),
+    #[error("Неизвестная платёжная система: {0}")]
+    UnknownPaymentSystem(String),
+    #[error("Неизвестный тип платёжной карты: {0}")]
+    UnknownPaymentCardType(String),
+    #[error("Сумма карты или кредитный лимит должны быть положительными")]
+    InvalidPaymentDocumentAmount,
+    #[error("Для кредитной карты укажите дату платежа и неотрицательный льготный период; у дебетовой карты эти поля отсутствуют")]
+    InvalidPaymentCardTerms,
+    #[error("Условие повышенной ставки требует положительного минимума трат и хотя бы одного связанного накопления")]
+    InvalidPaymentRateCondition,
+    #[error("Связанные накопления не должны повторяться")]
+    DuplicatePaymentDocumentSavings,
+}
+
+pub fn validate_payment_document(
+    amount: Decimal,
+    card_type: PaymentCardType,
+    due_date: Option<NaiveDate>,
+    grace_period_days: Option<i64>,
+    affects_deposit_rate: bool,
+    min_monthly_spend: Option<Decimal>,
+    savings_ids: &[i64],
+) -> Result<(), DomainError> {
+    if amount <= Decimal::ZERO {
+        return Err(DomainError::InvalidPaymentDocumentAmount);
+    }
+
+    match (card_type, due_date, grace_period_days) {
+        (PaymentCardType::Debit, None, None) | (PaymentCardType::Credit, Some(_), Some(0..)) => {}
+        _ => return Err(DomainError::InvalidPaymentCardTerms),
+    }
+
+    if affects_deposit_rate {
+        if !matches!(min_monthly_spend, Some(value) if value > Decimal::ZERO)
+            || savings_ids.is_empty()
+        {
+            return Err(DomainError::InvalidPaymentRateCondition);
+        }
+    } else if min_monthly_spend.is_some() || !savings_ids.is_empty() {
+        return Err(DomainError::InvalidPaymentRateCondition);
+    }
+
+    let unique_savings: std::collections::HashSet<_> = savings_ids.iter().collect();
+    if unique_savings.len() != savings_ids.len() {
+        return Err(DomainError::DuplicatePaymentDocumentSavings);
+    }
+    Ok(())
 }
 
 /// Parses a non-negative decimal without passing through binary floating point.
@@ -306,7 +470,8 @@ mod tests {
 
     use super::{
         canonical_amount, parse_amount, parse_amount_expression, parse_non_negative_decimal,
-        validate_savings, DomainError, InterestDestination, SavingsTerm,
+        validate_payment_document, validate_savings, DomainError, InterestDestination,
+        PaymentCardType, PaymentSystem, SavingsTerm,
     };
 
     #[test]
@@ -469,6 +634,99 @@ mod tests {
         assert_eq!(
             "withdraw".parse::<InterestDestination>(),
             Ok(InterestDestination::Withdraw)
+        );
+    }
+
+    #[test]
+    fn payment_system_storage_preserves_contract_values() {
+        assert_eq!(PaymentSystem::Visa.code(), "VISA");
+        assert_eq!(
+            "MasterCard".parse::<PaymentSystem>(),
+            Ok(PaymentSystem::MasterCard)
+        );
+        assert_eq!(
+            "MASTERCARD".parse::<PaymentSystem>(),
+            Err(DomainError::UnknownPaymentSystem("MASTERCARD".to_owned()))
+        );
+    }
+
+    #[test]
+    fn validate_payment_document_accepts_debit_without_credit_fields() {
+        assert_eq!(
+            validate_payment_document(
+                Decimal::ONE,
+                PaymentCardType::Debit,
+                None,
+                None,
+                false,
+                None,
+                &[],
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validate_payment_document_accepts_credit_and_rate_condition() {
+        assert_eq!(
+            validate_payment_document(
+                Decimal::ONE,
+                PaymentCardType::Credit,
+                NaiveDate::from_ymd_opt(2026, 12, 1),
+                Some(0),
+                true,
+                Some(Decimal::ONE),
+                &[4],
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn validate_payment_document_rejects_debit_with_credit_fields() {
+        assert_eq!(
+            validate_payment_document(
+                Decimal::ONE,
+                PaymentCardType::Debit,
+                NaiveDate::from_ymd_opt(2026, 12, 1),
+                Some(0),
+                false,
+                None,
+                &[],
+            ),
+            Err(DomainError::InvalidPaymentCardTerms)
+        );
+    }
+
+    #[test]
+    fn validate_payment_document_rejects_rate_condition_without_savings() {
+        assert_eq!(
+            validate_payment_document(
+                Decimal::ONE,
+                PaymentCardType::Debit,
+                None,
+                None,
+                true,
+                Some(Decimal::ONE),
+                &[],
+            ),
+            Err(DomainError::InvalidPaymentRateCondition)
+        );
+    }
+
+    #[test]
+    fn validate_payment_document_rejects_duplicate_savings_links() {
+        assert_eq!(
+            validate_payment_document(
+                Decimal::ONE,
+                PaymentCardType::Debit,
+                None,
+                None,
+                true,
+                Some(Decimal::ONE),
+                &[4, 4],
+            ),
+            Err(DomainError::DuplicatePaymentDocumentSavings)
         );
     }
 }

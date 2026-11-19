@@ -6,10 +6,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use chrono::NaiveDate;
 use finance_core::{
     canonical_amount, Bank, Category, Currency, FinancialTransaction, InterestDestination,
+    LinkedSavingsAccount, PaymentCardType, PaymentDocument, PaymentDocumentDetails, PaymentSystem,
     SavingsAccount, SavingsDetails, SavingsTerm, TransactionKind,
 };
 use rusqlite::{params, types::Type, Connection, OptionalExtension};
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 
 const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -23,6 +25,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 3,
         sql: include_str!("../migrations/V3__savings.sql"),
+    },
+    Migration {
+        version: 4,
+        sql: include_str!("../migrations/V4__payment_documents.sql"),
     },
 ];
 
@@ -54,6 +60,12 @@ pub enum DbError {
     EmptyName,
     #[error("Банк не найден")]
     SavingsBankUnavailable,
+    #[error("Банк платёжного документа не найден")]
+    PaymentDocumentBankUnavailable,
+    #[error("Одно или несколько накоплений не найдены")]
+    PaymentDocumentSavingsUnavailable,
+    #[error("Банк платёжного документа и выбранных накоплений должен совпадать")]
+    PaymentDocumentSavingsBankMismatch,
     #[error(transparent)]
     Domain(#[from] finance_core::DomainError),
 }
@@ -377,6 +389,208 @@ pub fn delete_savings(connection: &Connection, id: i64) -> Result<(), DbError> {
     Ok(())
 }
 
+/// Lists payment documents filtered by bank, card type, and payment system.
+pub fn list_payment_documents(
+    connection: &Connection,
+    bank_id: Option<i64>,
+    card_type: Option<PaymentCardType>,
+    payment_system: Option<PaymentSystem>,
+) -> Result<Vec<PaymentDocument>, DbError> {
+    let mut statement = connection.prepare(
+        "SELECT document.id, document.bank_id, bank.name, document.payment_system,
+                document.card_type, document.amount, document.due_date,
+                document.grace_period_days, document.affects_deposit_rate,
+                document.min_monthly_spend
+         FROM payment_documents AS document
+         JOIN banks AS bank ON bank.id = document.bank_id
+         WHERE (?1 IS NULL OR document.bank_id = ?1)
+           AND (?2 IS NULL OR document.card_type = ?2)
+           AND (?3 IS NULL OR document.payment_system = ?3)
+         ORDER BY bank.name COLLATE NOCASE, document.payment_system,
+                  document.card_type, document.id",
+    )?;
+    let mut documents = statement
+        .query_map(
+            params![
+                bank_id,
+                card_type.map(PaymentCardType::code),
+                payment_system.map(PaymentSystem::code)
+            ],
+            |row| {
+                let payment_system_text = row.get::<_, String>(3)?;
+                let payment_system = payment_system_text.parse().map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(3, Type::Text, Box::new(error))
+                })?;
+                let card_type_text = row.get::<_, String>(4)?;
+                let card_type = card_type_text.parse().map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
+                })?;
+                let due_date = row
+                    .get::<_, Option<String>>(6)?
+                    .map(|value| {
+                        NaiveDate::parse_from_str(&value, "%Y-%m-%d").map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                6,
+                                Type::Text,
+                                Box::new(error),
+                            )
+                        })
+                    })
+                    .transpose()?;
+
+                Ok(PaymentDocument {
+                    id: row.get(0)?,
+                    bank_id: row.get(1)?,
+                    bank_name: row.get(2)?,
+                    payment_system,
+                    card_type,
+                    amount: parse_decimal_text(row.get(5)?, 5)?,
+                    due_date,
+                    grace_period_days: row.get(7)?,
+                    affects_deposit_rate: row.get(8)?,
+                    min_monthly_spend: row
+                        .get::<_, Option<String>>(9)?
+                        .map(|value| parse_decimal_text(value, 9))
+                        .transpose()?,
+                    linked_savings: Vec::new(),
+                })
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let document_indexes: HashMap<_, _> = documents
+        .iter()
+        .enumerate()
+        .map(|(index, document)| (document.id, index))
+        .collect();
+    let mut statement = connection.prepare(
+        "SELECT link.document_id, savings.id, savings.title, savings.is_active
+         FROM document_rate_links AS link
+         JOIN savings ON savings.id = link.savings_id
+         ORDER BY savings.title COLLATE NOCASE, savings.id",
+    )?;
+    let linked_savings = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                LinkedSavingsAccount {
+                    id: row.get(1)?,
+                    title: row.get(2)?,
+                    is_active: row.get(3)?,
+                },
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (document_id, savings) in linked_savings {
+        if let Some(index) = document_indexes.get(&document_id) {
+            documents[*index].linked_savings.push(savings);
+        }
+    }
+    Ok(documents)
+}
+
+/// Atomically saves a payment document and replaces its linked savings accounts.
+pub fn save_payment_document(
+    connection: &Connection,
+    id: Option<i64>,
+    details: &PaymentDocumentDetails,
+) -> Result<i64, DbError> {
+    details.validate()?;
+    let bank_exists = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM banks WHERE id = ?1)",
+        [details.bank_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !bank_exists {
+        return Err(DbError::PaymentDocumentBankUnavailable);
+    }
+
+    let transaction = connection.unchecked_transaction()?;
+    for savings_id in &details.savings_ids {
+        let savings_bank_id = transaction
+            .query_row(
+                "SELECT bank_id FROM savings WHERE id = ?1",
+                [savings_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .ok_or(DbError::PaymentDocumentSavingsUnavailable)?;
+        if savings_bank_id != details.bank_id {
+            return Err(DbError::PaymentDocumentSavingsBankMismatch);
+        }
+    }
+
+    let amount = canonical_amount(details.amount);
+    let due_date = details
+        .due_date
+        .map(|date| date.format("%Y-%m-%d").to_string());
+    let min_monthly_spend = details.min_monthly_spend.map(canonical_amount);
+    let document_id = if let Some(id) = id {
+        transaction.execute(
+            "DELETE FROM document_rate_links WHERE document_id = ?1",
+            [id],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE payment_documents
+             SET bank_id = ?1, payment_system = ?2, card_type = ?3, amount = ?4,
+                 due_date = ?5, grace_period_days = ?6, affects_deposit_rate = ?7,
+                 min_monthly_spend = ?8
+             WHERE id = ?9",
+            params![
+                details.bank_id,
+                details.payment_system.code(),
+                details.card_type.code(),
+                amount,
+                due_date,
+                details.grace_period_days,
+                details.affects_deposit_rate,
+                min_monthly_spend,
+                id
+            ],
+        )?;
+        if changed == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows.into());
+        }
+        id
+    } else {
+        transaction.execute(
+            "INSERT INTO payment_documents (
+                bank_id, payment_system, card_type, amount, due_date,
+                grace_period_days, affects_deposit_rate, min_monthly_spend
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                details.bank_id,
+                details.payment_system.code(),
+                details.card_type.code(),
+                amount,
+                due_date,
+                details.grace_period_days,
+                details.affects_deposit_rate,
+                min_monthly_spend
+            ],
+        )?;
+        transaction.last_insert_rowid()
+    };
+
+    for savings_id in &details.savings_ids {
+        transaction.execute(
+            "INSERT INTO document_rate_links (document_id, savings_id) VALUES (?1, ?2)",
+            params![document_id, savings_id],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(document_id)
+}
+
+/// Deletes a payment document and only its associated rate links.
+pub fn delete_payment_document(connection: &Connection, id: i64) -> Result<(), DbError> {
+    let deleted = connection.execute("DELETE FROM payment_documents WHERE id = ?1", [id])?;
+    if deleted == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows.into());
+    }
+    Ok(())
+}
+
 fn parse_decimal_text(value: String, column: usize) -> Result<Decimal, rusqlite::Error> {
     Decimal::from_str(&value).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
@@ -657,14 +871,16 @@ fn backup_before_migration(
 mod tests {
     use chrono::NaiveDate;
     use finance_core::{
-        Currency, DomainError, InterestDestination, SavingsDetails, SavingsTerm, TransactionKind,
+        Currency, DomainError, InterestDestination, PaymentCardType, PaymentDocumentDetails,
+        PaymentSystem, SavingsDetails, SavingsTerm, TransactionKind,
     };
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
     use super::{
-        delete_bank, delete_category, delete_savings, initialize, list_savings, list_transactions,
-        save_bank, save_category, save_savings, save_transaction, DbError,
+        delete_bank, delete_category, delete_payment_document, delete_savings, initialize,
+        list_payment_documents, list_savings, list_transactions, save_bank, save_category,
+        save_payment_document, save_savings, save_transaction, DbError,
     };
 
     fn savings_details(bank_id: i64) -> SavingsDetails {
@@ -679,6 +895,20 @@ mod tests {
             term_end_date: NaiveDate::from_ymd_opt(2027, 11, 18),
             interest_destination: InterestDestination::Reinvest,
             is_active: true,
+        }
+    }
+
+    fn payment_document_details(bank_id: i64) -> PaymentDocumentDetails {
+        PaymentDocumentDetails {
+            bank_id,
+            payment_system: PaymentSystem::MasterCard,
+            card_type: PaymentCardType::Debit,
+            amount: Decimal::from_str("12345678901234567890.1234").unwrap(),
+            due_date: None,
+            grace_period_days: None,
+            affects_deposit_rate: false,
+            min_monthly_spend: None,
+            savings_ids: Vec::new(),
         }
     }
 
@@ -702,7 +932,7 @@ mod tests {
                 row.get::<_, i64>(0)
             })
             .unwrap();
-        assert_eq!(schema_version, 3);
+        assert_eq!(schema_version, 4);
     }
 
     #[test]
@@ -721,7 +951,7 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
             .unwrap();
 
-        assert_eq!(migration_count, 3);
+        assert_eq!(migration_count, 4);
         assert_eq!(foreign_keys_enabled, 1);
     }
 
@@ -990,7 +1220,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .contains("before-migration-v3")
+                    .contains("before-migration-v4")
             })
             .count();
 
@@ -1128,6 +1358,197 @@ mod tests {
 
         assert!(matches!(
             list_savings(&connection, None, None, ""),
+            Err(DbError::Sqlite(rusqlite::Error::FromSqlConversionFailure(
+                ..
+            )))
+        ));
+    }
+
+    #[test]
+    fn payment_document_crud_preserves_decimal_and_filters() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let bank_id = save_bank(&connection, None, "Банк", "").unwrap();
+        let savings_id = save_savings(&connection, None, &savings_details(bank_id)).unwrap();
+        let mut details = payment_document_details(bank_id);
+        details.affects_deposit_rate = true;
+        details.min_monthly_spend = Some(Decimal::from_str("10000.25").unwrap());
+        details.savings_ids = vec![savings_id];
+
+        let id = save_payment_document(&connection, None, &details).unwrap();
+        let listed = list_payment_documents(
+            &connection,
+            Some(bank_id),
+            Some(PaymentCardType::Debit),
+            Some(PaymentSystem::MasterCard),
+        )
+        .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, id);
+        assert_eq!(listed[0].amount, details.amount);
+        assert_eq!(listed[0].min_monthly_spend, details.min_monthly_spend);
+        assert_eq!(listed[0].linked_savings[0].id, savings_id);
+
+        let mut updated = details;
+        updated.payment_system = PaymentSystem::Mir;
+        updated.card_type = PaymentCardType::Credit;
+        updated.amount = Decimal::from_str("5000.01").unwrap();
+        updated.due_date = NaiveDate::from_ymd_opt(2026, 12, 1);
+        updated.grace_period_days = Some(55);
+        save_payment_document(&connection, Some(id), &updated).unwrap();
+
+        let filtered = list_payment_documents(
+            &connection,
+            Some(bank_id),
+            Some(PaymentCardType::Credit),
+            Some(PaymentSystem::Mir),
+        )
+        .unwrap();
+        assert_eq!(filtered[0].amount, updated.amount);
+        assert_eq!(filtered[0].due_date, updated.due_date);
+        assert_eq!(filtered[0].grace_period_days, Some(55));
+        assert!(
+            list_payment_documents(&connection, None, Some(PaymentCardType::Debit), None)
+                .unwrap()
+                .is_empty()
+        );
+
+        delete_payment_document(&connection, id).unwrap();
+        let link_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM document_rate_links WHERE document_id = ?1",
+                [id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(link_count, 0);
+        assert_eq!(
+            list_savings(&connection, Some(bank_id), None, "")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn payment_document_update_rolls_back_when_link_insert_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let first_bank = save_bank(&connection, None, "Первый банк", "").unwrap();
+        let second_bank = save_bank(&connection, None, "Второй банк", "").unwrap();
+        let first_savings = save_savings(&connection, None, &savings_details(first_bank)).unwrap();
+        let second_savings =
+            save_savings(&connection, None, &savings_details(second_bank)).unwrap();
+        let mut details = payment_document_details(first_bank);
+        details.affects_deposit_rate = true;
+        details.min_monthly_spend = Some(Decimal::from(1000));
+        details.savings_ids = vec![first_savings];
+        let id = save_payment_document(&connection, None, &details).unwrap();
+
+        connection
+            .execute_batch(
+                "CREATE TRIGGER force_test_link_failure
+                 BEFORE INSERT ON document_rate_links
+                 BEGIN SELECT RAISE(ABORT, 'test failure'); END;",
+            )
+            .unwrap();
+        let mut updated = details;
+        updated.bank_id = second_bank;
+        updated.savings_ids = vec![second_savings];
+        assert!(save_payment_document(&connection, Some(id), &updated).is_err());
+        connection
+            .execute_batch("DROP TRIGGER force_test_link_failure;")
+            .unwrap();
+
+        let persisted = list_payment_documents(&connection, Some(first_bank), None, None).unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].bank_id, first_bank);
+        assert_eq!(persisted[0].linked_savings[0].id, first_savings);
+    }
+
+    #[test]
+    fn payment_document_triggers_reject_direct_cross_bank_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let first_bank = save_bank(&connection, None, "Первый банк", "").unwrap();
+        let second_bank = save_bank(&connection, None, "Второй банк", "").unwrap();
+        let first_savings = save_savings(&connection, None, &savings_details(first_bank)).unwrap();
+        let second_savings =
+            save_savings(&connection, None, &savings_details(second_bank)).unwrap();
+        let mut details = payment_document_details(first_bank);
+        details.affects_deposit_rate = true;
+        details.min_monthly_spend = Some(Decimal::from(1000));
+        details.savings_ids = vec![first_savings];
+        let document_id = save_payment_document(&connection, None, &details).unwrap();
+
+        assert!(connection
+            .execute(
+                "INSERT INTO document_rate_links (document_id, savings_id) VALUES (?1, ?2)",
+                rusqlite::params![document_id, second_savings],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "UPDATE document_rate_links SET savings_id = ?1 WHERE document_id = ?2",
+                rusqlite::params![second_savings, document_id],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "UPDATE payment_documents SET bank_id = ?1 WHERE id = ?2",
+                rusqlite::params![second_bank, document_id],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "UPDATE savings SET bank_id = ?1 WHERE id = ?2",
+                rusqlite::params![second_bank, first_savings],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "UPDATE payment_documents
+                 SET affects_deposit_rate = 0, min_monthly_spend = NULL WHERE id = ?1",
+                [document_id],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn list_payment_documents_reports_corrupted_decimal() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let bank_id = save_bank(&connection, None, "Банк", "").unwrap();
+        save_payment_document(&connection, None, &payment_document_details(bank_id)).unwrap();
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints = ON;")
+            .unwrap();
+        connection
+            .execute("UPDATE payment_documents SET amount = 'не число'", [])
+            .unwrap();
+        assert!(matches!(
+            list_payment_documents(&connection, None, None, None),
+            Err(DbError::Sqlite(rusqlite::Error::FromSqlConversionFailure(
+                ..
+            )))
+        ));
+    }
+
+    #[test]
+    fn list_payment_documents_reports_unknown_payment_system() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let bank_id = save_bank(&connection, None, "Банк", "").unwrap();
+        save_payment_document(&connection, None, &payment_document_details(bank_id)).unwrap();
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints = ON;")
+            .unwrap();
+        connection
+            .execute("UPDATE payment_documents SET payment_system = 'future'", [])
+            .unwrap();
+
+        assert!(matches!(
+            list_payment_documents(&connection, None, None, None),
             Err(DbError::Sqlite(rusqlite::Error::FromSqlConversionFailure(
                 ..
             )))
