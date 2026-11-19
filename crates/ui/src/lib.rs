@@ -1150,14 +1150,21 @@ impl eframe::App for FinanceApp {
                     {
                         self.refresh_transactions(kind);
                     }
-                } else if self.active_tab == ModuleTab::Directories {
+                } else if matches!(
+                    self.active_tab,
+                    ModuleTab::Directories | ModuleTab::Analysis
+                ) {
                     let actions_width = 140.0;
                     ui.add_space((ui.available_width() - actions_width).max(0.0));
                     if ui
                         .add_sized(egui::vec2(140.0, 40.0), egui::Button::new("↻ Обновить"))
                         .clicked()
                     {
-                        self.refresh_directories();
+                        if self.active_tab == ModuleTab::Directories {
+                            self.refresh_directories();
+                        } else {
+                            refresh_analysis_categories = true;
+                        }
                     }
                 } else if self.active_tab == ModuleTab::Savings {
                     let actions_width = 140.0 * 2.0 + ui.spacing().item_spacing.x;
@@ -1243,6 +1250,7 @@ impl eframe::App for FinanceApp {
                         self.database_path.as_deref(),
                         &self.analysis_income_categories,
                         &self.analysis_expense_categories,
+                        refresh_analysis_categories,
                     );
                 }
             }

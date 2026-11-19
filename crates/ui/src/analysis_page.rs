@@ -63,8 +63,9 @@ impl AnalysisPage {
         database_path: Option<&Path>,
         income_categories: &[Category],
         expense_categories: &[Category],
+        refresh: bool,
     ) -> bool {
-        let mut refresh_categories = false;
+        let refresh_categories = refresh;
         ui.horizontal_wrapped(|ui| {
             ui.label("Период с");
             date_input(
@@ -102,15 +103,13 @@ impl AnalysisPage {
                 self.from_date_input.reset();
                 self.to_date_input.reset();
             }
-            refresh_categories = ui.button("↻ Обновить").clicked();
-            if refresh_categories {
-                let filters = self.filters();
-                self.schedule(filters, Instant::now());
-            }
         });
         ui.separator();
 
         let filters = self.filters();
+        if refresh {
+            self.schedule(filters.clone(), Instant::now());
+        }
         self.observe_filters(filters.clone());
         if let Some(database_path) = database_path {
             self.poll_request(&filters);
@@ -575,7 +574,14 @@ mod tests {
         let context = egui::Context::default();
         let output = context.run(Default::default(), |context| {
             egui::CentralPanel::default().show(context, |ui| {
-                page.render(context, ui, None, &income_categories, &expense_categories);
+                page.render(
+                    context,
+                    ui,
+                    None,
+                    &income_categories,
+                    &expense_categories,
+                    false,
+                );
             });
         });
 
