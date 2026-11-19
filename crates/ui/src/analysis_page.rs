@@ -555,36 +555,54 @@ impl AnalysisPage {
             egui::vec2(row_width, ANALYSIS_ROW_HEIGHT),
             egui::Layout::left_to_right(egui::Align::Center),
             |row_ui| {
+                let row_rect = row_ui.max_rect();
                 if striped {
-                    row_ui.painter().rect_filled(
-                        row_ui.max_rect(),
-                        0.0,
-                        row_ui.visuals().faint_bg_color,
-                    );
+                    row_ui
+                        .painter()
+                        .rect_filled(row_rect, 0.0, row_ui.visuals().faint_bg_color);
                 }
 
+                let mut cell_left = row_rect.left();
                 for (column_index, (value, width)) in
                     values.into_iter().zip(column_widths).enumerate()
                 {
-                    let cell_layout = if column_index == 0 {
-                        egui::Layout::left_to_right(egui::Align::Center)
+                    let text = if strong {
+                        egui::RichText::new(value).strong()
                     } else {
-                        egui::Layout::right_to_left(egui::Align::Center)
+                        egui::RichText::new(value)
                     };
-                    row_ui.allocate_ui_with_layout(
+                    let cell_rect = egui::Rect::from_min_size(
+                        egui::pos2(cell_left, row_rect.top()),
                         egui::vec2(*width, ANALYSIS_ROW_HEIGHT),
-                        cell_layout,
-                        |cell_ui| {
-                            let text = if strong {
-                                egui::RichText::new(value).strong()
-                            } else {
-                                egui::RichText::new(value)
-                            };
-                            cell_ui
-                                .add(egui::Label::new(text).truncate())
-                                .on_hover_text(value);
-                        },
                     );
+                    row_ui.allocate_new_ui(egui::UiBuilder::new().max_rect(cell_rect), |cell_ui| {
+                        let galley = egui::WidgetText::from(text).into_galley(
+                            cell_ui,
+                            Some(egui::TextWrapMode::Truncate),
+                            *width,
+                            egui::TextStyle::Body,
+                        );
+                        let text_left = if column_index == 0 {
+                            cell_rect.left()
+                        } else {
+                            cell_rect.right() - galley.size().x
+                        };
+                        let text_position =
+                            egui::pos2(text_left, cell_rect.center().y - galley.size().y / 2.0);
+                        cell_ui.painter().galley(
+                            text_position,
+                            galley,
+                            cell_ui.visuals().text_color(),
+                        );
+                        cell_ui
+                            .interact(
+                                cell_rect,
+                                cell_ui.id().with(column_index),
+                                egui::Sense::hover(),
+                            )
+                            .on_hover_text(value);
+                    });
+                    cell_left += width + column_spacing;
                 }
             },
         );
@@ -741,6 +759,78 @@ mod tests {
                     .abs()
                     .total_cmp(&(right.x - reference_x).abs())
             })
+    }
+
+    fn text_right_edge_on_row(
+        output: &egui::FullOutput,
+        text: &str,
+        row_y: f32,
+        reference_x: f32,
+        split_x: f32,
+    ) -> Option<f32> {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped_shape| match &clipped_shape.shape {
+                egui::epaint::Shape::Text(text_shape)
+                    if text_shape.galley.job.text == text
+                        && (text_shape.pos.y - row_y).abs() < 1.0
+                        && (text_shape.pos.x < split_x) == (reference_x < split_x) =>
+                {
+                    Some(text_shape.pos.x + text_shape.galley.size().x)
+                }
+                _ => None,
+            })
+    }
+
+    fn text_position_after_row(
+        output: &egui::FullOutput,
+        text: &str,
+        row_y: f32,
+        reference_x: f32,
+        split_x: f32,
+    ) -> Option<egui::Pos2> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped_shape| match &clipped_shape.shape {
+                egui::epaint::Shape::Text(text_shape)
+                    if text_shape.galley.job.text == text
+                        && text_shape.pos.y > row_y
+                        && (text_shape.pos.x < split_x) == (reference_x < split_x) =>
+                {
+                    Some(text_shape.pos)
+                }
+                _ => None,
+            })
+            .min_by(|left, right| left.y.total_cmp(&right.y))
+    }
+
+    fn text_right_edge_before_row(
+        output: &egui::FullOutput,
+        text: &str,
+        row_y: f32,
+        reference_x: f32,
+        split_x: f32,
+    ) -> Option<f32> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped_shape| match &clipped_shape.shape {
+                egui::epaint::Shape::Text(text_shape)
+                    if text_shape.galley.job.text == text
+                        && text_shape.pos.y < row_y
+                        && (text_shape.pos.x < split_x) == (reference_x < split_x) =>
+                {
+                    Some((
+                        text_shape.pos.y,
+                        text_shape.pos.x + text_shape.galley.size().x,
+                    ))
+                }
+                _ => None,
+            })
+            .max_by(|left, right| left.0.total_cmp(&right.0))
+            .map(|(_, right_edge)| right_edge)
     }
 
     fn striped_row_width_near(output: &egui::FullOutput, row_y: f32) -> Option<f32> {
@@ -1205,6 +1295,122 @@ mod tests {
                     background_width > width * 0.4,
                     "striped row should span the section width at {width}px for {striped_category}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn analysis_summary_cells_and_totals_stay_aligned_with_column_headers() {
+        let mut summary = summary_with_both_kinds_and_currencies();
+        for (index, category) in summary.categories.iter_mut().enumerate() {
+            category.transaction_count = [2, 31, 456, 7, 89, 1234, 5, 67][index];
+            category.amount = Decimal::new(
+                [
+                    123456, 2345678, 34567890, 456789, 56789012, 678901, 7890123, 89012345,
+                ][index],
+                2,
+            );
+            category.share_percent =
+                Decimal::new([1250, 2375, 3450, 4567, 5678, 6789, 7890, 8901][index], 2);
+        }
+        for (index, total) in summary.totals.iter_mut().enumerate() {
+            total.transaction_count = [33, 444, 5, 6789][index];
+            total.amount = Decimal::new([123456789, 234567890, 345678901, 456789012][index], 2);
+        }
+
+        for width in [900.0, 1_280.0, 2_000.0] {
+            let output = render_summary_at_width(&summary, width);
+            let split_x = width / 2.0;
+            for kind in [TransactionKind::Income, TransactionKind::Expense] {
+                for currency in Currency::ALL {
+                    let categories: Vec<_> = summary
+                        .categories
+                        .iter()
+                        .filter(|category| category.kind == kind && category.currency == currency)
+                        .collect();
+                    let first_category_position =
+                        text_position(&output, &categories[0].category_name).expect("category row");
+                    for category in categories {
+                        let category_position =
+                            text_position(&output, &category.category_name).expect("category row");
+                        for (header, value) in [
+                            ("Операций", category.transaction_count.to_string()),
+                            ("Сумма", category.amount.to_string()),
+                            ("Доля", format!("{}%", category.share_percent.round_dp(2))),
+                        ] {
+                            let header_right = text_right_edge_before_row(
+                                &output,
+                                header,
+                                category_position.y,
+                                first_category_position.x,
+                                split_x,
+                            )
+                            .expect("column header");
+                            let value_right = text_right_edge_on_row(
+                                &output,
+                                &value,
+                                category_position.y,
+                                first_category_position.x,
+                                split_x,
+                            )
+                            .expect("category cell value");
+                            assert!(
+                                (header_right - value_right).abs() < 2.0,
+                                "{header} cell is misaligned at {width}px for {}: header right={header_right}, value right={value_right}",
+                                category.category_name
+                            );
+                        }
+                    }
+
+                    let last_category = summary
+                        .categories
+                        .iter()
+                        .filter(|category| category.kind == kind && category.currency == currency)
+                        .last()
+                        .expect("category group");
+                    let last_category_position =
+                        text_position(&output, &last_category.category_name)
+                            .expect("last category row");
+                    let total_position = text_position_after_row(
+                        &output,
+                        "Итого",
+                        last_category_position.y,
+                        first_category_position.x,
+                        split_x,
+                    )
+                    .expect("total row");
+                    let total = summary
+                        .totals
+                        .iter()
+                        .find(|total| total.kind == kind && total.currency == currency)
+                        .expect("group total");
+                    for (header, value) in [
+                        ("Операций", total.transaction_count.to_string()),
+                        ("Сумма", total.amount.to_string()),
+                        ("Доля", "100%".to_owned()),
+                    ] {
+                        let header_right = text_right_edge_before_row(
+                            &output,
+                            header,
+                            total_position.y,
+                            first_category_position.x,
+                            split_x,
+                        )
+                        .expect("column header");
+                        let value_right = text_right_edge_on_row(
+                            &output,
+                            &value,
+                            total_position.y,
+                            first_category_position.x,
+                            split_x,
+                        )
+                        .expect("total cell value");
+                        assert!(
+                            (header_right - value_right).abs() < 2.0,
+                            "{header} total is misaligned at {width}px: header right={header_right}, value right={value_right}"
+                        );
+                    }
+                }
             }
         }
     }
