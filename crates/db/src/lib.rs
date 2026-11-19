@@ -51,6 +51,12 @@ pub enum DbError {
     Io(#[from] std::io::Error),
     #[error("Версия схемы базы данных {found} новее поддерживаемой {supported}")]
     UnsupportedSchemaVersion { found: i64, supported: i64 },
+    #[error("Структура базы данных не распознана; данные не изменены")]
+    UnrecognizedSchema,
+    #[error("История миграций повреждена; данные не изменены")]
+    InvalidMigrationHistory,
+    #[error("База данных изменилась во время подготовки обновления; повторите запуск")]
+    ConcurrentDatabaseModification,
     #[error("Сумма должна быть положительным числом")]
     InvalidAmount,
     #[error("Категория не найдена или неактивна")]
@@ -75,7 +81,9 @@ pub enum DbError {
     Domain(#[from] finance_core::DomainError),
 }
 
-/// Opens the database, enables foreign keys, and applies pending migrations.
+/// Opens the database, enables foreign keys, and applies supported migrations automatically.
+/// Before upgrading a recognized older schema, creates an adjacent consistent SQLite backup.
+/// An unrecognized non-empty database is rejected without modifying its contents.
 pub fn initialize(path: &Path) -> Result<Connection, DbError> {
     if let Some(parent) = path
         .parent()
@@ -87,7 +95,6 @@ pub fn initialize(path: &Path) -> Result<Connection, DbError> {
     let mut connection = Connection::open(path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
-    create_migration_history(&connection)?;
     apply_migrations(&mut connection, path)?;
 
     Ok(connection)
@@ -910,38 +917,105 @@ fn create_migration_history(connection: &Connection) -> Result<(), rusqlite::Err
 }
 
 fn apply_migrations(connection: &mut Connection, database_path: &Path) -> Result<(), DbError> {
-    let current_version = connection.query_row(
-        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
-        [],
-        |row| row.get::<_, i64>(0),
-    )?;
+    let current_version = detect_migration_version(connection)?;
     let latest_version = MIGRATIONS.last().map_or(0, |migration| migration.version);
 
-    if current_version > latest_version {
-        return Err(DbError::UnsupportedSchemaVersion {
-            found: current_version,
-            supported: latest_version,
-        });
+    if current_version == Some(latest_version) {
+        return Ok(());
     }
 
-    if current_version > 0 && current_version < latest_version {
+    let initial_data_version = database_data_version(connection)?;
+    if current_version.is_some() {
         backup_before_migration(connection, database_path, latest_version)?;
     }
 
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if database_data_version(&transaction)? != initial_data_version
+        || detect_migration_version(&transaction)? != current_version
+    {
+        return Err(DbError::ConcurrentDatabaseModification);
+    }
+
+    create_migration_history(&transaction)?;
     for migration in MIGRATIONS
         .iter()
-        .filter(|migration| migration.version > current_version)
+        .filter(|migration| migration.version > current_version.unwrap_or(0))
     {
-        let transaction = connection.transaction()?;
         transaction.execute_batch(migration.sql)?;
         transaction.execute(
             "INSERT INTO schema_migrations (version) VALUES (?1)",
             [migration.version],
         )?;
-        transaction.commit()?;
     }
 
+    transaction.commit()?;
     Ok(())
+}
+
+fn detect_migration_version(connection: &Connection) -> Result<Option<i64>, DbError> {
+    let history_exists = connection.query_row(
+        "SELECT EXISTS (
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'schema_migrations'
+        )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+
+    if !history_exists {
+        return if has_user_schema_objects(connection)? {
+            Err(DbError::UnrecognizedSchema)
+        } else {
+            Ok(None)
+        };
+    }
+
+    let mut statement =
+        connection.prepare("SELECT version FROM schema_migrations ORDER BY version")?;
+    let versions = statement
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if versions.is_empty() {
+        return if has_user_schema_objects(connection)? {
+            Err(DbError::UnrecognizedSchema)
+        } else {
+            Ok(None)
+        };
+    }
+
+    let supported_version = MIGRATIONS.last().map_or(0, |migration| migration.version);
+    let found_version = *versions.last().ok_or(DbError::InvalidMigrationHistory)?;
+    if found_version > supported_version {
+        return Err(DbError::UnsupportedSchemaVersion {
+            found: found_version,
+            supported: supported_version,
+        });
+    }
+
+    if versions
+        .iter()
+        .enumerate()
+        .any(|(index, version)| *version != index as i64 + 1)
+    {
+        return Err(DbError::InvalidMigrationHistory);
+    }
+
+    Ok(Some(found_version))
+}
+
+fn has_user_schema_objects(connection: &Connection) -> Result<bool, rusqlite::Error> {
+    connection.query_row(
+        "SELECT EXISTS (
+            SELECT 1 FROM sqlite_master
+            WHERE name NOT LIKE 'sqlite_%' AND name <> 'schema_migrations'
+        )",
+        [],
+        |row| row.get(0),
+    )
+}
+
+fn database_data_version(connection: &Connection) -> Result<i64, rusqlite::Error> {
+    connection.query_row("PRAGMA data_version", [], |row| row.get(0))
 }
 
 fn backup_before_migration(
@@ -971,6 +1045,7 @@ mod tests {
         Currency, DomainError, InterestDestination, PaymentCardType, PaymentDocumentDetails,
         PaymentSystem, SavingsDetails, SavingsTerm, TransactionKind,
     };
+    use rusqlite::Connection;
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
@@ -978,7 +1053,7 @@ mod tests {
         delete_bank, delete_category, delete_payment_document, delete_savings, initialize,
         list_payment_documents, list_savings, list_transactions, load_analysis_transactions,
         load_analysis_transactions_by_category, save_bank, save_category, save_payment_document,
-        save_savings, save_transaction, DbError,
+        save_savings, save_transaction, DbError, MIGRATIONS,
     };
 
     fn savings_details(bank_id: i64) -> SavingsDetails {
@@ -1008,6 +1083,393 @@ mod tests {
             min_monthly_spend: None,
             savings_ids: Vec::new(),
         }
+    }
+
+    fn create_legacy_database(path: &std::path::Path, version: i64) -> Connection {
+        let mut connection = Connection::open(path).unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY NOT NULL,
+                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );",
+            )
+            .unwrap();
+
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= version)
+        {
+            transaction.execute_batch(migration.sql).unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations (version) VALUES (?1)",
+                    [migration.version],
+                )
+                .unwrap();
+
+            match migration.version {
+                1 => {
+                    transaction
+                        .execute(
+                            "INSERT INTO app_settings (key, value) VALUES ('theme', 'dark')",
+                            [],
+                        )
+                        .unwrap();
+                }
+                2 => {
+                    transaction
+                        .execute_batch(
+                            "INSERT INTO banks (id, name, comment) VALUES (1, 'Банк Альфа', 'основной');
+                             INSERT INTO income_categories (id, name, is_active)
+                                VALUES (1, 'Зарплата', 0);
+                             INSERT INTO expense_categories (id, name) VALUES (1, 'Дом');
+                             INSERT INTO incomes (id, date, category_id, amount, currency, comment)
+                                VALUES (1, '2024-01-02', 1, '1234.5600', 'USD', 'проверка дохода');
+                             INSERT INTO expenses (id, date, category_id, amount, currency, comment)
+                                VALUES (1, '2024-02-03', 1, '98.0700', 'RUB', 'проверка расхода');",
+                        )
+                        .unwrap();
+                }
+                3 => {
+                    transaction
+                        .execute_batch(
+                            "INSERT INTO savings (
+                                id, bank_id, title, amount, base_rate, term_type,
+                                interest_destination, is_active
+                             ) VALUES (
+                                1, 1, 'Резерв', '999.0100', '5.00', 'unlimited', 'withdraw', 0
+                             );",
+                        )
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        transaction.commit().unwrap();
+        connection
+    }
+
+    fn migration_backup_count(directory: &std::path::Path) -> usize {
+        std::fs::read_dir(directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("data.before-migration-v4-")
+            })
+            .count()
+    }
+
+    #[test]
+    fn initialize_migrates_supported_versions_and_preserves_backup_and_data() {
+        for version in 1..=3 {
+            let directory = tempfile::tempdir().unwrap();
+            let database_path = directory.path().join("data.db");
+            drop(create_legacy_database(&database_path, version));
+
+            let connection = initialize(&database_path).unwrap();
+            let latest_version = connection
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap();
+            assert_eq!(latest_version, 4);
+
+            let income_count = connection
+                .query_row("SELECT COUNT(*) FROM incomes", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap();
+            assert_eq!(income_count, i64::from(version >= 2));
+            if version >= 2 {
+                let income = connection
+                    .query_row(
+                        "SELECT date, amount, currency, comment FROM incomes WHERE id = 1",
+                        [],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
+                            ))
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(
+                    income,
+                    (
+                        "2024-01-02".into(),
+                        "1234.5600".into(),
+                        "USD".into(),
+                        "проверка дохода".into()
+                    )
+                );
+
+                let bank = connection
+                    .query_row("SELECT name, comment FROM banks WHERE id = 1", [], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .unwrap();
+                assert_eq!(bank, ("Банк Альфа".into(), "основной".into()));
+
+                let income_category = connection
+                    .query_row(
+                        "SELECT name, is_active FROM income_categories WHERE id = 1",
+                        [],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(income_category, ("Зарплата".into(), false));
+
+                let expense_category = connection
+                    .query_row(
+                        "SELECT name FROM expense_categories WHERE id = 1",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap();
+                assert_eq!(expense_category, "Дом");
+
+                let expense = connection
+                    .query_row(
+                        "SELECT date, amount, currency, comment FROM expenses WHERE id = 1",
+                        [],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
+                            ))
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(
+                    expense,
+                    (
+                        "2024-02-03".into(),
+                        "98.0700".into(),
+                        "RUB".into(),
+                        "проверка расхода".into()
+                    )
+                );
+            }
+
+            let savings_count = connection
+                .query_row("SELECT COUNT(*) FROM savings", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap();
+            assert_eq!(savings_count, i64::from(version == 3));
+            if version == 3 {
+                let savings = connection
+                    .query_row(
+                        "SELECT title, amount, base_rate, term_type, interest_destination, is_active
+                         FROM savings WHERE id = 1",
+                        [],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, String>(3)?,
+                                row.get::<_, String>(4)?,
+                                row.get::<_, bool>(5)?,
+                            ))
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(
+                    savings,
+                    (
+                        "Резерв".into(),
+                        "999.0100".into(),
+                        "5.00".into(),
+                        "unlimited".into(),
+                        "withdraw".into(),
+                        false
+                    )
+                );
+            }
+            drop(connection);
+
+            let backup_path = std::fs::read_dir(directory.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("data.before-migration-v4-")
+                })
+                .expect("upgrade should create a backup")
+                .path();
+            let backup = Connection::open(backup_path).unwrap();
+            let backup_version = backup
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap();
+            assert_eq!(backup_version, version);
+            let setting = backup
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key = 'theme'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap();
+            assert_eq!(setting, "dark");
+            if version >= 2 {
+                let amount = backup
+                    .query_row("SELECT amount FROM incomes WHERE id = 1", [], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .unwrap();
+                assert_eq!(amount, "1234.5600");
+            }
+            if version == 3 {
+                let amount = backup
+                    .query_row("SELECT amount FROM savings WHERE id = 1", [], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .unwrap();
+                assert_eq!(amount, "999.0100");
+            }
+            drop(backup);
+
+            assert_eq!(migration_backup_count(directory.path()), 1);
+            drop(initialize(&database_path).unwrap());
+            assert_eq!(migration_backup_count(directory.path()), 1);
+        }
+    }
+
+    #[test]
+    fn initialize_does_not_modify_unrecognized_unversioned_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE legacy_records (value TEXT NOT NULL);
+                 INSERT INTO legacy_records (value) VALUES ('keep me');",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            initialize(&database_path),
+            Err(DbError::UnrecognizedSchema)
+        ));
+
+        let connection = Connection::open(&database_path).unwrap();
+        let value = connection
+            .query_row("SELECT value FROM legacy_records", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap();
+        let migration_table_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(value, "keep me");
+        assert_eq!(migration_table_count, 0);
+    }
+
+    #[test]
+    fn initialize_does_not_modify_database_with_incomplete_migration_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY NOT NULL,
+                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                 );
+                 INSERT INTO schema_migrations (version) VALUES (1), (3);
+                 CREATE TABLE app_settings (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+                 INSERT INTO app_settings (key, value) VALUES ('theme', 'dark');",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            initialize(&database_path),
+            Err(DbError::InvalidMigrationHistory)
+        ));
+
+        let connection = Connection::open(&database_path).unwrap();
+        let setting = connection
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'theme'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        let migration_count = connection
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        let banks_table_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'banks'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(setting, "dark");
+        assert_eq!(migration_count, 2);
+        assert_eq!(banks_table_count, 0);
+        assert_eq!(migration_backup_count(directory.path()), 0);
+    }
+
+    #[test]
+    fn initialize_rolls_back_failed_migration_and_keeps_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let connection = create_legacy_database(&database_path, 1);
+        connection
+            .execute_batch(
+                "CREATE TABLE savings (marker TEXT NOT NULL);
+                 INSERT INTO savings (marker) VALUES ('preserve');",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(initialize(&database_path).is_err());
+
+        let connection = Connection::open(&database_path).unwrap();
+        let schema_version = connection
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        let marker = connection
+            .query_row("SELECT marker FROM savings", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap();
+        let banks_table_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'banks'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(schema_version, 1);
+        assert_eq!(marker, "preserve");
+        assert_eq!(banks_table_count, 0);
+        assert_eq!(migration_backup_count(directory.path()), 1);
     }
 
     #[test]

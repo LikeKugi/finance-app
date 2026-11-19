@@ -17,7 +17,7 @@ Payment document amounts are stored as exact decimal text without a currency. Fo
 
 Analysis reads transactions from a separate read-only SQLite connection in one read transaction. Date boundaries are inclusive; empty boundaries mean the full available period. Category shares use the total for the same transaction type and currency, and RUB and USD are never combined. The current model does not define conversion rates, forecast methodology, or a confirmed criterion for special categories, so those results are not presented.
 
-Schema migration V4 adds payment documents and their savings links. When upgrading an existing versioned database, FinanceApp creates an adjacent consistent SQLite backup before applying pending migrations.
+At startup, FinanceApp automatically upgrades databases with a recognized, contiguous migration history (V1–V3) to the current schema. Before upgrading, it creates an adjacent consistent SQLite backup named `data.before-migration-v4-<timestamp>.db`, then applies all pending migrations atomically. No user command is needed. A non-empty database without a recognized migration history, a damaged history, or a database from a newer app version is left unchanged and reported as an error; unsupported legacy formats are not guessed or rewritten.
 
 Transaction dates and the income/expense date filters can be entered manually in `YYYY-MM-DD` format or selected from the calendar button. Date filters remain optional and can be cleared by deleting their text.
 
