@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use chrono::NaiveDate;
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TransactionKind {
@@ -720,6 +720,8 @@ pub enum DomainError {
     InvalidAmountFormat,
     #[error("Сумма слишком велика")]
     AmountOverflow,
+    #[error("Деление на ноль невозможно")]
+    DivisionByZero,
     #[error("Неизвестная валюта: {0}")]
     UnknownCurrency(String),
     #[error("Некорректное числовое значение")]
@@ -857,12 +859,104 @@ pub fn parse_amount(input: &str) -> Result<Decimal, DomainError> {
     Ok(amount)
 }
 
-/// Parses a sum of positive amounts separated by plus signs.
+/// Parses an arithmetic expression with positive amount operands.
+///
+/// Multiplication and division take precedence over addition and subtraction.
+/// Each division is rounded to two decimal places using midpoint-away-from-zero.
 pub fn parse_amount_expression(input: &str) -> Result<Decimal, DomainError> {
-    input.split('+').try_fold(Decimal::ZERO, |total, term| {
-        let amount = parse_amount(term)?;
-        total.checked_add(amount).ok_or(DomainError::AmountOverflow)
-    })
+    let mut parser = AmountExpressionParser { input, position: 0 };
+    let amount = parser.parse_expression()?;
+    parser.skip_whitespace();
+    if parser.position != input.len() {
+        return Err(DomainError::InvalidAmountFormat);
+    }
+    if amount <= Decimal::ZERO {
+        return Err(DomainError::InvalidAmount);
+    }
+    Ok(amount)
+}
+
+struct AmountExpressionParser<'a> {
+    input: &'a str,
+    position: usize,
+}
+
+impl AmountExpressionParser<'_> {
+    fn parse_expression(&mut self) -> Result<Decimal, DomainError> {
+        let mut value = self.parse_term()?;
+        loop {
+            self.skip_whitespace();
+            let operation = match self.peek() {
+                Some('+') | Some('-') => self.advance(),
+                _ => break,
+            };
+            let right = self.parse_term()?;
+            value = match operation {
+                Some('+') => value.checked_add(right),
+                Some('-') => value.checked_sub(right),
+                _ => return Err(DomainError::InvalidAmountFormat),
+            }
+            .ok_or(DomainError::AmountOverflow)?;
+        }
+        Ok(value)
+    }
+
+    fn parse_term(&mut self) -> Result<Decimal, DomainError> {
+        let mut value = self.parse_factor()?;
+        if value <= Decimal::ZERO {
+            return Err(DomainError::InvalidAmount);
+        }
+        loop {
+            self.skip_whitespace();
+            let operation = match self.peek() {
+                Some('*') | Some('/') => self.advance(),
+                _ => break,
+            };
+            let right = self.parse_factor()?;
+            value = match operation {
+                Some('*') if right > Decimal::ZERO => value.checked_mul(right),
+                Some('/') if right == Decimal::ZERO => {
+                    return Err(DomainError::DivisionByZero);
+                }
+                Some('/') => value.checked_div(right).map(|quotient| {
+                    quotient.round_dp_with_strategy(2, RoundingStrategy::MidpointAwayFromZero)
+                }),
+                _ => return Err(DomainError::InvalidAmount),
+            }
+            .ok_or(DomainError::AmountOverflow)?;
+        }
+        Ok(value)
+    }
+
+    fn parse_factor(&mut self) -> Result<Decimal, DomainError> {
+        self.skip_whitespace();
+        let start = self.position;
+        while matches!(self.peek(), Some(character) if character.is_ascii_digit() || matches!(character, '.' | ','))
+        {
+            self.advance();
+        }
+        if start == self.position {
+            return Err(DomainError::InvalidAmountFormat);
+        }
+        parse_non_negative_decimal(&self.input[start..self.position])
+            .map_err(|_| DomainError::InvalidAmountFormat)
+    }
+
+    fn skip_whitespace(&mut self) {
+        while matches!(self.peek(), Some(character) if character.is_whitespace()) {
+            self.advance();
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.input[self.position..].chars().next()
+    }
+
+    fn advance(&mut self) -> Option<char> {
+        let character = self.peek()?;
+        self.position += character.len_utf8();
+        Some(character)
+    }
 }
 
 /// Formats a decimal amount in a locale-independent representation for SQLite.
@@ -938,13 +1032,58 @@ mod tests {
     }
 
     #[test]
+    fn parse_amount_expression_subtracts_positive_amounts() {
+        assert_eq!(parse_amount_expression("100 - 23"), Ok(Decimal::from(77)));
+        assert_eq!(parse_amount_expression("1 - 2 + 3"), Ok(Decimal::from(2)));
+    }
+
+    #[test]
+    fn parse_amount_expression_multiplies_with_precedence() {
+        assert_eq!(parse_amount_expression("10 + 2 * 3"), Ok(Decimal::from(16)));
+    }
+
+    #[test]
+    fn parse_amount_expression_divides_and_rounds_to_two_decimal_places() {
+        assert_eq!(parse_amount_expression("1 / 8"), Ok(Decimal::new(13, 2)));
+        assert_eq!(parse_amount_expression("10 / 3"), Ok(Decimal::new(333, 2)));
+    }
+
+    #[test]
+    fn parse_amount_expression_rounds_each_division_before_the_next_operation() {
+        assert_eq!(
+            parse_amount_expression("20 / 3 * 3"),
+            Ok(Decimal::new(2001, 2))
+        );
+    }
+
+    #[test]
+    fn parse_amount_expression_rejects_non_positive_results() {
+        assert_eq!(
+            parse_amount_expression("1 - 2"),
+            Err(DomainError::InvalidAmount)
+        );
+        assert_eq!(
+            parse_amount_expression("1 / 1000"),
+            Err(DomainError::InvalidAmount)
+        );
+    }
+
+    #[test]
+    fn parse_amount_expression_rejects_division_by_zero() {
+        assert_eq!(
+            parse_amount_expression("10 / 0"),
+            Err(DomainError::DivisionByZero)
+        );
+    }
+
+    #[test]
     fn parse_amount_expression_rejects_empty_terms_and_other_operators() {
         assert_eq!(
             parse_amount_expression("1 + + 2"),
             Err(DomainError::InvalidAmountFormat)
         );
         assert_eq!(
-            parse_amount_expression("1 - 2"),
+            parse_amount_expression("1 ** 2"),
             Err(DomainError::InvalidAmountFormat)
         );
     }
@@ -953,6 +1092,10 @@ mod tests {
     fn parse_amount_expression_reports_overflow() {
         assert_eq!(
             parse_amount_expression("79228162514264337593543950335 + 1"),
+            Err(DomainError::AmountOverflow)
+        );
+        assert_eq!(
+            parse_amount_expression("79228162514264337593543950335 * 2"),
             Err(DomainError::AmountOverflow)
         );
     }

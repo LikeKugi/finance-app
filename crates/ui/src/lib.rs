@@ -11,6 +11,7 @@ use finance_db::{self, Database};
 use rust_decimal::Decimal;
 
 const TABLE_ROW_HEIGHT: f32 = 48.0;
+const DIVISION_ROUNDING_WARNING: &str = "Деление округляется до 2 знаков после запятой; погрешность может накапливаться при нескольких делениях.";
 const TRANSACTION_COLUMN_MIN_WIDTHS: [f32; 6] = [115.0, 135.0, 90.0, 180.0, 220.0, 180.0];
 const TRANSACTION_COLUMN_GROWTH_WEIGHTS: [f32; 6] = [0.8, 0.8, 0.6, 1.1, 1.8, 1.0];
 
@@ -803,7 +804,7 @@ impl FinanceApp {
             ui.add(
                 egui::TextEdit::singleline(&mut self.transaction_form.amount)
                     .desired_width(180.0)
-                    .hint_text("например: 100 + 200 + 347"),
+                    .hint_text("например: 100 + 20 - 5 * 2 / 4"),
             );
             ui.label("Валюта");
             let selected_currency = self
@@ -970,6 +971,9 @@ impl FinanceApp {
                     .desired_rows(3),
             );
         });
+        if self.transaction_form.amount.contains('/') {
+            ui.weak(DIVISION_ROUNDING_WARNING);
+        }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
@@ -978,11 +982,8 @@ impl FinanceApp {
                     Ok(total) => {
                         ui.label(format!("Итого: {total}"));
                     }
-                    Err(_) => {
-                        ui.colored_label(
-                            egui::Color32::RED,
-                            "Введите положительные суммы, разделённые знаком +",
-                        );
+                    Err(error) => {
+                        ui.colored_label(egui::Color32::RED, error.to_string());
                     }
                 }
             }
@@ -1600,8 +1601,9 @@ mod tests {
         category_tree_labels, category_tree_rows, render_analysis_footer,
         render_transaction_balance_footer, transaction_column_widths, AnalysisPage, Category,
         FinanceApp, ModuleTab, SavingsPage, TransactionKind, DIRECTORY_BANKS_SCROLL_AREA_ID,
-        DIRECTORY_CATEGORIES_SCROLL_AREA_ID, TABLE_ROW_HEIGHT, TRANSACTION_COLUMN_MIN_WIDTHS,
-        TRANSACTION_FILTERS_SCROLL_AREA_ID, TRANSACTION_TABLE_SCROLL_AREA_ID,
+        DIRECTORY_CATEGORIES_SCROLL_AREA_ID, DIVISION_ROUNDING_WARNING, TABLE_ROW_HEIGHT,
+        TRANSACTION_COLUMN_MIN_WIDTHS, TRANSACTION_FILTERS_SCROLL_AREA_ID,
+        TRANSACTION_TABLE_SCROLL_AREA_ID,
     };
 
     fn category(id: i64, parent_id: Option<i64>, is_active: bool) -> Category {
@@ -2394,9 +2396,11 @@ mod tests {
     fn income_and_expense_forms_keep_requested_field_and_footer_layout() {
         for kind in [TransactionKind::Income, TransactionKind::Expense] {
             for width in [1_280.0, 1_920.0] {
-                for (amount, footer_text) in [
-                    ("10 + 20", "Итого: 30"),
-                    ("10 +", "Введите положительные суммы, разделённые знаком +"),
+                for (amount, footer_text, has_division_warning) in [
+                    ("10 + 20", "Итого: 30", false),
+                    ("1 / 8", "Итого: 0.13", true),
+                    ("10 +", "Некорректная сумма", false),
+                    ("10 /", "Некорректная сумма", true),
                 ] {
                     let mut app = filtered_transaction_app(kind);
                     app.transaction_form = super::TransactionForm {
@@ -2431,6 +2435,11 @@ mod tests {
                     assert!(comment.y - date.y > 24.0);
 
                     let footer = text_positions(&output, footer_text)[0];
+                    assert_eq!(
+                        text_positions(&output, DIVISION_ROUNDING_WARNING).len(),
+                        usize::from(has_division_warning),
+                        "division warning visibility for amount {amount:?}"
+                    );
                     let save = text_positions(&output, "Сохранить")[0];
                     let cancel = text_positions(&output, "Отмена")[0];
                     assert!(footer.y - comment.y > 56.0);
