@@ -21,8 +21,8 @@ On Savings, refresh also reloads the bank list and returns the results table to 
 
 - Filters appear in a horizontal row above the table; the row can scroll horizontally when it does not fit.
 - Search text and date edits do not reload the list on their own. Use `Применить` to apply them.
-- Selecting a category immediately reloads the list, unlike editing search or date fields.
-- Each populated filter has an `×` control. Clearing a filter immediately reloads the list using the other values currently in the controls, including values that were edited but not yet applied.
+- Selecting a category or currency immediately reloads the list, unlike editing search or date fields. The currency options are `Все`, `RUB`, and `USD`.
+- Each populated filter, including currency, has an `×` control. Clearing a filter immediately reloads the list using the other values currently in the controls, including values that were edited but not yet applied.
 - `Сбросить фильтры` clears all filters and reloads the list. It is disabled when no filters are active.
 - Date boundaries are inclusive. Invalid dates or a start date later than the end date are reported as errors; the existing results are not replaced with an empty list.
 - Applying filters updates the table and its totals. When no transactions match, the current page shows no data rows but has no dedicated filtered-empty-state message; future pages should provide one.
@@ -31,7 +31,7 @@ On Savings, refresh also reloads the bank list and returns the results table to 
 
 - The table footer shows the transaction count and total for the configured primary currency only. It does not convert other currencies.
 - The bottom of both pages shows one `Доходы за период − Расходы за период = Сальдо за период` formula in the configured primary currency only. If that currency is not supported for transactions (currently only RUB and USD are supported), or the primary currency cannot be determined, the amount is hidden and the footer explains why.
-- The balance includes every income and expense within the last successfully applied inclusive date range. Category and search filters affect the table, but do not affect this balance.
+- The balance includes every income and expense within the last successfully applied inclusive date range. Category, currency, and search filters affect the table, but do not affect this balance.
 - When both date fields are empty, the balance covers all transactions in the database. Editing a date does not change the displayed result until a refresh applies the date values; the footer identifies the period used for its calculation.
 - Currency totals are not converted or combined. If loading or calculating the balance fails, the old balance is hidden instead of being presented as current.
 - This is the net of recorded income and expense operations, not a confirmed amount of cash on hand: opening balances and transfers are not represented by the current transaction model.

@@ -369,13 +369,14 @@ pub fn set_primary_currency(connection: &mut Connection, code: &str) -> Result<(
     Ok(())
 }
 
-/// Returns transactions of one type, optionally filtered by inclusive dates, category, and text.
+/// Returns transactions of one type, optionally filtered by inclusive dates, category, currency, and text.
 pub fn list_transactions(
     connection: &Connection,
     kind: TransactionKind,
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
     category_id: Option<i64>,
+    currency: Option<Currency>,
     search: &str,
 ) -> Result<Vec<FinancialTransaction>, DbError> {
     let (table, categories) = transaction_tables(kind);
@@ -390,13 +391,15 @@ pub fn list_transactions(
          WHERE (?1 IS NULL OR t.date >= ?1)
            AND (?2 IS NULL OR t.date <= ?2)
            AND (?3 IS NULL OR t.category_id = ?3)
+           AND (?4 IS NULL OR t.currency = ?4)
          ORDER BY t.date DESC, t.id DESC"
     );
     let from = from.map(|date| date.format("%Y-%m-%d").to_string());
     let to = to.map(|date| date.format("%Y-%m-%d").to_string());
+    let currency = currency.map(Currency::code);
     let mut statement = connection.prepare(&sql)?;
     let transactions = statement
-        .query_map(params![from, to, category_id], |row| {
+        .query_map(params![from, to, category_id, currency], |row| {
             let date_text = row.get::<_, String>(1)?;
             let date = NaiveDate::parse_from_str(&date_text, "%Y-%m-%d").map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
@@ -2688,7 +2691,7 @@ mod tests {
         };
         assert_eq!(balance(first), "10.25");
         assert_eq!(
-            list_transactions(&db, TransactionKind::Income, None, None, None, "").unwrap()[0]
+            list_transactions(&db, TransactionKind::Income, None, None, None, None, "").unwrap()[0]
                 .payment_document_id,
             Some(first)
         );
@@ -2772,7 +2775,7 @@ mod tests {
             .execute("UPDATE incomes SET currency = 'USD' WHERE id = ?1", [id])
             .is_err());
         let unchanged =
-            list_transactions(&db, TransactionKind::Income, None, None, None, "").unwrap();
+            list_transactions(&db, TransactionKind::Income, None, None, None, None, "").unwrap();
         assert_eq!(unchanged.len(), 1);
         assert_eq!(unchanged[0].currency, Currency::Rub);
         assert_eq!(unchanged[0].amount, Decimal::from(10));
@@ -2801,7 +2804,8 @@ mod tests {
             super::delete_transaction(&db, TransactionKind::Income, id),
             Err(DbError::InsufficientCardBalance)
         ));
-        let income = list_transactions(&db, TransactionKind::Income, None, None, None, "").unwrap();
+        let income =
+            list_transactions(&db, TransactionKind::Income, None, None, None, None, "").unwrap();
         assert_eq!(income.len(), 1);
         assert_eq!(income[0].payment_document_id, Some(first));
         assert!(db
@@ -2900,8 +2904,16 @@ mod tests {
             save(Some(expense_id), Currency::Rub, Some(usd_card_id), false),
             Err(DbError::ExpenseCardUnavailable)
         ));
-        let listed =
-            list_transactions(&database, TransactionKind::Expense, None, None, None, "").unwrap();
+        let listed = list_transactions(
+            &database,
+            TransactionKind::Expense,
+            None,
+            None,
+            None,
+            None,
+            "",
+        )
+        .unwrap();
         assert_eq!(listed[0].payment_document_id, Some(debit_card_id));
         assert!(listed[0].affects_deposit_rate);
 
@@ -2916,14 +2928,30 @@ mod tests {
             "изменённый расход",
         )
         .unwrap();
-        let preserved =
-            list_transactions(&database, TransactionKind::Expense, None, None, None, "").unwrap();
+        let preserved = list_transactions(
+            &database,
+            TransactionKind::Expense,
+            None,
+            None,
+            None,
+            None,
+            "",
+        )
+        .unwrap();
         assert_eq!(preserved[0].payment_document_id, Some(debit_card_id));
         assert!(preserved[0].affects_deposit_rate);
 
         save(Some(expense_id), Currency::Rub, Some(credit_card_id), true).unwrap();
-        let moved =
-            list_transactions(&database, TransactionKind::Expense, None, None, None, "").unwrap();
+        let moved = list_transactions(
+            &database,
+            TransactionKind::Expense,
+            None,
+            None,
+            None,
+            None,
+            "",
+        )
+        .unwrap();
         assert_eq!(moved[0].payment_document_id, Some(credit_card_id));
         assert!(moved[0].affects_deposit_rate);
         assert_eq!(
@@ -3030,6 +3058,7 @@ mod tests {
             Some(NaiveDate::from_ymd_opt(2026, 11, 18).unwrap()),
             None,
             Some(category_id),
+            None,
             "оклад",
         )
         .unwrap();

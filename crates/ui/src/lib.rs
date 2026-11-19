@@ -268,6 +268,7 @@ struct FinanceApp {
     from_date_input: DateInputState,
     to_date_input: DateInputState,
     category_filter: Option<i64>,
+    currency_filter: Option<Currency>,
     show_transaction_form: bool,
     show_category_form: bool,
     show_bank_form: bool,
@@ -318,6 +319,7 @@ impl FinanceApp {
             from_date_input: DateInputState::default(),
             to_date_input: DateInputState::default(),
             category_filter: None,
+            currency_filter: None,
             show_transaction_form: false,
             show_category_form: false,
             show_bank_form: false,
@@ -403,6 +405,7 @@ impl FinanceApp {
             from,
             to,
             self.category_filter,
+            self.currency_filter,
             &self.search,
         ) {
             Ok(transactions) => transactions,
@@ -767,6 +770,11 @@ impl FinanceApp {
         self.refresh_transactions(kind);
     }
 
+    fn clear_currency_filter(&mut self, kind: TransactionKind) {
+        self.currency_filter = None;
+        self.refresh_transactions(kind);
+    }
+
     fn reset_transaction_filters(&mut self, kind: TransactionKind) {
         self.search.clear();
         self.from_date.clear();
@@ -774,6 +782,7 @@ impl FinanceApp {
         self.from_date_input.reset();
         self.to_date_input.reset();
         self.category_filter = None;
+        self.currency_filter = None;
         self.refresh_transactions(kind);
     }
 
@@ -867,13 +876,46 @@ impl FinanceApp {
                         self.clear_category_filter(kind);
                     }
                     ui.add_space(8.0);
+                    ui.label("Валюта:");
+                    egui::ComboBox::from_id_salt("transaction_currency_filter")
+                        .width(80.0)
+                        .selected_text(self.currency_filter.map(Currency::code).unwrap_or("Все"))
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_value(&mut self.currency_filter, None, "Все")
+                                .clicked()
+                            {
+                                self.refresh_transactions(kind);
+                            }
+                            for currency in Currency::ALL {
+                                if ui
+                                    .selectable_value(
+                                        &mut self.currency_filter,
+                                        Some(currency),
+                                        currency.code(),
+                                    )
+                                    .clicked()
+                                {
+                                    self.refresh_transactions(kind);
+                                }
+                            }
+                        });
+                    if ui
+                        .add_enabled(self.currency_filter.is_some(), egui::Button::new("×"))
+                        .on_hover_text("Очистить валюту")
+                        .clicked()
+                    {
+                        self.clear_currency_filter(kind);
+                    }
+                    ui.add_space(8.0);
                     if ui.button("Применить").clicked() {
                         self.refresh_transactions(kind);
                     }
                     let has_active_filters = !self.search.is_empty()
                         || !self.from_date.is_empty()
                         || !self.to_date.is_empty()
-                        || self.category_filter.is_some();
+                        || self.category_filter.is_some()
+                        || self.currency_filter.is_some();
                     if ui
                         .add_enabled(has_active_filters, egui::Button::new("Сбросить фильтры"))
                         .clicked()
@@ -2193,6 +2235,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             "",
         )
         .unwrap()
@@ -2225,7 +2268,7 @@ mod tests {
             )
             .unwrap();
             let transaction_count =
-                finance_db::list_transactions(&app.database, kind, None, None, None, "")
+                finance_db::list_transactions(&app.database, kind, None, None, None, None, "")
                     .unwrap()
                     .len();
 
@@ -2244,7 +2287,7 @@ mod tests {
                 .as_ref()
                 .is_some_and(|(message, is_error)| *is_error && message.contains("валют")));
             assert_eq!(
-                finance_db::list_transactions(&app.database, kind, None, None, None, "")
+                finance_db::list_transactions(&app.database, kind, None, None, None, None, "")
                     .unwrap()
                     .len(),
                 transaction_count
@@ -3211,13 +3254,57 @@ mod tests {
     fn all_transaction_filters_can_be_reset_for_income_and_expenses() {
         for kind in [TransactionKind::Income, TransactionKind::Expense] {
             let mut app = filtered_transaction_app(kind);
+            app.currency_filter = Some(Currency::Usd);
             app.reset_transaction_filters(kind);
 
             assert!(app.search.is_empty());
             assert!(app.from_date.is_empty());
             assert!(app.to_date.is_empty());
             assert_eq!(app.category_filter, None);
+            assert_eq!(app.currency_filter, None);
             assert_eq!(app.transactions.len(), 5);
+        }
+    }
+
+    #[test]
+    fn transaction_currency_filter_applies_and_clears_for_income_and_expenses() {
+        for kind in [TransactionKind::Income, TransactionKind::Expense] {
+            let mut app = filtered_transaction_app(kind);
+            finance_db::save_transaction(
+                &app.database,
+                kind,
+                None,
+                NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+                1,
+                1.into(),
+                Currency::Usd,
+                "найти",
+            )
+            .unwrap();
+            app.refresh_transactions(kind);
+            assert_eq!(app.transactions.len(), 2);
+            let balances = app.transaction_balances;
+
+            app.currency_filter = Some(Currency::Rub);
+            app.refresh_transactions(kind);
+            assert_eq!(app.transactions.len(), 1);
+            assert_eq!(app.transactions[0].currency, Currency::Rub);
+            assert_eq!(app.transaction_balances, balances);
+
+            app.currency_filter = Some(Currency::Usd);
+            app.refresh_transactions(kind);
+            assert_eq!(app.transactions.len(), 1);
+            assert_eq!(app.transactions[0].currency, Currency::Usd);
+            assert_eq!(app.transaction_balances, balances);
+
+            app.clear_currency_filter(kind);
+            assert_eq!(app.currency_filter, None);
+            assert_eq!(app.search, "найти");
+            assert_eq!(app.from_date, "2024-01-01");
+            assert_eq!(app.to_date, "2024-01-31");
+            assert_eq!(app.category_filter, Some(1));
+            assert_eq!(app.transactions.len(), 2);
+            assert_eq!(app.transaction_balances, balances);
         }
     }
 }
