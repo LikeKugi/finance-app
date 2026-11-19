@@ -9,6 +9,26 @@ use finance_core::{summarize_analysis, AnalysisSummary, Category, Currency, Tran
 
 use super::date_input::{date_input, DateInputState};
 
+const ANALYSIS_COLUMN_MIN_WIDTHS: [f32; 4] = [170.0, 75.0, 120.0, 75.0];
+const ANALYSIS_COLUMN_GROWTH_WEIGHTS: [f32; 4] = [2.5, 0.8, 1.5, 0.7];
+const ANALYSIS_ROW_HEIGHT: f32 = 30.0;
+
+fn analysis_column_widths(available_width: f32, column_spacing: f32) -> [f32; 4] {
+    let content_width = (available_width - column_spacing * 3.0).max(0.0);
+    let minimum_width: f32 = ANALYSIS_COLUMN_MIN_WIDTHS.iter().sum();
+    if content_width < minimum_width {
+        let scale = content_width / minimum_width;
+        return std::array::from_fn(|index| ANALYSIS_COLUMN_MIN_WIDTHS[index] * scale);
+    }
+
+    let extra_width = content_width - minimum_width;
+    let total_growth_weight: f32 = ANALYSIS_COLUMN_GROWTH_WEIGHTS.iter().sum();
+    std::array::from_fn(|index| {
+        ANALYSIS_COLUMN_MIN_WIDTHS[index]
+            + extra_width * ANALYSIS_COLUMN_GROWTH_WEIGHTS[index] / total_growth_weight
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AnalysisFilters {
     from: String,
@@ -469,33 +489,48 @@ impl AnalysisPage {
             has_totals = true;
 
             ui.heading(format!("{} — {}", kind.title(), currency.code()));
-            egui::Grid::new(format!("analysis_{kind:?}_{}", currency.code()))
-                .striped(true)
-                .show(ui, |ui| {
-                    ui.strong("Категория");
-                    ui.strong("Операций");
-                    ui.strong("Сумма");
-                    ui.strong("Доля");
-                    ui.end_row();
+            let column_spacing = ui.spacing().item_spacing.x;
+            let column_widths = analysis_column_widths(ui.available_width(), column_spacing);
+            Self::render_summary_row(
+                ui,
+                &column_widths,
+                ["Категория", "Операций", "Сумма", "Доля"],
+                true,
+                false,
+            );
 
-                    for category in summary
-                        .categories
-                        .iter()
-                        .filter(|category| category.kind == kind && category.currency == currency)
-                    {
-                        ui.label(&category.category_name);
-                        ui.label(category.transaction_count.to_string());
-                        ui.label(category.amount.to_string());
-                        ui.label(format!("{}%", category.share_percent.round_dp(2)));
-                        ui.end_row();
-                    }
+            for (row_index, category) in summary
+                .categories
+                .iter()
+                .filter(|category| category.kind == kind && category.currency == currency)
+                .enumerate()
+            {
+                let transaction_count = category.transaction_count.to_string();
+                let amount = category.amount.to_string();
+                let share_percent = format!("{}%", category.share_percent.round_dp(2));
+                Self::render_summary_row(
+                    ui,
+                    &column_widths,
+                    [
+                        &category.category_name,
+                        &transaction_count,
+                        &amount,
+                        &share_percent,
+                    ],
+                    false,
+                    row_index % 2 == 1,
+                );
+            }
 
-                    ui.strong("Итого");
-                    ui.strong(total.transaction_count.to_string());
-                    ui.strong(total.amount.to_string());
-                    ui.strong("100%");
-                    ui.end_row();
-                });
+            let transaction_count = total.transaction_count.to_string();
+            let amount = total.amount.to_string();
+            Self::render_summary_row(
+                ui,
+                &column_widths,
+                ["Итого", &transaction_count, &amount, "100%"],
+                true,
+                false,
+            );
             ui.add_space(12.0);
         }
 
@@ -505,6 +540,54 @@ impl AnalysisPage {
                 kind.title()
             ));
         }
+    }
+
+    fn render_summary_row(
+        ui: &mut egui::Ui,
+        column_widths: &[f32; 4],
+        values: [&str; 4],
+        strong: bool,
+        striped: bool,
+    ) {
+        let column_spacing = ui.spacing().item_spacing.x;
+        let row_width = column_widths.iter().sum::<f32>() + column_spacing * 3.0;
+        ui.allocate_ui_with_layout(
+            egui::vec2(row_width, ANALYSIS_ROW_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |row_ui| {
+                if striped {
+                    row_ui.painter().rect_filled(
+                        row_ui.max_rect(),
+                        0.0,
+                        row_ui.visuals().faint_bg_color,
+                    );
+                }
+
+                for (column_index, (value, width)) in
+                    values.into_iter().zip(column_widths).enumerate()
+                {
+                    let cell_layout = if column_index == 0 {
+                        egui::Layout::left_to_right(egui::Align::Center)
+                    } else {
+                        egui::Layout::right_to_left(egui::Align::Center)
+                    };
+                    row_ui.allocate_ui_with_layout(
+                        egui::vec2(*width, ANALYSIS_ROW_HEIGHT),
+                        cell_layout,
+                        |cell_ui| {
+                            let text = if strong {
+                                egui::RichText::new(value).strong()
+                            } else {
+                                egui::RichText::new(value)
+                            };
+                            cell_ui
+                                .add(egui::Label::new(text).truncate())
+                                .on_hover_text(value);
+                        },
+                    );
+                }
+            },
+        );
     }
 }
 
@@ -543,9 +626,17 @@ mod tests {
     fn summary_with_both_kinds_and_currencies() -> AnalysisSummary {
         let categories = [
             (TransactionKind::Income, Currency::Rub, "Зарплата"),
+            (TransactionKind::Income, Currency::Rub, "Премия"),
             (TransactionKind::Income, Currency::Usd, "Доход USD"),
+            (TransactionKind::Income, Currency::Usd, "Бонус USD"),
             (TransactionKind::Expense, Currency::Rub, "Покупки"),
+            (
+                TransactionKind::Expense,
+                Currency::Rub,
+                "Коммунальные услуги",
+            ),
             (TransactionKind::Expense, Currency::Usd, "Расход USD"),
+            (TransactionKind::Expense, Currency::Usd, "Платеж USD"),
         ]
         .into_iter()
         .map(|(kind, currency, category_name)| AnalysisCategoryTotal {
@@ -623,6 +714,50 @@ mod tests {
                 _ => false,
             })
             .count()
+    }
+
+    fn text_position_on_row(
+        output: &egui::FullOutput,
+        text: &str,
+        row_y: f32,
+        reference_x: f32,
+        split_x: f32,
+    ) -> Option<egui::Pos2> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped_shape| match &clipped_shape.shape {
+                egui::epaint::Shape::Text(text_shape)
+                    if text_shape.galley.job.text == text
+                        && (text_shape.pos.y - row_y).abs() < 1.0
+                        && (text_shape.pos.x < split_x) == (reference_x < split_x) =>
+                {
+                    Some(text_shape.pos)
+                }
+                _ => None,
+            })
+            .min_by(|left, right| {
+                (left.x - reference_x)
+                    .abs()
+                    .total_cmp(&(right.x - reference_x).abs())
+            })
+    }
+
+    fn striped_row_width_near(output: &egui::FullOutput, row_y: f32) -> Option<f32> {
+        let faint_bg_color = egui::Context::default().style().visuals.faint_bg_color;
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped_shape| match &clipped_shape.shape {
+                egui::epaint::Shape::Rect(rect_shape)
+                    if rect_shape.fill == faint_bg_color
+                        && (rect_shape.rect.center().y - row_y).abs() < 20.0 =>
+                {
+                    Some(rect_shape.rect.width())
+                }
+                _ => None,
+            })
+            .max_by(f32::total_cmp)
     }
 
     fn page_with_selected_filters() -> AnalysisPage {
@@ -1035,6 +1170,43 @@ mod tests {
         assert!(has_text(&output, "Расходы — RUB"));
         assert!(has_text(&output, "Зарплата"));
         assert!(has_text(&output, "Покупки"));
+    }
+
+    #[test]
+    fn analysis_summary_columns_and_stripes_fill_each_section_at_different_widths() {
+        let summary = summary_with_both_kinds_and_currencies();
+        let category_rows = ["Зарплата", "Доход USD", "Покупки", "Расход USD"];
+        let striped_rows = ["Премия", "Бонус USD", "Коммунальные услуги", "Платеж USD"];
+
+        for width in [900.0, 1_280.0, 2_000.0] {
+            let output = render_summary_at_width(&summary, width);
+            for (category, striped_category) in category_rows.into_iter().zip(striped_rows) {
+                let category_position = text_position(&output, category).expect("category row");
+                let share_position = text_position_on_row(
+                    &output,
+                    "100%",
+                    category_position.y,
+                    category_position.x,
+                    width / 2.0,
+                )
+                .expect("share cell");
+                assert!(
+                    share_position.x - category_position.x > width * 0.3,
+                    "last column should use the section width at {width}px for {category}: category x={}, share x={}",
+                    category_position.x,
+                    share_position.x
+                );
+
+                let striped_position =
+                    text_position(&output, striped_category).expect("striped category row");
+                let background_width = striped_row_width_near(&output, striped_position.y)
+                    .expect("striped row background");
+                assert!(
+                    background_width > width * 0.4,
+                    "striped row should span the section width at {width}px for {striped_category}"
+                );
+            }
+        }
     }
 
     #[test]
