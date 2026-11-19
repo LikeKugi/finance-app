@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use chrono::NaiveDate;
 use eframe::egui;
 use finance_core::{
-    parse_amount_expression, Bank, Category, Currency, FinancialTransaction, TransactionKind,
+    parse_amount_expression, summarize_transaction_balance, Bank, Category, Currency,
+    FinancialTransaction, TransactionBalance, TransactionKind,
 };
 use finance_db::{self, Database};
 use rust_decimal::Decimal;
@@ -34,6 +35,41 @@ fn render_analysis_footer(
             ui.separator();
             analysis_page.render_footer(ui);
         });
+    }
+}
+
+fn render_transaction_balance_footer(
+    ui: &mut egui::Ui,
+    balances: Option<&[TransactionBalance; 2]>,
+    period: Option<(Option<NaiveDate>, Option<NaiveDate>)>,
+) {
+    match (balances, period) {
+        (Some(balances), Some((from, to))) => {
+            let period_label = transaction_balance_period_label(from, to);
+            for balance in balances {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Доходы {period_label}: {} {} − Расходы {period_label}: {} {} = Сальдо {period_label}: {} {}",
+                        balance.income,
+                        balance.currency.code(),
+                        balance.expenses,
+                        balance.currency.code(),
+                        balance.balance,
+                        balance.currency.code(),
+                    ))
+                    .strong(),
+                );
+            }
+            ui.weak(
+                "Сальдо операций не включает начальные остатки и переводы и не подтверждает сумму денег на руках.",
+            );
+        }
+        _ => {
+            ui.colored_label(
+                egui::Color32::RED,
+                "Сальдо не рассчитано: обновите список после устранения ошибки.",
+            );
+        }
     }
 }
 
@@ -124,6 +160,8 @@ struct FinanceApp {
     database_path: Option<PathBuf>,
     active_tab: ModuleTab,
     transactions: Vec<FinancialTransaction>,
+    transaction_balances: Option<[TransactionBalance; 2]>,
+    transaction_balance_period: Option<(Option<NaiveDate>, Option<NaiveDate>)>,
     categories: Vec<Category>,
     analysis_income_categories: Vec<Category>,
     analysis_expense_categories: Vec<Category>,
@@ -166,6 +204,8 @@ impl FinanceApp {
             database_path,
             active_tab: ModuleTab::Income,
             transactions: Vec::new(),
+            transaction_balances: None,
+            transaction_balance_period: None,
             categories: Vec::new(),
             analysis_income_categories: Vec::new(),
             analysis_expense_categories: Vec::new(),
@@ -261,7 +301,7 @@ impl FinanceApp {
             ));
             return;
         }
-        match finance_db::list_transactions(
+        let transactions = match finance_db::list_transactions(
             &self.database,
             kind,
             from,
@@ -269,11 +309,36 @@ impl FinanceApp {
             self.category_filter,
             &self.search,
         ) {
-            Ok(transactions) => {
-                self.transactions = transactions;
+            Ok(transactions) => transactions,
+            Err(error) => {
+                self.transaction_balances = None;
+                self.transaction_balance_period = None;
+                self.show_error(error.to_string());
+                return;
+            }
+        };
+        self.transactions = transactions;
+
+        let amounts = match finance_db::list_transaction_amounts(&self.database, from, to) {
+            Ok(amounts) => amounts,
+            Err(error) => {
+                self.transaction_balances = None;
+                self.transaction_balance_period = None;
+                self.show_error(error.to_string());
+                return;
+            }
+        };
+        match summarize_transaction_balance(&amounts) {
+            Ok(balances) => {
+                self.transaction_balances = Some(balances);
+                self.transaction_balance_period = Some((from, to));
                 self.message = None;
             }
-            Err(error) => self.show_error(error.to_string()),
+            Err(error) => {
+                self.transaction_balances = None;
+                self.transaction_balance_period = None;
+                self.show_error(error.to_string());
+            }
         }
     }
 
@@ -1114,6 +1179,11 @@ impl eframe::App for FinanceApp {
                         )
                     }
                 };
+                render_transaction_balance_footer(
+                    ui,
+                    self.transaction_balances.as_ref(),
+                    self.transaction_balance_period,
+                );
             });
         }
 
@@ -1316,6 +1386,19 @@ fn category_tree_labels(categories: &[Category]) -> Vec<(i64, String)> {
         .collect()
 }
 
+fn transaction_balance_period_label(from: Option<NaiveDate>, to: Option<NaiveDate>) -> String {
+    match (from, to) {
+        (None, None) => "за весь период".to_owned(),
+        (Some(from), Some(to)) => format!(
+            "за период с {} по {}",
+            from.format("%d.%m.%Y"),
+            to.format("%d.%m.%Y")
+        ),
+        (Some(from), None) => format!("за период с {}", from.format("%d.%m.%Y")),
+        (None, Some(to)) => format!("за период по {}", to.format("%d.%m.%Y")),
+    }
+}
+
 fn parse_optional_date(value: &str) -> Result<Option<NaiveDate>, String> {
     if value.trim().is_empty() {
         return Ok(None);
@@ -1348,14 +1431,16 @@ pub fn run(database: Database, database_path: PathBuf) -> eframe::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use chrono::NaiveDate;
     use eframe::egui;
+    use finance_core::{Currency, TransactionBalance};
 
     use super::{
         category_tree_labels, category_tree_rows, render_analysis_footer,
-        transaction_column_widths, AnalysisPage, Category, FinanceApp, ModuleTab, SavingsPage,
-        TransactionKind, DIRECTORY_BANKS_SCROLL_AREA_ID, DIRECTORY_CATEGORIES_SCROLL_AREA_ID,
-        TABLE_ROW_HEIGHT, TRANSACTION_COLUMN_MIN_WIDTHS, TRANSACTION_FILTERS_SCROLL_AREA_ID,
-        TRANSACTION_TABLE_SCROLL_AREA_ID,
+        render_transaction_balance_footer, transaction_column_widths, AnalysisPage, Category,
+        FinanceApp, ModuleTab, SavingsPage, TransactionKind, DIRECTORY_BANKS_SCROLL_AREA_ID,
+        DIRECTORY_CATEGORIES_SCROLL_AREA_ID, TABLE_ROW_HEIGHT, TRANSACTION_COLUMN_MIN_WIDTHS,
+        TRANSACTION_FILTERS_SCROLL_AREA_ID, TRANSACTION_TABLE_SCROLL_AREA_ID,
     };
 
     fn category(id: i64, parent_id: Option<i64>, is_active: bool) -> Category {
@@ -1411,6 +1496,127 @@ mod tests {
             "fixture should match all filters"
         );
         app
+    }
+
+    #[test]
+    fn transaction_balance_uses_only_applied_dates_on_both_transaction_pages() {
+        for kind in [TransactionKind::Income, TransactionKind::Expense] {
+            let mut app = filtered_transaction_app(kind);
+            let balances = app
+                .transaction_balances
+                .expect("a successful refresh should calculate both currency balances");
+
+            match kind {
+                TransactionKind::Income => assert_eq!(balances[0].income, 90.into()),
+                TransactionKind::Expense => assert_eq!(balances[0].expenses, 90.into()),
+            }
+            assert_eq!(app.transactions.len(), 1);
+            assert_eq!(
+                app.transaction_balance_period,
+                Some((
+                    NaiveDate::from_ymd_opt(2024, 1, 1),
+                    NaiveDate::from_ymd_opt(2024, 1, 31)
+                ))
+            );
+
+            app.from_date = "2024-02-01".to_owned();
+
+            assert_eq!(app.transaction_balances, Some(balances));
+            assert_eq!(
+                app.transaction_balance_period,
+                Some((
+                    NaiveDate::from_ymd_opt(2024, 1, 1),
+                    NaiveDate::from_ymd_opt(2024, 1, 31)
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn failed_transaction_refresh_does_not_keep_stale_balance() {
+        let mut app = filtered_transaction_app(TransactionKind::Income);
+        app.database
+            .execute_batch("DROP TABLE incomes;")
+            .expect("test should remove the income table");
+
+        app.refresh_transactions(TransactionKind::Income);
+
+        assert!(app.transaction_balances.is_none());
+        assert!(app.transaction_balance_period.is_none());
+    }
+
+    #[test]
+    fn transaction_balance_footer_shows_formula_for_income_and_expenses_tabs() {
+        let balances = [
+            TransactionBalance {
+                currency: Currency::Rub,
+                income: 100.into(),
+                expenses: 25.into(),
+                balance: 75.into(),
+            },
+            TransactionBalance {
+                currency: Currency::Usd,
+                income: 20.into(),
+                expenses: 5.into(),
+                balance: 15.into(),
+            },
+        ];
+
+        for active_tab in [ModuleTab::Income, ModuleTab::Expenses] {
+            let context = egui::Context::default();
+            let mut output = None;
+            for _ in 0..2 {
+                output = Some(context.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1_280.0, 720.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |context| {
+                        if active_tab.transaction_kind().is_some() {
+                            egui::TopBottomPanel::bottom("transaction_balance_footer").show(
+                                context,
+                                |ui| {
+                                    render_transaction_balance_footer(
+                                        ui,
+                                        Some(&balances),
+                                        Some((None, None)),
+                                    );
+                                },
+                            );
+                        }
+                    },
+                ));
+            }
+            let output = output.expect("balance footer should render twice");
+
+            assert_eq!(
+                text_positions(
+                    &output,
+                    "Доходы за весь период: 100 RUB − Расходы за весь период: 25 RUB = Сальдо за весь период: 75 RUB"
+                )
+                .len(),
+                1
+            );
+            let rendered_text = output
+                .shapes
+                .iter()
+                .filter_map(|clipped_shape| match &clipped_shape.shape {
+                    egui::epaint::Shape::Text(text_shape) => {
+                        Some(text_shape.galley.job.text.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered_text
+                    .iter()
+                    .any(|text| text.contains("Сальдо операций не включает")),
+                "rendered labels: {rendered_text:?}"
+            );
+        }
     }
 
     fn transaction_rows(app: &FinanceApp) -> Vec<(String, i64, String)> {

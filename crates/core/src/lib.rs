@@ -177,6 +177,21 @@ pub struct AnalysisSummary {
     pub totals: Vec<AnalysisTotal>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransactionAmount {
+    pub kind: TransactionKind,
+    pub amount: Decimal,
+    pub currency: Currency,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransactionBalance {
+    pub currency: Currency,
+    pub income: Decimal,
+    pub expenses: Decimal,
+    pub balance: Decimal,
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum AnalysisError {
     #[error("Сумма операции для анализа должна быть положительной")]
@@ -185,6 +200,14 @@ pub enum AnalysisError {
     Overflow,
     #[error("Не удалось определить итог для доли категории")]
     MissingTotal,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum TransactionBalanceError {
+    #[error("Сумма операции для расчёта сальдо должна быть положительной")]
+    InvalidAmount,
+    #[error("Переполнение при расчёте сальдо")]
+    Overflow,
 }
 
 /// Aggregates transactions by kind, category, and currency without conversion.
@@ -258,6 +281,45 @@ pub fn summarize_analysis(
         categories: categories.into_values().collect(),
         totals: totals.into_values().collect(),
     })
+}
+
+/// Aggregates income, expenses, and balance by currency without conversion.
+pub fn summarize_transaction_balance(
+    transactions: &[TransactionAmount],
+) -> Result<[TransactionBalance; 2], TransactionBalanceError> {
+    let mut totals = Currency::ALL.map(|currency| TransactionBalance {
+        currency,
+        income: Decimal::ZERO,
+        expenses: Decimal::ZERO,
+        balance: Decimal::ZERO,
+    });
+
+    for transaction in transactions {
+        if transaction.amount <= Decimal::ZERO {
+            return Err(TransactionBalanceError::InvalidAmount);
+        }
+
+        let total = &mut totals[match transaction.currency {
+            Currency::Rub => 0,
+            Currency::Usd => 1,
+        }];
+        let amount = match transaction.kind {
+            TransactionKind::Income => &mut total.income,
+            TransactionKind::Expense => &mut total.expenses,
+        };
+        *amount = amount
+            .checked_add(transaction.amount)
+            .ok_or(TransactionBalanceError::Overflow)?;
+    }
+
+    for total in &mut totals {
+        total.balance = total
+            .income
+            .checked_sub(total.expenses)
+            .ok_or(TransactionBalanceError::Overflow)?;
+    }
+
+    Ok(totals)
 }
 
 #[cfg(test)]
@@ -405,6 +467,79 @@ mod analysis_tests {
             summarize_analysis(&[transaction]),
             Err(AnalysisError::InvalidAmount)
         );
+    }
+}
+
+#[cfg(test)]
+mod transaction_balance_tests {
+    use rust_decimal::Decimal;
+
+    use super::{
+        summarize_transaction_balance, Currency, TransactionAmount, TransactionBalanceError,
+        TransactionKind,
+    };
+
+    #[test]
+    fn summarize_transaction_balance_keeps_currencies_separate_and_allows_negative_balance() {
+        let transactions = [
+            TransactionAmount {
+                kind: TransactionKind::Income,
+                amount: Decimal::new(125_075, 2),
+                currency: Currency::Rub,
+            },
+            TransactionAmount {
+                kind: TransactionKind::Expense,
+                amount: Decimal::from(1_500),
+                currency: Currency::Rub,
+            },
+            TransactionAmount {
+                kind: TransactionKind::Income,
+                amount: Decimal::from(10),
+                currency: Currency::Usd,
+            },
+            TransactionAmount {
+                kind: TransactionKind::Expense,
+                amount: Decimal::from(3),
+                currency: Currency::Usd,
+            },
+        ];
+
+        let summary = summarize_transaction_balance(&transactions).unwrap();
+
+        assert_eq!(summary[0].balance, Decimal::new(-24_925, 2));
+        assert_eq!(summary[1].balance, Decimal::from(7));
+    }
+
+    #[test]
+    fn summarize_transaction_balance_returns_zero_for_empty_currencies() {
+        let summary = summarize_transaction_balance(&[]).unwrap();
+
+        assert_eq!(summary[0].income, Decimal::ZERO);
+        assert_eq!(summary[0].expenses, Decimal::ZERO);
+        assert_eq!(summary[0].balance, Decimal::ZERO);
+        assert_eq!(summary[1].income, Decimal::ZERO);
+        assert_eq!(summary[1].expenses, Decimal::ZERO);
+        assert_eq!(summary[1].balance, Decimal::ZERO);
+    }
+
+    #[test]
+    fn summarize_transaction_balance_reports_amount_overflow() {
+        let transactions = [
+            TransactionAmount {
+                kind: TransactionKind::Income,
+                amount: Decimal::MAX,
+                currency: Currency::Rub,
+            },
+            TransactionAmount {
+                kind: TransactionKind::Income,
+                amount: Decimal::ONE,
+                currency: Currency::Rub,
+            },
+        ];
+
+        let error = summarize_transaction_balance(&transactions).unwrap_err();
+
+        assert_eq!(error, TransactionBalanceError::Overflow);
     }
 }
 

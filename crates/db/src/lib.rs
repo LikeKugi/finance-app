@@ -8,7 +8,7 @@ use finance_core::{
     canonical_amount, AnalysisTransaction, Bank, Category, Currency, FinancialTransaction,
     InterestDestination, LinkedSavingsAccount, PaymentCardType, PaymentDocument,
     PaymentDocumentDetails, PaymentSystem, SavingsAccount, SavingsDetails, SavingsTerm,
-    TransactionKind,
+    TransactionAmount, TransactionKind,
 };
 use rusqlite::{
     params, types::Type, Connection, OpenFlags, OptionalExtension, TransactionBehavior,
@@ -77,6 +77,8 @@ pub enum DbError {
     PaymentDocumentSavingsBankMismatch,
     #[error("Начало периода не может быть позже его окончания")]
     InvalidAnalysisDateRange,
+    #[error("Начало периода не может быть позже его окончания")]
+    InvalidTransactionDateRange,
     #[error(transparent)]
     Domain(#[from] finance_core::DomainError),
 }
@@ -159,6 +161,61 @@ pub fn list_transactions(
             })
             .collect())
     }
+}
+
+/// Reads income and expense amounts for an inclusive date range, without category or text filters.
+pub fn list_transaction_amounts(
+    connection: &Connection,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+) -> Result<Vec<TransactionAmount>, DbError> {
+    if matches!((from, to), (Some(from), Some(to)) if from > to) {
+        return Err(DbError::InvalidTransactionDateRange);
+    }
+
+    let from = from.map(|date| date.format("%Y-%m-%d").to_string());
+    let to = to.map(|date| date.format("%Y-%m-%d").to_string());
+    let mut statement = connection.prepare(
+        "SELECT kind, amount, currency
+         FROM (
+             SELECT 'income' AS kind, amount, currency, date FROM incomes
+             UNION ALL
+             SELECT 'expense' AS kind, amount, currency, date FROM expenses
+         )
+         WHERE (?1 IS NULL OR date >= ?1)
+           AND (?2 IS NULL OR date <= ?2)",
+    )?;
+    let transactions = statement
+        .query_map(params![from, to], |row| {
+            let kind_text = row.get::<_, String>(0)?;
+            let kind = match kind_text.as_str() {
+                "income" => TransactionKind::Income,
+                "expense" => TransactionKind::Expense,
+                _ => {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        Type::Text,
+                        Box::new(std::io::Error::other("Неизвестный тип финансовой операции")),
+                    ));
+                }
+            };
+            let amount_text = row.get::<_, String>(1)?;
+            let amount = Decimal::from_str(&amount_text).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
+            })?;
+            let currency_text = row.get::<_, String>(2)?;
+            let currency = Currency::from_str(&currency_text).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+            })?;
+            Ok(TransactionAmount {
+                kind,
+                amount,
+                currency,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(transactions)
 }
 
 /// Reads report transactions through a read-only connection and one snapshot transaction.
@@ -1051,9 +1108,9 @@ mod tests {
 
     use super::{
         delete_bank, delete_category, delete_payment_document, delete_savings, initialize,
-        list_payment_documents, list_savings, list_transactions, load_analysis_transactions,
-        load_analysis_transactions_by_category, save_bank, save_category, save_payment_document,
-        save_savings, save_transaction, DbError, MIGRATIONS,
+        list_payment_documents, list_savings, list_transaction_amounts, list_transactions,
+        load_analysis_transactions, load_analysis_transactions_by_category, save_bank,
+        save_category, save_payment_document, save_savings, save_transaction, DbError, MIGRATIONS,
     };
 
     fn savings_details(bank_id: i64) -> SavingsDetails {
@@ -1708,6 +1765,160 @@ mod tests {
         );
 
         assert!(matches!(result, Err(DbError::InvalidAmount)));
+    }
+
+    #[test]
+    fn list_transaction_amounts_uses_inclusive_dates_without_category_or_search_filters() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let income_category = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Зарплата",
+            None,
+            true,
+        )
+        .unwrap();
+        let other_income_category = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Подарок",
+            None,
+            true,
+        )
+        .unwrap();
+        let expense_category = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Дом",
+            None,
+            true,
+        )
+        .unwrap();
+        save_transaction(
+            &connection,
+            TransactionKind::Income,
+            None,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            income_category,
+            Decimal::from(10),
+            Currency::Rub,
+            "первый день",
+        )
+        .unwrap();
+        save_transaction(
+            &connection,
+            TransactionKind::Income,
+            None,
+            NaiveDate::from_ymd_opt(2024, 1, 31).unwrap(),
+            other_income_category,
+            Decimal::from(20),
+            Currency::Usd,
+            "последний день",
+        )
+        .unwrap();
+        save_transaction(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            NaiveDate::from_ymd_opt(2024, 1, 31).unwrap(),
+            expense_category,
+            Decimal::from(4),
+            Currency::Rub,
+            "не подходит поиску",
+        )
+        .unwrap();
+        save_transaction(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            NaiveDate::from_ymd_opt(2024, 2, 1).unwrap(),
+            expense_category,
+            Decimal::from(6),
+            Currency::Usd,
+            "после периода",
+        )
+        .unwrap();
+
+        let in_period = list_transaction_amounts(
+            &connection,
+            NaiveDate::from_ymd_opt(2024, 1, 1),
+            NaiveDate::from_ymd_opt(2024, 1, 31),
+        )
+        .unwrap();
+        let all_time = list_transaction_amounts(&connection, None, None).unwrap();
+        let from_only =
+            list_transaction_amounts(&connection, NaiveDate::from_ymd_opt(2024, 1, 31), None)
+                .unwrap();
+        let to_only =
+            list_transaction_amounts(&connection, None, NaiveDate::from_ymd_opt(2024, 1, 1))
+                .unwrap();
+
+        assert_eq!(in_period.len(), 3);
+        assert_eq!(all_time.len(), 4);
+        assert_eq!(from_only.len(), 3);
+        assert_eq!(to_only.len(), 1);
+    }
+
+    #[test]
+    fn list_transaction_amounts_includes_transactions_added_after_previous_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let category_id = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Зарплата",
+            None,
+            true,
+        )
+        .unwrap();
+
+        let before_save = list_transaction_amounts(&connection, None, None).unwrap();
+        save_transaction(
+            &connection,
+            TransactionKind::Income,
+            None,
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            category_id,
+            Decimal::from(15),
+            Currency::Rub,
+            "новая операция",
+        )
+        .unwrap();
+        let after_save = list_transaction_amounts(&connection, None, None).unwrap();
+
+        assert!(before_save.is_empty());
+        assert_eq!(after_save.len(), 1);
+    }
+
+    #[test]
+    fn list_transaction_amounts_reports_malformed_decimal_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints = ON;")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO income_categories (name) VALUES ('Зарплата')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO incomes (date, category_id, amount, currency, comment)
+                 VALUES ('2024-01-01', 1, 'повреждено', 'RUB', '')",
+                [],
+            )
+            .unwrap();
+
+        let error = list_transaction_amounts(&connection, None, None).unwrap_err();
+
+        assert!(matches!(error, DbError::Sqlite(_)));
     }
 
     #[test]

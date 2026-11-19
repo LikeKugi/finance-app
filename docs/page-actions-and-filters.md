@@ -27,6 +27,14 @@ On Savings, refresh also reloads the bank list and returns the results table to 
 - Date boundaries are inclusive. Invalid dates or a start date later than the end date are reported as errors; the existing results are not replaced with an empty list.
 - Applying filters updates the table and its totals. When no transactions match, the current page shows no data rows but has no dedicated filtered-empty-state message; future pages should provide one.
 
+### Income and Expenses Balance
+
+- The bottom of both pages shows `Доходы за период − Расходы за период = Сальдо за период` separately for RUB and USD.
+- The balance includes every income and expense within the last successfully applied inclusive date range. Category and search filters affect the table, but do not affect this balance.
+- When both date fields are empty, the balance covers all transactions in the database. Editing a date does not change the displayed result until a refresh applies the date values; the footer identifies the period used for its calculation.
+- Currency totals are not converted or combined. If loading or calculating the balance fails, the old balance is hidden instead of being presented as current.
+- This is the net of recorded income and expense operations, not a confirmed amount of cash on hand: opening balances and transfers are not represented by the current transaction model.
+
 ### Analysis
 
 - Filters appear in a row above the report and wrap onto additional lines when they do not fit.
