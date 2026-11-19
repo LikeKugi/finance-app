@@ -57,6 +57,7 @@ fn render_transaction_balance_footer(
                         balance.balance,
                         balance.currency.code(),
                     ))
+                    .size(egui::TextStyle::Body.resolve(ui.style()).size + 4.0)
                     .strong(),
                 );
             }
