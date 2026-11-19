@@ -303,54 +303,73 @@ impl AnalysisPage {
             return;
         }
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for kind in [TransactionKind::Income, TransactionKind::Expense] {
-                if mode
-                    .transaction_kind()
-                    .is_some_and(|selected_kind| selected_kind != kind)
+        if mode == AnalysisMode::All {
+            ui.columns(2, |columns| {
+                for (column, kind) in columns
+                    .iter_mut()
+                    .zip([TransactionKind::Income, TransactionKind::Expense])
                 {
-                    continue;
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, true])
+                        .show(column, |ui| Self::render_kind_summary(ui, summary, kind));
                 }
+            });
+        } else if let Some(kind) = mode.transaction_kind() {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                Self::render_kind_summary(ui, summary, kind);
+            });
+        }
+    }
 
-                for currency in Currency::ALL {
-                    let Some(total) = summary
-                        .totals
+    fn render_kind_summary(ui: &mut egui::Ui, summary: &AnalysisSummary, kind: TransactionKind) {
+        let mut has_totals = false;
+        for currency in Currency::ALL {
+            let Some(total) = summary
+                .totals
+                .iter()
+                .find(|total| total.kind == kind && total.currency == currency)
+            else {
+                continue;
+            };
+            has_totals = true;
+
+            ui.heading(format!("{} — {}", kind.title(), currency.code()));
+            egui::Grid::new(format!("analysis_{kind:?}_{}", currency.code()))
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.strong("Категория");
+                    ui.strong("Операций");
+                    ui.strong("Сумма");
+                    ui.strong("Доля");
+                    ui.end_row();
+
+                    for category in summary
+                        .categories
                         .iter()
-                        .find(|total| total.kind == kind && total.currency == currency)
-                    else {
-                        continue;
-                    };
+                        .filter(|category| category.kind == kind && category.currency == currency)
+                    {
+                        ui.label(&category.category_name);
+                        ui.label(category.transaction_count.to_string());
+                        ui.label(category.amount.to_string());
+                        ui.label(format!("{}%", category.share_percent.round_dp(2)));
+                        ui.end_row();
+                    }
 
-                    ui.heading(format!("{} — {}", kind.title(), currency.code()));
-                    egui::Grid::new(format!("analysis_{kind:?}_{}", currency.code()))
-                        .striped(true)
-                        .show(ui, |ui| {
-                            ui.strong("Категория");
-                            ui.strong("Операций");
-                            ui.strong("Сумма");
-                            ui.strong("Доля");
-                            ui.end_row();
+                    ui.strong("Итого");
+                    ui.strong(total.transaction_count.to_string());
+                    ui.strong(total.amount.to_string());
+                    ui.strong("100%");
+                    ui.end_row();
+                });
+            ui.add_space(12.0);
+        }
 
-                            for category in summary.categories.iter().filter(|category| {
-                                category.kind == kind && category.currency == currency
-                            }) {
-                                ui.label(&category.category_name);
-                                ui.label(category.transaction_count.to_string());
-                                ui.label(category.amount.to_string());
-                                ui.label(format!("{}%", category.share_percent.round_dp(2)));
-                                ui.end_row();
-                            }
-
-                            ui.strong("Итого");
-                            ui.strong(total.transaction_count.to_string());
-                            ui.strong(total.amount.to_string());
-                            ui.strong("100%");
-                            ui.end_row();
-                        });
-                    ui.add_space(12.0);
-                }
-            }
-        });
+        if !has_totals {
+            ui.label(format!(
+                "За выбранный период операций типа «{}» нет.",
+                kind.title()
+            ));
+        }
     }
 }
 
@@ -379,7 +398,89 @@ fn parse_optional_date(value: &str, field_name: &str) -> Result<Option<NaiveDate
 #[cfg(test)]
 mod tests {
     use super::{parse_filters, AnalysisFilters, AnalysisMode, AnalysisPage};
-    use finance_core::AnalysisSummary;
+    use eframe::egui;
+    use finance_core::{
+        AnalysisCategoryTotal, AnalysisSummary, AnalysisTotal, Currency, TransactionKind,
+    };
+    use rust_decimal::Decimal;
+
+    fn summary_with_both_kinds_and_currencies() -> AnalysisSummary {
+        let categories = [
+            (TransactionKind::Income, Currency::Rub, "Зарплата"),
+            (TransactionKind::Income, Currency::Usd, "Доход USD"),
+            (TransactionKind::Expense, Currency::Rub, "Покупки"),
+            (TransactionKind::Expense, Currency::Usd, "Расход USD"),
+        ]
+        .into_iter()
+        .map(|(kind, currency, category_name)| AnalysisCategoryTotal {
+            kind,
+            category_id: 1,
+            category_name: category_name.to_owned(),
+            currency,
+            amount: Decimal::ONE,
+            transaction_count: 1,
+            share_percent: Decimal::ONE_HUNDRED,
+        })
+        .collect();
+        let totals = [
+            (TransactionKind::Income, Currency::Rub),
+            (TransactionKind::Income, Currency::Usd),
+            (TransactionKind::Expense, Currency::Rub),
+            (TransactionKind::Expense, Currency::Usd),
+        ]
+        .into_iter()
+        .map(|(kind, currency)| AnalysisTotal {
+            kind,
+            currency,
+            amount: Decimal::ONE,
+            transaction_count: 1,
+        })
+        .collect();
+
+        AnalysisSummary { categories, totals }
+    }
+
+    fn render_summary_at_width(
+        summary: &AnalysisSummary,
+        mode: AnalysisMode,
+        width: f32,
+    ) -> egui::FullOutput {
+        let context = egui::Context::default();
+        let mut output = None;
+        for _ in 0..2 {
+            output = Some(context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 720.0),
+                    )),
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default().show(context, |ui| {
+                        AnalysisPage::render_summary(ui, summary, mode);
+                    });
+                },
+            ));
+        }
+        output.expect("analysis summary should render twice")
+    }
+
+    fn text_position(output: &egui::FullOutput, text: &str) -> Option<egui::Pos2> {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped_shape| match &clipped_shape.shape {
+                egui::epaint::Shape::Text(text_shape) if text_shape.galley.job.text == text => {
+                    Some(text_shape.pos)
+                }
+                _ => None,
+            })
+    }
+
+    fn has_text(output: &egui::FullOutput, text: &str) -> bool {
+        text_position(output, text).is_some()
+    }
 
     #[test]
     fn stale_analysis_result_does_not_replace_current_filter_result() {
@@ -424,5 +525,78 @@ mod tests {
             parse_filters(&filters),
             Err("Начало периода не может быть позже его окончания".to_owned())
         );
+    }
+
+    #[test]
+    fn all_analysis_mode_renders_income_and_expenses_in_separate_columns() {
+        let summary = summary_with_both_kinds_and_currencies();
+        let output = render_summary_at_width(&summary, AnalysisMode::All, 1_280.0);
+
+        let income_rub = text_position(&output, "Доходы — RUB").expect("income heading");
+        let income_usd = text_position(&output, "Доходы — USD").expect("income USD heading");
+        let expense_rub = text_position(&output, "Расходы — RUB").expect("expense heading");
+        let expense_usd = text_position(&output, "Расходы — USD").expect("expense USD heading");
+
+        assert!(income_rub.x < expense_rub.x);
+        assert!(income_usd.x < expense_usd.x);
+        assert_eq!(income_rub.x, income_usd.x);
+        assert_eq!(expense_rub.x, expense_usd.x);
+    }
+
+    #[test]
+    fn single_kind_analysis_mode_renders_only_the_selected_group() {
+        let summary = summary_with_both_kinds_and_currencies();
+        for (mode, selected_heading, hidden_heading, selected_category, hidden_category) in [
+            (
+                AnalysisMode::Income,
+                "Доходы — RUB",
+                "Расходы — RUB",
+                "Зарплата",
+                "Покупки",
+            ),
+            (
+                AnalysisMode::Expenses,
+                "Расходы — RUB",
+                "Доходы — RUB",
+                "Покупки",
+                "Зарплата",
+            ),
+        ] {
+            let output = render_summary_at_width(&summary, mode, 1_280.0);
+
+            assert!(has_text(&output, selected_heading));
+            assert!(!has_text(&output, hidden_heading));
+            assert!(has_text(&output, selected_category));
+            assert!(!has_text(&output, hidden_category));
+        }
+    }
+
+    #[test]
+    fn all_analysis_mode_shows_empty_group_message_when_only_one_kind_has_data() {
+        let mut summary = summary_with_both_kinds_and_currencies();
+        summary
+            .categories
+            .retain(|category| category.kind == TransactionKind::Income);
+        summary
+            .totals
+            .retain(|total| total.kind == TransactionKind::Income);
+        let output = render_summary_at_width(&summary, AnalysisMode::All, 1_280.0);
+
+        assert!(has_text(&output, "Доходы — RUB"));
+        assert!(has_text(
+            &output,
+            "За выбранный период операций типа «Расходы» нет."
+        ));
+    }
+
+    #[test]
+    fn empty_analysis_summary_keeps_the_no_operations_message() {
+        let summary = AnalysisSummary {
+            categories: Vec::new(),
+            totals: Vec::new(),
+        };
+        let output = render_summary_at_width(&summary, AnalysisMode::All, 1_280.0);
+
+        assert!(has_text(&output, "За выбранный период операций нет."));
     }
 }
