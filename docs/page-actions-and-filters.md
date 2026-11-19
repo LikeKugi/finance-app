@@ -52,6 +52,7 @@ On Savings, refresh also reloads the bank list and returns the results table to 
 - `Сбросить фильтры` clears all filters and reloads the list. It is disabled when no filters are active.
 - The `↻ Обновить` header action reloads the banks and results with the current filter values, then returns the table to its first page.
 - If no records match, the page shows an empty-state message.
+- Opening date and interest-accrual date are optional `YYYY-MM-DD` values in the add/edit form; clearing either field stores it as unknown, shown as `—` in the table. These are manually maintained reference dates and do not trigger interest calculations or assert that an accrual was verified by the bank.
 
 ## Recommended Pattern for Future Pages
 

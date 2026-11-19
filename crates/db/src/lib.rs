@@ -33,6 +33,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 4,
         sql: include_str!("../migrations/V4__payment_documents.sql"),
     },
+    Migration {
+        version: 5,
+        sql: include_str!("../migrations/V5__savings_dates.sql"),
+    },
 ];
 
 struct Migration {
@@ -404,7 +408,7 @@ pub fn list_savings(
     let mut statement = connection.prepare(
         "SELECT s.id, s.bank_id, b.name, s.title, s.amount, s.base_rate,
                 s.rate_after_threshold, s.threshold_amount, s.term_type, s.term_end_date,
-                s.interest_destination, s.is_active
+                s.interest_destination, s.is_active, s.opened_date, s.interest_accrual_date
          FROM savings s JOIN banks b ON b.id = s.bank_id
          WHERE (?1 IS NULL OR s.bank_id = ?1)
            AND (?2 IS NULL OR s.is_active = ?2)
@@ -439,6 +443,22 @@ pub fn list_savings(
             .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(10, Type::Text, Box::new(error))
             })?;
+        let opened_date = row
+            .get::<_, Option<String>>(12)?
+            .map(|value| {
+                NaiveDate::parse_from_str(&value, "%Y-%m-%d").map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(12, Type::Text, Box::new(error))
+                })
+            })
+            .transpose()?;
+        let interest_accrual_date = row
+            .get::<_, Option<String>>(13)?
+            .map(|value| {
+                NaiveDate::parse_from_str(&value, "%Y-%m-%d").map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(13, Type::Text, Box::new(error))
+                })
+            })
+            .transpose()?;
 
         Ok(SavingsAccount {
             id: row.get(0)?,
@@ -449,6 +469,8 @@ pub fn list_savings(
             base_rate,
             rate_after_threshold,
             threshold_amount,
+            opened_date,
+            interest_accrual_date,
             term_type,
             term_end_date,
             interest_destination,
@@ -493,13 +515,20 @@ pub fn save_savings(
     let term_end_date = savings
         .term_end_date
         .map(|date| date.format("%Y-%m-%d").to_string());
+    let opened_date = savings
+        .opened_date
+        .map(|date| date.format("%Y-%m-%d").to_string());
+    let interest_accrual_date = savings
+        .interest_accrual_date
+        .map(|date| date.format("%Y-%m-%d").to_string());
     if let Some(id) = id {
         let changed = connection.execute(
             "UPDATE savings
              SET bank_id = ?1, title = ?2, amount = ?3, base_rate = ?4,
                  rate_after_threshold = ?5, threshold_amount = ?6, term_type = ?7,
-                 term_end_date = ?8, interest_destination = ?9, is_active = ?10
-             WHERE id = ?11",
+                 term_end_date = ?8, opened_date = ?9, interest_accrual_date = ?10,
+                 interest_destination = ?11, is_active = ?12
+             WHERE id = ?13",
             params![
                 savings.bank_id,
                 savings.title.trim(),
@@ -509,6 +538,8 @@ pub fn save_savings(
                 threshold_amount,
                 savings.term_type.code(),
                 term_end_date,
+                opened_date,
+                interest_accrual_date,
                 savings.interest_destination.code(),
                 savings.is_active,
                 id
@@ -522,8 +553,9 @@ pub fn save_savings(
         connection.execute(
             "INSERT INTO savings (
                 bank_id, title, amount, base_rate, rate_after_threshold, threshold_amount,
-                term_type, term_end_date, interest_destination, is_active
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                term_type, term_end_date, opened_date, interest_accrual_date,
+                interest_destination, is_active
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 savings.bank_id,
                 savings.title.trim(),
@@ -533,6 +565,8 @@ pub fn save_savings(
                 threshold_amount,
                 savings.term_type.code(),
                 term_end_date,
+                opened_date,
+                interest_accrual_date,
                 savings.interest_destination.code(),
                 savings.is_active
             ],
@@ -1121,6 +1155,8 @@ mod tests {
             base_rate: Decimal::from_str("5.25").unwrap(),
             rate_after_threshold: Some(Decimal::from_str("7.5").unwrap()),
             threshold_amount: Some(Decimal::from_str("50000.75").unwrap()),
+            opened_date: NaiveDate::from_ymd_opt(2024, 11, 5),
+            interest_accrual_date: NaiveDate::from_ymd_opt(2024, 12, 5),
             term_type: SavingsTerm::Limited,
             term_end_date: NaiveDate::from_ymd_opt(2027, 11, 18),
             interest_destination: InterestDestination::Reinvest,
@@ -1201,6 +1237,7 @@ mod tests {
                         )
                         .unwrap();
                 }
+                4 => {}
                 _ => unreachable!(),
             }
         }
@@ -1217,14 +1254,14 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v4-")
+                    .starts_with("data.before-migration-v5-")
             })
             .count()
     }
 
     #[test]
     fn initialize_migrates_supported_versions_and_preserves_backup_and_data() {
-        for version in 1..=3 {
+        for version in 1..=4 {
             let directory = tempfile::tempdir().unwrap();
             let database_path = directory.path().join("data.db");
             drop(create_legacy_database(&database_path, version));
@@ -1235,7 +1272,7 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap();
-            assert_eq!(latest_version, 4);
+            assert_eq!(latest_version, 5);
 
             let income_count = connection
                 .query_row("SELECT COUNT(*) FROM incomes", [], |row| {
@@ -1323,8 +1360,8 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap();
-            assert_eq!(savings_count, i64::from(version == 3));
-            if version == 3 {
+            assert_eq!(savings_count, i64::from(version >= 3));
+            if version >= 3 {
                 let savings = connection
                     .query_row(
                         "SELECT title, amount, base_rate, term_type, interest_destination, is_active
@@ -1363,7 +1400,7 @@ mod tests {
                     entry
                         .file_name()
                         .to_string_lossy()
-                        .starts_with("data.before-migration-v4-")
+                        .starts_with("data.before-migration-v5-")
                 })
                 .expect("upgrade should create a backup")
                 .path();
@@ -1390,7 +1427,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(amount, "1234.5600");
             }
-            if version == 3 {
+            if version >= 3 {
                 let amount = backup
                     .query_row("SELECT amount FROM savings WHERE id = 1", [], |row| {
                         row.get::<_, String>(0)
@@ -1549,7 +1586,7 @@ mod tests {
                 row.get::<_, i64>(0)
             })
             .unwrap();
-        assert_eq!(schema_version, 4);
+        assert_eq!(schema_version, 5);
     }
 
     #[test]
@@ -1568,7 +1605,7 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
             .unwrap();
 
-        assert_eq!(migration_count, 4);
+        assert_eq!(migration_count, 5);
         assert_eq!(foreign_keys_enabled, 1);
     }
 
@@ -1991,7 +2028,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .contains("before-migration-v4")
+                    .contains("before-migration-v5")
             })
             .count();
 
@@ -2025,6 +2062,11 @@ mod tests {
             Some(Decimal::from_str("50000.75").unwrap())
         );
         assert_eq!(account.term_type, SavingsTerm::Limited);
+        assert_eq!(account.opened_date, savings_details(bank_id).opened_date);
+        assert_eq!(
+            account.interest_accrual_date,
+            savings_details(bank_id).interest_accrual_date
+        );
 
         let other_bank = savings_details(other_bank_id);
         save_savings(&connection, None, &other_bank).unwrap();
@@ -2072,6 +2114,8 @@ mod tests {
         updated.threshold_amount = None;
         updated.term_type = SavingsTerm::Unlimited;
         updated.term_end_date = None;
+        updated.opened_date = None;
+        updated.interest_accrual_date = NaiveDate::from_ymd_opt(2026, 2, 1);
         updated.interest_destination = InterestDestination::Withdraw;
         updated.is_active = false;
 
@@ -2085,6 +2129,11 @@ mod tests {
             .remove(0);
         assert_eq!(account.title, "Резерв на отпуск");
         assert_eq!(account.term_type, SavingsTerm::Unlimited);
+        assert_eq!(account.opened_date, None);
+        assert_eq!(
+            account.interest_accrual_date,
+            NaiveDate::from_ymd_opt(2026, 2, 1)
+        );
         assert_eq!(account.interest_destination, InterestDestination::Withdraw);
         delete_savings(&connection, savings_id).unwrap();
         assert!(list_savings(&connection, None, None, "")
@@ -2112,6 +2161,84 @@ mod tests {
                 ..
             )))
         ));
+    }
+
+    #[test]
+    fn list_savings_reports_corrupted_date_instead_of_defaulting() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let bank_id = save_bank(&connection, None, "Банк", "").unwrap();
+        save_savings(&connection, None, &savings_details(bank_id)).unwrap();
+        let constraint_error = connection
+            .execute("UPDATE savings SET opened_date = '2024-02-31'", [])
+            .unwrap_err();
+        assert!(matches!(
+            constraint_error,
+            rusqlite::Error::SqliteFailure(ref error, _)
+                if error.code == rusqlite::ErrorCode::ConstraintViolation
+        ));
+        connection
+            .execute_batch("PRAGMA ignore_check_constraints = ON;")
+            .unwrap();
+        connection
+            .execute("UPDATE savings SET opened_date = '2024-02-31'", [])
+            .unwrap();
+
+        assert!(matches!(
+            list_savings(&connection, None, None, ""),
+            Err(DbError::Sqlite(rusqlite::Error::FromSqlConversionFailure(
+                ..
+            )))
+        ));
+    }
+
+    #[test]
+    fn migration_from_v4_adds_optional_savings_dates_and_creates_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        drop(create_legacy_database(&database_path, 4));
+
+        let connection = initialize(&database_path).unwrap();
+        let savings_dates = connection
+            .query_row(
+                "SELECT opened_date, interest_accrual_date FROM savings WHERE id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let migration_version = connection
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        drop(connection);
+
+        let backup_path = std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("data.before-migration-v5-")
+            })
+            .expect("upgrade from V4 should create a backup")
+            .path();
+        let backup = Connection::open(backup_path).unwrap();
+        let backup_version = backup
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+
+        assert_eq!(savings_dates, (None, None));
+        assert_eq!(migration_version, 5);
+        assert_eq!(backup_version, 4);
     }
 
     #[test]

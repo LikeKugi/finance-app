@@ -7,12 +7,13 @@ use finance_core::{
 use finance_db::{self, Database};
 
 const SAVINGS_PAGE_SIZE: usize = 100;
-const SAVINGS_COLUMN_MIN_WIDTHS: [f32; 10] = [
-    95.0, 110.0, 90.0, 110.0, 135.0, 90.0, 100.0, 155.0, 85.0, 160.0,
+const SAVINGS_COLUMN_MIN_WIDTHS: [f32; 12] = [
+    80.0, 100.0, 75.0, 95.0, 105.0, 75.0, 80.0, 90.0, 105.0, 120.0, 75.0, 145.0,
 ];
-const SAVINGS_COLUMN_GROWTH_WEIGHTS: [f32; 10] = [0.8, 1.1, 0.9, 1.0, 1.2, 0.9, 1.0, 1.3, 0.8, 1.0];
+const SAVINGS_COLUMN_GROWTH_WEIGHTS: [f32; 12] =
+    [0.8, 1.1, 0.9, 1.0, 1.2, 0.9, 0.9, 0.9, 1.0, 1.1, 0.8, 1.0];
 
-fn savings_column_widths(available_width: f32) -> [f32; 10] {
+fn savings_column_widths(available_width: f32) -> [f32; 12] {
     let minimum_width: f32 = SAVINGS_COLUMN_MIN_WIDTHS.iter().sum();
     let extra_width = (available_width - minimum_width).max(0.0);
     let total_growth_weight: f32 = SAVINGS_COLUMN_GROWTH_WEIGHTS.iter().sum();
@@ -45,6 +46,8 @@ struct SavingsForm {
     use_threshold: bool,
     rate_after_threshold: String,
     threshold_amount: String,
+    opened_date: String,
+    interest_accrual_date: String,
     term_type: Option<SavingsTerm>,
     term_end_date: String,
     interest_destination: Option<InterestDestination>,
@@ -67,7 +70,7 @@ impl SavingsPage {
 
     pub(super) fn render_footer(&self, ui: &mut egui::Ui) {
         ui.label(
-            "Процентный доход здесь не рассчитывается: для этого нужны дата открытия, история остатка и правила начисления банка. Повышенная ставка показана как условие, а не как подтверждённая доходность.",
+            "Даты открытия и начисления процентов сохраняются как справочные значения; процентный доход здесь не рассчитывается без истории остатка и правил начисления банка. Повышенная ставка показана как условие, а не как подтверждённая доходность.",
         );
         ui.colored_label(
             egui::Color32::from_rgb(160, 105, 0),
@@ -224,7 +227,9 @@ impl SavingsPage {
             });
             let mut action = None;
             let column_widths = savings_column_widths(
-                (ui.available_width() - ui.spacing().item_spacing.x * 9.0).max(0.0),
+                (ui.available_width()
+                    - ui.spacing().item_spacing.x * (SAVINGS_COLUMN_MIN_WIDTHS.len() - 1) as f32)
+                    .max(0.0),
             );
             egui::ScrollArea::both()
                 .id_salt("savings_table_scroll")
@@ -246,6 +251,8 @@ impl SavingsPage {
                                 "Ставка при условии",
                                 "Порог",
                                 "Срок",
+                                "Дата открытия",
+                                "Дата начисления процентов",
                                 "Назначение процентов",
                                 "Статус",
                                 "Действия",
@@ -280,6 +287,14 @@ impl SavingsPage {
                         let threshold_amount = account
                             .threshold_amount
                             .map_or_else(|| "—".to_owned(), |amount| format!("{amount}"));
+                        let opened_date = account.opened_date.map_or_else(
+                            || "—".to_owned(),
+                            |date| date.format("%d.%m.%Y").to_string(),
+                        );
+                        let interest_accrual_date = account.interest_accrual_date.map_or_else(
+                            || "—".to_owned(),
+                            |date| date.format("%d.%m.%Y").to_string(),
+                        );
                         let term = match (account.term_type, account.term_end_date) {
                             (SavingsTerm::Limited, Some(date)) => {
                                 format!("до {}", date.format("%d.%m.%Y"))
@@ -312,6 +327,8 @@ impl SavingsPage {
                                     rate_after_threshold.as_str(),
                                     threshold_amount.as_str(),
                                     term.as_str(),
+                                    opened_date.as_str(),
+                                    interest_accrual_date.as_str(),
                                     account.interest_destination.title(),
                                     status,
                                 ]
@@ -328,10 +345,10 @@ impl SavingsPage {
                                     );
                                 }
                                 ui.allocate_ui_with_layout(
-                                    egui::vec2(column_widths[9], row_height),
+                                    egui::vec2(column_widths[11], row_height),
                                     egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| {
-                                        ui.set_min_width(column_widths[9]);
+                                        ui.set_min_width(column_widths[11]);
                                         if ui.small_button("Изменить").clicked() {
                                             action = Some(TableAction::Edit(account.id));
                                         }
@@ -383,6 +400,12 @@ impl SavingsPage {
             threshold_amount: account
                 .threshold_amount
                 .map_or_else(String::new, canonical_amount),
+            opened_date: account
+                .opened_date
+                .map_or_else(String::new, |date| date.format("%Y-%m-%d").to_string()),
+            interest_accrual_date: account
+                .interest_accrual_date
+                .map_or_else(String::new, |date| date.format("%Y-%m-%d").to_string()),
             term_type: Some(account.term_type),
             term_end_date: account
                 .term_end_date
@@ -477,6 +500,21 @@ impl SavingsPage {
                 );
             });
         }
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Дата открытия (ГГГГ-ММ-ДД)");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.form.opened_date)
+                    .desired_width(130.0)
+                    .hint_text("ГГГГ-ММ-ДД"),
+            );
+            ui.label("Дата начисления процентов (ГГГГ-ММ-ДД)");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.form.interest_accrual_date)
+                    .desired_width(130.0)
+                    .hint_text("ГГГГ-ММ-ДД"),
+            );
+        });
 
         ui.horizontal_wrapped(|ui| {
             ui.label("Срок");
@@ -621,6 +659,9 @@ impl SavingsForm {
         } else {
             (None, None)
         };
+        let opened_date = parse_optional_savings_date(&self.opened_date, "открытия")?;
+        let interest_accrual_date =
+            parse_optional_savings_date(&self.interest_accrual_date, "начисления процентов")?;
         let term_type = self
             .term_type
             .ok_or_else(|| "Выберите тип срока".to_owned())?;
@@ -641,6 +682,8 @@ impl SavingsForm {
             base_rate,
             rate_after_threshold,
             threshold_amount,
+            opened_date,
+            interest_accrual_date,
             term_type,
             term_end_date,
             interest_destination,
@@ -651,11 +694,22 @@ impl SavingsForm {
     }
 }
 
+fn parse_optional_savings_date(value: &str, field_name: &str) -> Result<Option<NaiveDate>, String> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d")
+        .map(Some)
+        .map_err(|_| format!("Введите дату {field_name} в формате ГГГГ-ММ-ДД"))
+}
+
 #[cfg(test)]
 mod tests {
+    use chrono::NaiveDate;
     use eframe::egui;
+    use finance_core::{InterestDestination, SavingsTerm};
 
-    use super::{savings_column_widths, SavingsPage, SAVINGS_COLUMN_MIN_WIDTHS};
+    use super::{savings_column_widths, SavingsForm, SavingsPage, SAVINGS_COLUMN_MIN_WIDTHS};
 
     #[test]
     fn savings_column_widths_fill_available_space_or_keep_minimum_widths() {
@@ -716,13 +770,64 @@ mod tests {
                 _ => None,
             });
         assert!(rendered_text.contains(&"Ставка при условии"));
+        assert!(rendered_text.contains(&"Дата открытия"));
+        assert!(rendered_text.contains(&"Дата начисления процентов"));
         assert!(rendered_text.contains(&"Действия"));
         assert!(rendered_text.contains(&"Alpha"));
+        assert!(rendered_text.contains(&"01.03.2026"));
         assert!(rendered_text.contains(&"Изменить"));
         assert!(
             actions_header_x.is_some_and(|x| x > 1_050.0 && x < 1_280.0),
             "actions header should be near the right edge: {actions_header_x:?}"
         );
+    }
+
+    #[test]
+    fn savings_form_parses_optional_dates_and_allows_them_to_be_empty() {
+        let mut form = valid_savings_form();
+        form.opened_date = "2026-03-01".to_owned();
+        form.interest_accrual_date = "2026-03-31".to_owned();
+
+        let details = form.details().unwrap();
+
+        assert_eq!(details.opened_date, NaiveDate::from_ymd_opt(2026, 3, 1));
+        assert_eq!(
+            details.interest_accrual_date,
+            NaiveDate::from_ymd_opt(2026, 3, 31)
+        );
+
+        form.opened_date.clear();
+        form.interest_accrual_date.clear();
+        let details = form.details().unwrap();
+        assert_eq!(details.opened_date, None);
+        assert_eq!(details.interest_accrual_date, None);
+    }
+
+    #[test]
+    fn savings_form_rejects_invalid_opening_and_accrual_dates() {
+        let mut form = valid_savings_form();
+        form.opened_date = "2026-02-30".to_owned();
+        assert!(form.details().unwrap_err().contains("дату открытия"));
+
+        form.opened_date.clear();
+        form.interest_accrual_date = "not-a-date".to_owned();
+        assert!(form
+            .details()
+            .unwrap_err()
+            .contains("дату начисления процентов"));
+    }
+
+    fn valid_savings_form() -> SavingsForm {
+        SavingsForm {
+            bank_id: Some(1),
+            title: "Тестовый вклад".to_owned(),
+            amount: "1000".to_owned(),
+            base_rate: "5".to_owned(),
+            term_type: Some(SavingsTerm::Unlimited),
+            interest_destination: Some(InterestDestination::Reinvest),
+            is_active: true,
+            ..SavingsForm::default()
+        }
     }
 
     fn filtered_savings_page() -> (finance_db::Database, SavingsPage) {
@@ -740,17 +845,26 @@ mod tests {
             .execute_batch(include_str!("../../db/migrations/V3__savings.sql"))
             .expect("savings migration should apply");
         database
+            .execute_batch(include_str!(
+                "../../db/migrations/V4__payment_documents.sql"
+            ))
+            .expect("payment document migration should apply");
+        database
+            .execute_batch(include_str!("../../db/migrations/V5__savings_dates.sql"))
+            .expect("savings date migration should apply");
+        database
             .execute_batch(
                 "INSERT INTO banks (id, name) VALUES (1, 'Банк Альфа'), (2, 'Банк Бета');
                  INSERT INTO savings (
                      id, bank_id, title, amount, base_rate, term_type,
-                     term_end_date, interest_destination, is_active
+                     term_end_date, opened_date, interest_accrual_date,
+                     interest_destination, is_active
                  ) VALUES
-                     (1, 1, 'Alpha', '100', '1', 'unlimited', NULL, 'reinvest', 1),
-                     (2, 1, 'Alpha', '100', '1', 'unlimited', NULL, 'reinvest', 0),
-                     (3, 1, 'Gamma', '100', '1', 'unlimited', NULL, 'reinvest', 1),
-                     (4, 2, 'Alpha', '100', '1', 'unlimited', NULL, 'reinvest', 1),
-                     (5, 2, 'Beta', '100', '1', 'unlimited', NULL, 'reinvest', 0);",
+                     (1, 1, 'Alpha', '100', '1', 'unlimited', NULL, '2026-03-01', '2026-03-31', 'reinvest', 1),
+                     (2, 1, 'Alpha', '100', '1', 'unlimited', NULL, NULL, NULL, 'reinvest', 0),
+                     (3, 1, 'Gamma', '100', '1', 'unlimited', NULL, NULL, NULL, 'reinvest', 1),
+                     (4, 2, 'Alpha', '100', '1', 'unlimited', NULL, NULL, NULL, 'reinvest', 1),
+                     (5, 2, 'Beta', '100', '1', 'unlimited', NULL, NULL, NULL, 'reinvest', 0);",
             )
             .expect("savings fixtures should be inserted");
 
