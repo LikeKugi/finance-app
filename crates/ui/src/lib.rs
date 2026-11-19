@@ -45,25 +45,43 @@ fn render_transaction_balance_footer(
     ui: &mut egui::Ui,
     balances: Option<&[TransactionBalance; 2]>,
     period: Option<(Option<NaiveDate>, Option<NaiveDate>)>,
+    primary_currency: Option<&str>,
 ) {
     match (balances, period) {
         (Some(balances), Some((from, to))) => {
-            let period_label = transaction_balance_period_label(from, to);
-            for balance in balances {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Доходы {period_label}: {} {} − Расходы {period_label}: {} {} = Сальдо {period_label}: {} {}",
-                        balance.income,
-                        balance.currency.code(),
-                        balance.expenses,
-                        balance.currency.code(),
-                        balance.balance,
-                        balance.currency.code(),
-                    ))
-                    .size(egui::TextStyle::Body.resolve(ui.style()).size + 4.0)
-                    .strong(),
+            let Some(primary_currency) = primary_currency else {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    "Сальдо не отображается: не удалось определить основную валюту.",
                 );
-            }
+                return;
+            };
+            let Some(balance) = balances
+                .iter()
+                .find(|balance| balance.currency.code() == primary_currency)
+            else {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    format!(
+                        "Сальдо не отображается: основная валюта {primary_currency} не поддерживается для операций (доступны RUB и USD)."
+                    ),
+                );
+                return;
+            };
+            let period_label = transaction_balance_period_label(from, to);
+            ui.label(
+                egui::RichText::new(format!(
+                    "Доходы {period_label}: {} {} − Расходы {period_label}: {} {} = Сальдо {period_label}: {} {}",
+                    balance.income,
+                    balance.currency.code(),
+                    balance.expenses,
+                    balance.currency.code(),
+                    balance.balance,
+                    balance.currency.code(),
+                ))
+                .size(egui::TextStyle::Body.resolve(ui.style()).size + 4.0)
+                .strong(),
+            );
             ui.weak(
                 "Сальдо операций не включает начальные остатки и переводы и не подтверждает сумму денег на руках.",
             );
@@ -75,6 +93,49 @@ fn render_transaction_balance_footer(
             );
         }
     }
+}
+
+fn render_transaction_list_total(
+    ui: &mut egui::Ui,
+    transactions: &[FinancialTransaction],
+    primary_currency: Option<&str>,
+) -> bool {
+    let Some(primary_currency) = primary_currency else {
+        ui.label(format!(
+            "Записей: {}   Итого недоступно: основная валюта не определена",
+            transactions.len()
+        ));
+        return false;
+    };
+    let Some(currency) = Currency::ALL
+        .into_iter()
+        .find(|currency| currency.code() == primary_currency)
+    else {
+        ui.label(format!(
+            "Записей: {}   Итого недоступно: основная валюта {primary_currency} не поддерживается для операций",
+            transactions.len()
+        ));
+        return false;
+    };
+    let Some(total) = transactions
+        .iter()
+        .filter(|transaction| transaction.currency == currency)
+        .try_fold(Decimal::ZERO, |total, transaction| {
+            total.checked_add(transaction.amount)
+        })
+    else {
+        ui.colored_label(
+            egui::Color32::RED,
+            "Не удалось рассчитать итог: сумма слишком велика",
+        );
+        return true;
+    };
+
+    ui.label(format!(
+        "Записей: {}   Итого: {total} {primary_currency}",
+        transactions.len()
+    ));
+    false
 }
 
 mod analysis_page;
@@ -335,6 +396,7 @@ impl FinanceApp {
             ));
             return;
         }
+        let currencies_loaded = self.refresh_currencies();
         let transactions = match finance_db::list_transactions(
             &self.database,
             kind,
@@ -366,7 +428,9 @@ impl FinanceApp {
             Ok(balances) => {
                 self.transaction_balances = Some(balances);
                 self.transaction_balance_period = Some((from, to));
-                self.message = None;
+                if currencies_loaded {
+                    self.message = None;
+                }
             }
             Err(error) => {
                 self.transaction_balances = None;
@@ -404,14 +468,32 @@ impl FinanceApp {
             Ok(banks) => self.banks = banks,
             Err(error) => self.show_error(error.to_string()),
         }
-        match finance_db::list_currencies(&self.database) {
-            Ok(currencies) => self.currencies = currencies,
-            Err(error) => self.show_error(error.to_string()),
-        }
+        self.refresh_currencies();
         match finance_db::list_used_currency_codes(&self.database) {
             Ok(currencies) => self.used_currencies = currencies.into_iter().collect(),
             Err(error) => self.show_error(error.to_string()),
         }
+    }
+
+    fn refresh_currencies(&mut self) -> bool {
+        match finance_db::list_currencies(&self.database) {
+            Ok(currencies) => {
+                self.currencies = currencies;
+                true
+            }
+            Err(error) => {
+                self.currencies.clear();
+                self.show_error(error.to_string());
+                false
+            }
+        }
+    }
+
+    fn primary_currency_code(&self) -> Option<&str> {
+        self.currencies
+            .iter()
+            .find(|currency| currency.is_primary)
+            .map(|currency| currency.code.as_str())
     }
 
     fn show_error(&mut self, message: String) {
@@ -1591,35 +1673,18 @@ impl eframe::App for FinanceApp {
         if self.active_tab.transaction_kind().is_some() {
             egui::TopBottomPanel::bottom("transaction_totals").show(context, |ui| {
                 ui.separator();
-                match self.transactions.iter().try_fold(
-                    (Decimal::ZERO, Decimal::ZERO),
-                    |mut totals, transaction| {
-                        let total = match transaction.currency {
-                            Currency::Rub => &mut totals.0,
-                            Currency::Usd => &mut totals.1,
-                        };
-                        *total = total.checked_add(transaction.amount)?;
-                        Some(totals)
-                    },
+                if render_transaction_list_total(
+                    ui,
+                    &self.transactions,
+                    self.primary_currency_code(),
                 ) {
-                    Some((rub, usd)) => ui.label(format!(
-                        "Записей: {}   Итого: {} RUB   {} USD",
-                        self.transactions.len(),
-                        rub,
-                        usd
-                    )),
-                    None => {
-                        self.show_error("Переполнение при подсчёте итоговой суммы".to_owned());
-                        ui.colored_label(
-                            egui::Color32::RED,
-                            "Не удалось рассчитать итог: сумма слишком велика",
-                        )
-                    }
-                };
+                    self.show_error("Переполнение при подсчёте итоговой суммы".to_owned());
+                }
                 render_transaction_balance_footer(
                     ui,
                     self.transaction_balances.as_ref(),
                     self.transaction_balance_period,
+                    self.primary_currency_code(),
                 );
             });
         }
@@ -1896,15 +1961,16 @@ pub fn run(database: Database, database_path: PathBuf) -> eframe::Result<()> {
 mod tests {
     use chrono::NaiveDate;
     use eframe::egui;
-    use finance_core::{Currency, TransactionBalance};
+    use finance_core::{Currency, FinancialTransaction, TransactionBalance};
 
     use super::{
         category_tree_labels, category_tree_rows, currency_rate_label, render_analysis_footer,
-        render_transaction_balance_footer, transaction_column_widths, AnalysisPage, Category,
-        CurrencyForm, DirectoryRightTab, FinanceApp, ModuleTab, SavingsPage, TransactionKind,
-        DIRECTORY_BANKS_SCROLL_AREA_ID, DIRECTORY_CATEGORIES_SCROLL_AREA_ID,
-        DIVISION_ROUNDING_WARNING, TABLE_ROW_HEIGHT, TRANSACTION_COLUMN_MIN_WIDTHS,
-        TRANSACTION_FILTERS_SCROLL_AREA_ID, TRANSACTION_TABLE_SCROLL_AREA_ID,
+        render_transaction_balance_footer, render_transaction_list_total,
+        transaction_column_widths, AnalysisPage, Category, CurrencyForm, DirectoryRightTab,
+        FinanceApp, ModuleTab, SavingsPage, TransactionKind, DIRECTORY_BANKS_SCROLL_AREA_ID,
+        DIRECTORY_CATEGORIES_SCROLL_AREA_ID, DIVISION_ROUNDING_WARNING, TABLE_ROW_HEIGHT,
+        TRANSACTION_COLUMN_MIN_WIDTHS, TRANSACTION_FILTERS_SCROLL_AREA_ID,
+        TRANSACTION_TABLE_SCROLL_AREA_ID,
     };
 
     fn category(id: i64, parent_id: Option<i64>, is_active: bool) -> Category {
@@ -1945,6 +2011,9 @@ mod tests {
             .unwrap();
         database
             .execute_batch(include_str!("../../db/migrations/V7__expense_cards.sql"))
+            .unwrap();
+        database
+            .execute_batch(include_str!("../../db/migrations/V8__currencies.sql"))
             .unwrap();
 
         let (category_table, transaction_table, active_tab) = match kind {
@@ -2218,6 +2287,15 @@ mod tests {
     }
 
     #[test]
+    fn transaction_refresh_loads_primary_currency_on_income_and_expenses_pages() {
+        for kind in [TransactionKind::Income, TransactionKind::Expense] {
+            let app = filtered_transaction_app(kind);
+
+            assert_eq!(app.primary_currency_code(), Some("RUB"));
+        }
+    }
+
+    #[test]
     fn failed_transaction_refresh_does_not_keep_stale_balance() {
         let mut app = filtered_transaction_app(TransactionKind::Income);
         app.database
@@ -2232,6 +2310,99 @@ mod tests {
 
     #[test]
     fn transaction_balance_footer_shows_formula_for_income_and_expenses_tabs() {
+        for active_tab in [ModuleTab::Income, ModuleTab::Expenses] {
+            for (primary_currency, expected, other_currency) in [
+                (
+                    "RUB",
+                    "Доходы за весь период: 100 RUB − Расходы за весь период: 25 RUB = Сальдо за весь период: 75 RUB",
+                    "USD",
+                ),
+                (
+                    "USD",
+                    "Доходы за весь период: 20 USD − Расходы за весь период: 5 USD = Сальдо за весь период: 15 USD",
+                    "RUB",
+                ),
+            ] {
+                let rendered_text =
+                    transaction_balance_footer_texts(active_tab, Some(primary_currency));
+                assert_eq!(
+                    rendered_text.iter().filter(|text| text.as_str() == expected).count(),
+                    1,
+                    "rendered labels: {rendered_text:?}"
+                );
+                assert!(
+                    rendered_text.iter().all(|text| !text.contains(other_currency)),
+                    "the footer should show only {primary_currency}: {rendered_text:?}"
+                );
+                assert!(
+                    rendered_text
+                        .iter()
+                        .any(|text| text.contains("Сальдо операций не включает")),
+                    "rendered labels: {rendered_text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transaction_balance_footer_explains_unsupported_or_missing_primary_currency() {
+        let unsupported = transaction_balance_footer_texts(ModuleTab::Income, Some("EUR"));
+        assert!(unsupported.iter().any(|text| {
+            text.contains("основная валюта EUR не поддерживается")
+        }));
+        assert!(unsupported
+            .iter()
+            .all(|text| !text.contains("Доходы за весь период:")));
+
+        let missing = transaction_balance_footer_texts(ModuleTab::Expenses, None);
+        assert!(missing
+            .iter()
+            .any(|text| text.contains("не удалось определить основную валюту")));
+        assert!(missing
+            .iter()
+            .all(|text| !text.contains("Доходы за весь период:")));
+    }
+
+    #[test]
+    fn transaction_list_total_shows_only_the_primary_currency() {
+        let transactions = [
+            transaction(1, Currency::Rub, 100),
+            transaction(2, Currency::Usd, 20),
+        ];
+        let context = egui::Context::default();
+        let mut output = None;
+        for _ in 0..2 {
+            output = Some(context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_280.0, 720.0),
+                    )),
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default().show(context, |ui| {
+                        assert!(!render_transaction_list_total(
+                            ui,
+                            &transactions,
+                            Some("USD")
+                        ));
+                    });
+                },
+            ));
+        }
+        let output = output.expect("transaction total should render twice");
+        assert_eq!(
+            text_positions(&output, "Записей: 2   Итого: 20 USD").len(),
+            1
+        );
+        assert_eq!(text_positions(&output, "100 RUB").len(), 0);
+    }
+
+    fn transaction_balance_footer_texts(
+        active_tab: ModuleTab,
+        primary_currency: Option<&str>,
+    ) -> Vec<String> {
         let balances = [
             TransactionBalance {
                 currency: Currency::Rub,
@@ -2246,61 +2417,56 @@ mod tests {
                 balance: 15.into(),
             },
         ];
-
-        for active_tab in [ModuleTab::Income, ModuleTab::Expenses] {
-            let context = egui::Context::default();
-            let mut output = None;
-            for _ in 0..2 {
-                output = Some(context.run(
-                    egui::RawInput {
-                        screen_rect: Some(egui::Rect::from_min_size(
-                            egui::Pos2::ZERO,
-                            egui::vec2(1_280.0, 720.0),
-                        )),
-                        ..Default::default()
-                    },
-                    |context| {
-                        if active_tab.transaction_kind().is_some() {
-                            egui::TopBottomPanel::bottom("transaction_balance_footer").show(
-                                context,
-                                |ui| {
-                                    render_transaction_balance_footer(
-                                        ui,
-                                        Some(&balances),
-                                        Some((None, None)),
-                                    );
-                                },
-                            );
-                        }
-                    },
-                ));
-            }
-            let output = output.expect("balance footer should render twice");
-
-            assert_eq!(
-                text_positions(
-                    &output,
-                    "Доходы за весь период: 100 RUB − Расходы за весь период: 25 RUB = Сальдо за весь период: 75 RUB"
-                )
-                .len(),
-                1
-            );
-            let rendered_text = output
-                .shapes
-                .iter()
-                .filter_map(|clipped_shape| match &clipped_shape.shape {
-                    egui::epaint::Shape::Text(text_shape) => {
-                        Some(text_shape.galley.job.text.clone())
+        let context = egui::Context::default();
+        let mut output = None;
+        for _ in 0..2 {
+            output = Some(context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_280.0, 720.0),
+                    )),
+                    ..Default::default()
+                },
+                |context| {
+                    if active_tab.transaction_kind().is_some() {
+                        egui::TopBottomPanel::bottom("transaction_balance_footer").show(
+                            context,
+                            |ui| {
+                                render_transaction_balance_footer(
+                                    ui,
+                                    Some(&balances),
+                                    Some((None, None)),
+                                    primary_currency,
+                                );
+                            },
+                        );
                     }
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            assert!(
-                rendered_text
-                    .iter()
-                    .any(|text| text.contains("Сальдо операций не включает")),
-                "rendered labels: {rendered_text:?}"
-            );
+                },
+            ));
+        }
+        output
+            .expect("balance footer should render twice")
+            .shapes
+            .iter()
+            .filter_map(|clipped_shape| match &clipped_shape.shape {
+                egui::epaint::Shape::Text(text_shape) => Some(text_shape.galley.job.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn transaction(id: i64, currency: Currency, amount: i64) -> FinancialTransaction {
+        FinancialTransaction {
+            id,
+            date: NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            category_id: id,
+            category_name: "Категория".to_owned(),
+            amount: amount.into(),
+            currency,
+            comment: String::new(),
+            payment_document_id: None,
+            affects_deposit_rate: false,
         }
     }
 

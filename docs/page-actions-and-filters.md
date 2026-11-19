@@ -29,7 +29,8 @@ On Savings, refresh also reloads the bank list and returns the results table to 
 
 ### Income and Expenses Balance
 
-- The bottom of both pages shows `Доходы за период − Расходы за период = Сальдо за период` separately for RUB and USD.
+- The table footer shows the transaction count and total for the configured primary currency only. It does not convert other currencies.
+- The bottom of both pages shows one `Доходы за период − Расходы за период = Сальдо за период` formula in the configured primary currency only. If that currency is not supported for transactions (currently only RUB and USD are supported), or the primary currency cannot be determined, the amount is hidden and the footer explains why.
 - The balance includes every income and expense within the last successfully applied inclusive date range. Category and search filters affect the table, but do not affect this balance.
 - When both date fields are empty, the balance covers all transactions in the database. Editing a date does not change the displayed result until a refresh applies the date values; the footer identifies the period used for its calculation.
 - Currency totals are not converted or combined. If loading or calculating the balance fails, the old balance is hidden instead of being presented as current.
