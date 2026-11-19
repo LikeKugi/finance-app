@@ -24,6 +24,19 @@ fn transaction_column_widths(available_width: f32) -> [f32; 6] {
     })
 }
 
+fn render_analysis_footer(
+    context: &egui::Context,
+    active_tab: ModuleTab,
+    analysis_page: &AnalysisPage,
+) {
+    if active_tab == ModuleTab::Analysis {
+        egui::TopBottomPanel::bottom("analysis_footer").show(context, |ui| {
+            ui.separator();
+            analysis_page.render_footer(ui);
+        });
+    }
+}
+
 mod analysis_page;
 mod date_input;
 mod payment_documents_page;
@@ -1088,6 +1101,7 @@ impl eframe::App for FinanceApp {
                 self.savings_page.render_footer(ui);
             });
         }
+        render_analysis_footer(context, self.active_tab, &self.analysis_page);
 
         egui::CentralPanel::default().show(context, |ui| {
             ui.horizontal(|ui| {
@@ -1298,10 +1312,11 @@ mod tests {
     use eframe::egui;
 
     use super::{
-        category_tree_labels, category_tree_rows, transaction_column_widths, Category, FinanceApp,
-        ModuleTab, SavingsPage, TransactionKind, DIRECTORY_BANKS_SCROLL_AREA_ID,
-        DIRECTORY_CATEGORIES_SCROLL_AREA_ID, TABLE_ROW_HEIGHT, TRANSACTION_COLUMN_MIN_WIDTHS,
-        TRANSACTION_FILTERS_SCROLL_AREA_ID, TRANSACTION_TABLE_SCROLL_AREA_ID,
+        category_tree_labels, category_tree_rows, render_analysis_footer,
+        transaction_column_widths, AnalysisPage, Category, FinanceApp, ModuleTab, SavingsPage,
+        TransactionKind, DIRECTORY_BANKS_SCROLL_AREA_ID, DIRECTORY_CATEGORIES_SCROLL_AREA_ID,
+        TABLE_ROW_HEIGHT, TRANSACTION_COLUMN_MIN_WIDTHS, TRANSACTION_FILTERS_SCROLL_AREA_ID,
+        TRANSACTION_TABLE_SCROLL_AREA_ID,
     };
 
     fn category(id: i64, parent_id: Option<i64>, is_active: bool) -> Category {
@@ -1434,6 +1449,63 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn render_analysis_footer_at_width(active_tab: ModuleTab, width: f32) -> egui::FullOutput {
+        let context = egui::Context::default();
+        let analysis_page = AnalysisPage::default();
+        let mut output = None;
+        for _ in 0..2 {
+            output = Some(context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 720.0),
+                    )),
+                    ..Default::default()
+                },
+                |context| {
+                    render_analysis_footer(context, active_tab, &analysis_page);
+                    egui::CentralPanel::default().show(context, |ui| {
+                        ui.label("Содержимое анализа");
+                    });
+                },
+            ));
+        }
+        output.expect("analysis footer should render twice")
+    }
+
+    #[test]
+    fn analysis_footer_stays_at_bottom_and_remains_visible_at_different_widths() {
+        let share_note = "Доли считаются отдельно для доходов и расходов и только внутри одной валюты. RUB и USD не пересчитываются.";
+        let forecast_note = "Прогноз и оценка процентов не рассчитываются: методика и необходимые исходные данные не согласованы.";
+
+        for width in [700.0, 1_280.0, 1_920.0] {
+            let output = render_analysis_footer_at_width(ModuleTab::Analysis, width);
+            let body = text_positions(&output, "Содержимое анализа")[0];
+            let share = text_positions(&output, share_note)[0];
+            let forecast = text_positions(&output, forecast_note)[0];
+
+            assert!(
+                share.y > body.y,
+                "footer should follow the page content at width {width}"
+            );
+            assert!(
+                share.y > 540.0,
+                "footer should stay near the bottom at width {width}"
+            );
+            assert!(
+                forecast.y > share.y,
+                "footer notes should keep their order at width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn analysis_footer_is_hidden_on_other_tabs() {
+        let output = render_analysis_footer_at_width(ModuleTab::Income, 1_280.0);
+
+        assert!(text_positions(&output, "Доли считаются отдельно для доходов и расходов и только внутри одной валюты. RUB и USD не пересчитываются.").is_empty());
     }
 
     #[test]

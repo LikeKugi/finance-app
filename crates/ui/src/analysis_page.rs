@@ -124,15 +124,6 @@ impl AnalysisPage {
             }
         });
 
-        ui.separator();
-        ui.label(
-            "Доли считаются отдельно для доходов и расходов и только внутри одной валюты. RUB и USD не пересчитываются.",
-        );
-        ui.colored_label(
-            egui::Color32::from_rgb(160, 105, 0),
-            "Прогноз и оценка процентов не рассчитываются: методика и необходимые исходные данные не согласованы.",
-        );
-
         let filters = self.filters();
         self.observe_filters(filters.clone());
         if let Some(database_path) = database_path {
@@ -164,6 +155,16 @@ impl AnalysisPage {
             ui.label("Загружаем операции…");
             context.request_repaint_after(Duration::from_millis(100));
         }
+    }
+
+    pub(super) fn render_footer(&self, ui: &mut egui::Ui) {
+        ui.label(
+            "Доли считаются отдельно для доходов и расходов и только внутри одной валюты. RUB и USD не пересчитываются.",
+        );
+        ui.colored_label(
+            egui::Color32::from_rgb(160, 105, 0),
+            "Прогноз и оценка процентов не рассчитываются: методика и необходимые исходные данные не согласованы.",
+        );
     }
 
     fn mode(&self) -> AnalysisMode {
