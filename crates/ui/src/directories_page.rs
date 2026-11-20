@@ -124,11 +124,17 @@ impl FinanceApp {
         } else {
             "Новый банк"
         });
-        ui.horizontal(|ui| {
+        ui.vertical(|ui| {
             ui.label("Название");
-            ui.text_edit_singleline(&mut self.bank_form.name);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.bank_form.name)
+                    .desired_width(ui.available_width()),
+            );
             ui.label("Комментарий");
-            ui.text_edit_singleline(&mut self.bank_form.comment);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.bank_form.comment)
+                    .desired_width(ui.available_width()),
+            );
         });
         ui.horizontal(|ui| {
             if ui.button("Сохранить банк").clicked() {
@@ -147,9 +153,12 @@ impl FinanceApp {
         } else {
             "Новая категория"
         });
-        ui.horizontal(|ui| {
+        ui.vertical(|ui| {
             ui.label("Название");
-            ui.text_edit_singleline(&mut self.category_form.name);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.category_form.name)
+                    .desired_width(ui.available_width()),
+            );
             ui.label("Родительская категория");
             let selected_parent = self
                 .category_form
@@ -157,6 +166,7 @@ impl FinanceApp {
                 .and_then(|id| self.categories.iter().find(|category| category.id == id))
                 .map_or("Нет", |category| category.name.as_str());
             egui::ComboBox::from_id_salt("category_parent")
+                .width(ui.available_width())
                 .selected_text(selected_parent)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.category_form.parent_id, None, "Нет");
@@ -280,19 +290,31 @@ impl FinanceApp {
                 "Курс {} к {}",
                 self.currency_form.code, primary_code
             ));
-            ui.horizontal(|ui| {
+            ui.vertical(|ui| {
                 ui.label("За 1 единицу валюты");
-                ui.text_edit_singleline(&mut self.currency_form.rate);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.currency_form.rate)
+                        .desired_width(ui.available_width()),
+                );
                 ui.label("Дата курса (ГГГГ-ММ-ДД)");
-                ui.text_edit_singleline(&mut self.currency_form.rate_date);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.currency_form.rate_date)
+                        .desired_width(ui.available_width()),
+                );
             });
         } else {
             ui.heading("Новая валюта");
-            ui.horizontal(|ui| {
+            ui.vertical(|ui| {
                 ui.label("Код (3 заглавные латинские буквы)");
-                ui.text_edit_singleline(&mut self.currency_form.code);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.currency_form.code)
+                        .desired_width(ui.available_width()),
+                );
                 ui.label("Название");
-                ui.text_edit_singleline(&mut self.currency_form.name);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.currency_form.name)
+                        .desired_width(ui.available_width()),
+                );
             });
         }
         ui.horizontal(|ui| {
@@ -348,6 +370,9 @@ impl FinanceApp {
             let category_scroll_area = egui::ScrollArea::vertical()
                 .auto_shrink([false, true])
                 .id_salt(DIRECTORY_CATEGORIES_SCROLL_AREA_ID);
+            if self.show_category_form {
+                self.render_category_form(&mut columns[0]);
+            }
             let category_scroll_output = category_scroll_area.show(&mut columns[0], |ui| {
                 let categories = self.categories.clone();
                 let category_rows = category_tree_rows(&categories);
@@ -459,6 +484,20 @@ impl FinanceApp {
                     },
                 );
             });
+            if self.directory_right_tab != previous_right_tab {
+                self.show_bank_form = false;
+                self.show_currency_form = false;
+                self.currency_form = CurrencyForm::default();
+            }
+            match self.directory_right_tab {
+                DirectoryRightTab::Banks if self.show_bank_form => {
+                    self.render_bank_form(&mut columns[1]);
+                }
+                DirectoryRightTab::Currencies if self.show_currency_form => {
+                    self.render_currency_form(&mut columns[1]);
+                }
+                _ => {}
+            }
             let right_scroll_area = egui::ScrollArea::vertical()
                 .auto_shrink([false, true])
                 .id_salt(DIRECTORY_BANKS_SCROLL_AREA_ID);
@@ -474,20 +513,6 @@ impl FinanceApp {
             scroll_area_ids = Some((category_scroll_output.id, right_scroll_output.id));
         });
 
-        if self.directory_right_tab != previous_right_tab {
-            self.show_bank_form = false;
-            self.show_currency_form = false;
-            self.currency_form = CurrencyForm::default();
-        }
-        if self.show_category_form {
-            self.render_category_form(ui);
-        }
-        if self.show_bank_form {
-            self.render_bank_form(ui);
-        }
-        if self.show_currency_form {
-            self.render_currency_form(ui);
-        }
         scroll_area_ids.expect("directory columns should render both scroll areas")
     }
 

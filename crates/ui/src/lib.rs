@@ -1695,6 +1695,45 @@ mod tests {
     }
 
     #[test]
+    fn directory_forms_render_above_their_sections() {
+        let mut app = directory_app();
+        app.database
+            .execute(
+                "INSERT INTO income_categories (name) VALUES ('Тестовая категория')",
+                [],
+            )
+            .expect("test category should be inserted");
+        app.database
+            .execute("INSERT INTO banks (name) VALUES ('Тестовый банк')", [])
+            .expect("test bank should be inserted");
+        app.refresh_directories();
+
+        app.show_category_form = true;
+        app.show_bank_form = true;
+        let context = egui::Context::default();
+        let output = render_directories_at_width(&mut app, &context, 1280.0);
+
+        assert!(
+            text_positions(&output, "Новая категория")[0].y
+                < text_positions(&output, "Категория")[0].y,
+            "category form should appear above its list"
+        );
+        assert!(
+            text_positions(&output, "Новый банк")[0].y < text_positions(&output, "Банк")[0].y,
+            "bank form should appear above its list"
+        );
+
+        app.directory_right_tab = DirectoryRightTab::Currencies;
+        app.show_currency_form = true;
+        let output = render_directories_at_width(&mut app, &context, 1280.0);
+        assert!(
+            text_positions(&output, "Новая валюта")[0].y
+                < text_positions(&output, "Валюта и курс к основной")[0].y,
+            "currency form should appear above its list"
+        );
+    }
+
+    #[test]
     fn directory_name_columns_are_left_aligned_after_second_frame() {
         let mut app = directory_app();
         app.database
