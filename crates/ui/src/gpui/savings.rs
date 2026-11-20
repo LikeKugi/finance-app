@@ -26,6 +26,7 @@ use gpui_kit::*;
 const SAVINGS_PAGE_SIZE: usize = 100;
 const DATE_FORMAT: &str = "%Y-%m-%d";
 const ROW_HEIGHT: f32 = 40.0;
+const HEADER_HEIGHT: f32 = 48.0;
 const ALL_LABEL: &str = "Все";
 const ALL_BANKS_LABEL: &str = "Все банки";
 const NO_CURRENCY_LABEL: &str = "Не указана";
@@ -46,7 +47,7 @@ const COLUMN_HEADINGS: [&str; 13] = [
     "Действия",
 ];
 const COLUMN_WIDTHS: [f32; 13] = [
-    80.0, 100.0, 75.0, 75.0, 95.0, 105.0, 75.0, 80.0, 90.0, 105.0, 120.0, 75.0, 145.0,
+    85.0, 90.0, 90.0, 70.0, 80.0, 90.0, 90.0, 115.0, 95.0, 105.0, 120.0, 85.0, 145.0,
 ];
 const FOOTER_NOTE: &str = "Даты открытия и начисления процентов сохраняются как справочные значения; процентный доход здесь не рассчитывается без истории остатка и правил начисления банка. Повышенная ставка показана как условие, а не как подтверждённая доходность.";
 const FOOTER_WARNING: &str =
@@ -1102,7 +1103,7 @@ impl SavingsPage {
         let header = div()
             .flex()
             .w_full()
-            .h(px(ROW_HEIGHT))
+            .h(px(HEADER_HEIGHT))
             .items_center()
             .border_1()
             .border_color(border)
@@ -1238,14 +1239,14 @@ fn cell(index: usize, width: f32, text: String, border: Hsla) -> Div {
         div()
             .flex_1()
             .min_w(px(width))
-            .whitespace_nowrap()
-            .text_ellipsis()
     } else {
         div().w(px(width)).flex_none()
     };
     base.h_full()
         .flex()
         .items_center()
+        .text_size(px(13.0))
+        .line_height(px(16.0))
         .when(index > 0, |cell| cell.border_l_1().border_color(border))
         .px_2()
         .overflow_hidden()
