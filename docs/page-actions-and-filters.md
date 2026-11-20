@@ -17,6 +17,8 @@ On Savings, refresh also reloads the bank list and returns the results table to 
 
 ## Current Filter Behavior
 
+Shared date pickers retain previous/next-month arrow navigation and also let users choose a month and edit the year separately. Changing the displayed month or year does not change the date value until a day is selected; each page still applies that value according to its filter behavior below.
+
 ### Income and Expenses
 
 - Filters appear above the table and wrap onto additional lines when they do not fit; horizontal scrolling is not used.

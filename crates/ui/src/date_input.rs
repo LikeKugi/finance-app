@@ -45,6 +45,24 @@ impl DateInputState {
         self.observed_value = Some(value.clone());
         value
     }
+
+    fn select_month(&mut self, month: u32) {
+        let Some(visible_month) = self.visible_month else {
+            return;
+        };
+        if let Some(selected_month) = NaiveDate::from_ymd_opt(visible_month.year(), month, 1) {
+            self.visible_month = Some(selected_month);
+        }
+    }
+
+    fn select_year(&mut self, year: i32) {
+        let Some(visible_month) = self.visible_month else {
+            return;
+        };
+        if let Some(selected_month) = NaiveDate::from_ymd_opt(year, visible_month.month(), 1) {
+            self.visible_month = Some(selected_month);
+        }
+    }
 }
 
 pub(crate) fn date_input(
@@ -84,11 +102,28 @@ fn show_calendar(ui: &mut egui::Ui, value: &mut String, state: &mut DateInputSta
         }
 
         if let Some(month) = state.visible_month {
-            ui.label(format!(
-                "{} {}",
-                MONTH_NAMES[month.month0() as usize],
-                month.year()
-            ));
+            let mut selected_month = month.month();
+            egui::ComboBox::from_id_salt("calendar_month")
+                .selected_text(MONTH_NAMES[month.month0() as usize])
+                .show_ui(ui, |ui| {
+                    for (index, name) in MONTH_NAMES.iter().enumerate() {
+                        ui.selectable_value(&mut selected_month, index as u32 + 1, *name);
+                    }
+                });
+            if selected_month != month.month() {
+                state.select_month(selected_month);
+            }
+
+            let mut selected_year = month.year();
+            let (min_year, max_year) = year_bounds(month.month());
+            ui.add(
+                egui::DragValue::new(&mut selected_year)
+                    .range(min_year..=max_year)
+                    .speed(1),
+            );
+            if selected_year != month.year() {
+                state.select_year(selected_year);
+            }
         }
 
         let next = state
@@ -154,6 +189,23 @@ fn month_start(date: NaiveDate) -> NaiveDate {
     }
 }
 
+fn year_bounds(month: u32) -> (i32, i32) {
+    let min_year = NaiveDate::MIN.year();
+    let max_year = NaiveDate::MAX.year();
+    let min_year = if NaiveDate::from_ymd_opt(min_year, month, 1).is_some() {
+        min_year
+    } else {
+        min_year + 1
+    };
+    let max_year = if NaiveDate::from_ymd_opt(max_year, month, 1).is_some() {
+        max_year
+    } else {
+        max_year - 1
+    };
+
+    (min_year, max_year)
+}
+
 fn month_grid(month: NaiveDate) -> [Option<NaiveDate>; 42] {
     let first_day = month_start(month);
     let first_weekday = first_day.weekday().num_days_from_monday() as usize;
@@ -177,8 +229,8 @@ fn month_grid(month: NaiveDate) -> [Option<NaiveDate>; 42] {
 
 #[cfg(test)]
 mod tests {
-    use super::{initial_month, month_grid, month_start, DateInputState};
-    use chrono::NaiveDate;
+    use super::{initial_month, month_grid, month_start, year_bounds, DateInputState};
+    use chrono::{Datelike, NaiveDate};
 
     #[test]
     fn month_grid_places_leap_day_in_the_correct_weekday_column() {
@@ -276,5 +328,51 @@ mod tests {
             january.checked_sub_months(chrono::Months::new(1)),
             Some(december)
         );
+    }
+
+    #[test]
+    fn selecting_month_and_year_changes_calendar_without_changing_date_value() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 18).expect("valid date");
+        let mut state = DateInputState::default();
+        state.sync_to_value("2024-01-15", today);
+
+        state.select_month(2);
+        state.select_year(2023);
+
+        assert_eq!(
+            state.visible_month,
+            Some(NaiveDate::from_ymd_opt(2023, 2, 1).expect("valid month"))
+        );
+        assert_eq!(state.observed_value.as_deref(), Some("2024-01-15"));
+    }
+
+    #[test]
+    fn selecting_year_updates_the_leap_day_grid() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 18).expect("valid date");
+        let mut state = DateInputState::default();
+        state.sync_to_value("2024-01-15", today);
+        state.select_month(2);
+
+        let leap_february = month_grid(state.visible_month.expect("visible month"));
+        assert_eq!(leap_february.iter().flatten().count(), 29);
+
+        state.select_year(2023);
+
+        let common_february = month_grid(state.visible_month.expect("visible month"));
+        assert_eq!(common_february.iter().flatten().count(), 28);
+    }
+
+    #[test]
+    fn year_bounds_include_only_years_with_valid_months_in_chrono_range() {
+        for month in 1..=12 {
+            let (min_year, max_year) = year_bounds(month);
+
+            assert!(min_year >= NaiveDate::MIN.year());
+            assert!(max_year <= NaiveDate::MAX.year());
+            assert!(NaiveDate::from_ymd_opt(min_year, month, 1).is_some());
+            assert!(NaiveDate::from_ymd_opt(max_year, month, 1).is_some());
+            assert!(NaiveDate::from_ymd_opt(min_year - 1, month, 1).is_none());
+            assert!(NaiveDate::from_ymd_opt(max_year + 1, month, 1).is_none());
+        }
     }
 }
