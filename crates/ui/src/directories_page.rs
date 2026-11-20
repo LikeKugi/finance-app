@@ -137,13 +137,16 @@ impl FinanceApp {
             );
         });
         ui.horizontal(|ui| {
-            if ui.button("Сохранить банк").clicked() {
-                self.save_bank();
-            }
-            if ui.button("Отмена").clicked() {
-                self.show_bank_form = false;
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Отмена").clicked() {
+                    self.show_bank_form = false;
+                }
+                if ui.button("Сохранить банк").clicked() {
+                    self.save_bank();
+                }
+            });
         });
+        ui.separator();
     }
 
     pub(super) fn render_category_form(&mut self, ui: &mut egui::Ui) {
@@ -183,13 +186,16 @@ impl FinanceApp {
             ui.checkbox(&mut self.category_form.is_active, "Активна");
         });
         ui.horizontal(|ui| {
-            if ui.button("Сохранить категорию").clicked() {
-                self.save_category();
-            }
-            if ui.button("Отмена").clicked() {
-                self.show_category_form = false;
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Отмена").clicked() {
+                    self.show_category_form = false;
+                }
+                if ui.button("Сохранить категорию").clicked() {
+                    self.save_category();
+                }
+            });
         });
+        ui.separator();
     }
 
     pub(super) fn render_currency_directory(&mut self, ui: &mut egui::Ui) {
@@ -318,14 +324,17 @@ impl FinanceApp {
             });
         }
         ui.horizontal(|ui| {
-            if ui.button("Сохранить").clicked() {
-                self.save_currency();
-            }
-            if ui.button("Отмена").clicked() {
-                self.show_currency_form = false;
-                self.currency_form = CurrencyForm::default();
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Отмена").clicked() {
+                    self.show_currency_form = false;
+                    self.currency_form = CurrencyForm::default();
+                }
+                if ui.button("Сохранить").clicked() {
+                    self.save_currency();
+                }
+            });
         });
+        ui.separator();
     }
 
     pub(super) fn render_directories(&mut self, ui: &mut egui::Ui) -> (egui::Id, egui::Id) {

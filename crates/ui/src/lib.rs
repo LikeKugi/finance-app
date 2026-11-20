@@ -1695,6 +1695,177 @@ mod tests {
     }
 
     #[test]
+    fn directory_form_actions_render_at_the_bottom_right() {
+        fn assert_actions_are_bottom_right(
+            output: &egui::FullOutput,
+            heading: &str,
+            save_label: &str,
+            last_field_label: &str,
+        ) {
+            let heading = text_positions(output, heading)[0];
+            let save = text_positions(output, save_label)[0];
+            let cancel = text_positions(output, "Отмена")
+                .into_iter()
+                .min_by(|left, right| (left.x - save.x).abs().total_cmp(&(right.x - save.x).abs()))
+                .expect("form should render a cancel button");
+            let last_field = text_positions(output, last_field_label)[0];
+
+            assert!(
+                save.x > heading.x + 200.0,
+                "save button should be right-aligned"
+            );
+            assert!(
+                cancel.x > heading.x + 200.0,
+                "cancel button should be right-aligned (heading {}, cancel {})",
+                heading.x,
+                cancel.x
+            );
+            assert!(save.x < cancel.x, "save should precede cancel visually");
+            assert!(
+                save.y > last_field.y,
+                "form actions should follow the fields"
+            );
+            assert!(
+                save.y - last_field.y < 70.0,
+                "form actions should be immediately below the fields: gap {}",
+                save.y - last_field.y
+            );
+            assert_eq!(save.y, cancel.y, "form actions should share a row");
+        }
+
+        let mut app = directory_app();
+        app.show_category_form = true;
+        app.show_bank_form = true;
+        let context = egui::Context::default();
+
+        for width in [1280.0, 1600.0] {
+            app.directory_right_tab = DirectoryRightTab::Banks;
+            app.category_form = super::CategoryForm {
+                is_active: true,
+                ..super::CategoryForm::default()
+            };
+            app.bank_form = super::BankForm::default();
+            app.show_category_form = true;
+            app.show_bank_form = true;
+            let output = render_directories_at_width(&mut app, &context, width);
+            assert_actions_are_bottom_right(
+                &output,
+                "Новая категория",
+                "Сохранить категорию",
+                "Активна",
+            );
+            assert_actions_are_bottom_right(&output, "Новый банк", "Сохранить банк", "Комментарий");
+
+            app.show_category_form = false;
+            app.directory_right_tab = DirectoryRightTab::Currencies;
+            app.currency_form = CurrencyForm {
+                code: "EUR".to_owned(),
+                name: "Евро".to_owned(),
+                ..CurrencyForm::default()
+            };
+            app.show_currency_form = true;
+            let output = render_directories_at_width(&mut app, &context, width);
+            assert_actions_are_bottom_right(&output, "Новая валюта", "Сохранить", "Название");
+
+            app.currency_form = CurrencyForm {
+                code: "EUR".to_owned(),
+                rate: "95.125".to_owned(),
+                rate_date: "2026-02-01".to_owned(),
+                editing_rate: true,
+                ..CurrencyForm::default()
+            };
+            let output = render_directories_at_width(&mut app, &context, width);
+            assert_actions_are_bottom_right(
+                &output,
+                "Курс EUR к RUB",
+                "Сохранить",
+                "Дата курса (ГГГГ-ММ-ДД)",
+            );
+        }
+    }
+
+    #[test]
+    fn directory_forms_leave_visible_tables_below_separators() {
+        fn visible_text(output: &egui::FullOutput, text: &str) -> egui::Rect {
+            output
+                .shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::epaint::Shape::Text(shape) if shape.galley.job.text == text => {
+                        let rect = egui::Rect::from_min_size(shape.pos, shape.galley.size());
+                        clipped.clip_rect.contains_rect(rect).then_some(rect)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{text} should be visible inside its clip rectangle"))
+        }
+
+        fn assert_separated(output: &egui::FullOutput, save: &str, header: &str, row: &str) {
+            let save = visible_text(output, save);
+            let header = visible_text(output, header);
+            let row = visible_text(output, row);
+            assert!(header.min.y > save.max.y && row.min.y > header.min.y);
+            assert!(
+                output.shapes.iter().any(|clipped| {
+                    if let egui::epaint::Shape::LineSegment { points, .. } = &clipped.shape {
+                        let [start, end] = *points;
+                        start.y > save.max.y
+                            && start.y < header.min.y
+                            && start.x <= header.min.x + 5.0
+                            && end.x >= save.max.x
+                            && clipped.clip_rect.contains(start)
+                            && clipped.clip_rect.contains(end)
+                    } else {
+                        false
+                    }
+                }),
+                "form and table should have a visible separator"
+            );
+        }
+
+        let mut app = directory_app();
+        app.database
+            .execute_batch(
+                "INSERT INTO income_categories (name) VALUES ('Тестовый доход');
+                 INSERT INTO expense_categories (name) VALUES ('Тестовый расход');
+                 INSERT INTO banks (name) VALUES ('Тестовый банк');",
+            )
+            .unwrap();
+        app.refresh_directories();
+
+        for width in [1280.0, 1600.0] {
+            for (kind, row) in [
+                (TransactionKind::Income, "Тестовый доход"),
+                (TransactionKind::Expense, "Тестовый расход"),
+            ] {
+                app.directory_kind = kind;
+                app.refresh_categories(kind, true);
+                app.directory_right_tab = DirectoryRightTab::Banks;
+                app.show_category_form = true;
+                app.show_bank_form = true;
+                let context = egui::Context::default();
+                let output = render_directories_at_width(&mut app, &context, width);
+                assert_separated(&output, "Сохранить категорию", "Категория", row);
+                assert_separated(&output, "Сохранить банк", "Банк", "Тестовый банк");
+            }
+
+            app.show_category_form = false;
+            app.directory_right_tab = DirectoryRightTab::Currencies;
+            app.show_currency_form = true;
+            for editing_rate in [false, true] {
+                app.currency_form = CurrencyForm {
+                    code: "USD".to_owned(),
+                    editing_rate,
+                    ..CurrencyForm::default()
+                };
+                let context = egui::Context::default();
+                let output = render_directories_at_width(&mut app, &context, width);
+                assert_separated(&output, "Сохранить", "Валюта и курс к основной", "RUB");
+            }
+        }
+    }
+
+    #[test]
     fn directory_forms_render_above_their_sections() {
         let mut app = directory_app();
         app.database
