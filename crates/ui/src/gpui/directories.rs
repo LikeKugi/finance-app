@@ -454,10 +454,11 @@ impl DirectoriesPage {
                 let Some(form) = self.category_form.as_ref() else {
                     return (String::new(), div().into_any_element());
                 };
-                let title = if form.id.is_some() {
-                    "Изменить категорию"
-                } else {
-                    "Новая категория"
+                let title = match (form.id.is_some(), self.kind) {
+                    (true, TransactionKind::Income) => "Изменить категорию доходов",
+                    (true, TransactionKind::Expense) => "Изменить категорию расходов",
+                    (false, TransactionKind::Income) => "Новая категория доходов",
+                    (false, TransactionKind::Expense) => "Новая категория расходов",
                 };
                 let fields = div()
                     .flex()
