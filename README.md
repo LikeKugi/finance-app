@@ -46,29 +46,27 @@ Build all workspace crates in release mode:
 cargo +stable build --workspace --release
 ```
 
-To build a native macOS release executable in `target/macos` (requires Apple Command Line Tools):
+### Builds
+
+#### Windows
+
+For a Windows x64 release, install the `x86_64-pc-windows-gnu` Rust target and ensure the GNU cross-linker is available in `PATH`:
+
+```sh
+cargo +stable build -p finance-app --release --locked --target x86_64-pc-windows-gnu
+```
+
+The executable is written to `target/x86_64-pc-windows-gnu/release/finance-app.exe`.
+
+#### macOS
+
+For a native macOS release, install Apple Command Line Tools:
 
 ```sh
 cargo +stable build -p finance-app --release --locked --target-dir target/macos
 ```
 
 The executable is written to `target/macos/release/finance-app`.
-
-To cross-compile a Windows x64 GNU release executable, install the Rust target and ensure the GNU cross-linker is available in `PATH`:
-
-```sh
-rustup target add x86_64-pc-windows-gnu --toolchain stable
-cargo +stable build -p finance-app --release --target x86_64-pc-windows-gnu
-```
-
-The executable is written to `target/x86_64-pc-windows-gnu/release/finance-app.exe`.
-
-For a Windows x64 MSVC release executable, install the Visual Studio C++ Build Tools, then run:
-
-```sh
-rustup target add x86_64-pc-windows-msvc --toolchain stable
-cargo +stable build -p finance-app --release --target x86_64-pc-windows-msvc
-```
 
 For development, run the app in debug mode on the current machine with one command. This form explicitly selects the stable toolchain and works even when `cargo +stable` is not supported by the active Cargo executable:
 
