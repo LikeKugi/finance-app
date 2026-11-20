@@ -1,19 +1,16 @@
 # Page Actions and Filters
 
-This document records the action-button and filter patterns on the existing Income, Expenses, Savings, Payment Cards, and Analysis pages. It also recommends a consistent pattern for future pages. The recommendations below do not describe behavior already implemented everywhere.
+This document records the action-button and filter patterns on the existing Income, Expenses, Savings, Payment Cards, and Analysis pages. It also defines a shared header pattern for pages and sections; the standard is a recommendation and does not imply that every page already implements it.
 
 ## Header Actions
 
-On Income, Expenses, and Savings, the page title is on the left side of the header row. The actions are aligned to the right in this order:
+On Income, the page title is on the left side of the header row and `+ Добавить доход` is aligned to the right. This header has no refresh action. Add opens a form for a new record; fields may be prefilled with page defaults.
 
-1. `+ Добавить`
-2. `↻ Обновить`
+The Income page keeps Add enabled even if no active categories exist; it shows a notice to add a category instead. Future pages should make missing prerequisites clear and should not allow an action that cannot create a valid record.
 
-Both buttons are 140 × 40 logical pixels. Add opens a form for a new record; fields may be prefilled with page defaults. Refresh reloads the list using the filter values currently in the controls and does not clear them.
+On Savings, refresh also reloads the bank list and returns the results table to its first page. Income reloads the transaction list with the current filters when filters are applied.
 
-There is a current prerequisite difference: Savings disables Add when there are no banks and explains that a bank must first be added in Directories. Income and Expenses currently keep Add enabled even if no active categories exist; they show a notice to add a category instead. Future pages should make missing prerequisites clear and should not allow an action that cannot create a valid record.
-
-On Savings, refresh also reloads the bank list and returns the results table to its first page. Income and Expenses reload the transaction list with the current filters.
+On Savings, Add is disabled when there are no banks and explains that a bank must first be added in Directories.
 
 ## Current Filter Behavior
 
@@ -83,18 +80,26 @@ Shared compact DatePicker controls retain previous/next-month arrow navigation a
 - Currency options are `Все`, `RUB`, and `USD`; selecting a currency and clicking `Применить` filters the full combination of selected conditions. A currency-specific selection excludes cards with unknown currency.
 - The `×` control clears the currency filter and immediately reloads using the other conditions. `Сбросить фильтры` clears all four filters and reloads the full list.
 
-## Recommended Pattern for Future Pages
+## Shared Header Pattern for Pages and Sections
 
-Use the following pattern unless a page has a documented reason to differ:
+Use the same header layout on every page and section:
 
-1. Keep the title at the left of the header row and place `+ Добавить` followed by `↻ Обновить` at the right. Match the existing 140 × 40 logical-pixel button size.
-2. Place filters above the table in a wrapping layout with a small, consistent gap between groups and rows. Keep each label and its control together, and align apply/reset actions to the right of the last row (bottom-right when the filters wrap).
-3. Editing filter controls should only change their pending values; apply the full set of conditions with `Применить`.
-4. Put an `×` next to each populated filter. It clears only that filter and immediately applies the remaining values. Disable it when its filter is empty.
-5. Put `Сбросить фильтры` at the end of the row. It clears every filter and reloads the unfiltered list; disable it when no filters are active.
-6. Combine filters with logical AND. Empty fields and `Все` mean that the corresponding condition is not applied. Update the table and its related totals together.
-7. Treat `↻ Обновить` as a reload, not a reset: keep current filter values. For paginated pages, return to the first page after reloading.
-8. Show a clear empty state when no records match. Validate filter input before replacing displayed results; report invalid dates or an inverted date range without silently presenting an empty result.
+1. Use a full-width header row with the page or section title on the left and its available action buttons grouped on the right, vertically centered on the same row.
+2. Render page titles in bold 24 logical-pixel text. Use a consistent, visually subordinate heading size for sections while keeping the same alignment and action placement.
+3. Show only actions that apply to that page or section. When available, place `+ Добавить` before `↻ Обновить`; do not add an unavailable action or leave a placeholder button. If there are no actions, keep the title in its usual left position.
+4. Keep action buttons consistent in size; the recommended size is 140 × 40 logical pixels. If the available width is insufficient, move the action group to a second row aligned to the right rather than allowing it to overlap the title.
+
+## Recommended Filter Pattern for Future Pages
+
+Use the following filter pattern unless a page has a documented reason to differ:
+
+1. Place filters above the table in a wrapping layout with a small, consistent gap between groups and rows. Keep each label and its control together, and align apply/reset actions to the right of the last row (bottom-right when the filters wrap).
+2. Editing filter controls should only change their pending values; apply the full set of conditions with `Применить`.
+3. Put an `×` next to each populated filter. It clears only that filter and immediately applies the remaining values. Disable it when its filter is empty.
+4. Put `Сбросить фильтры` at the end of the row. It clears every filter and reloads the unfiltered list; disable it when no filters are active.
+5. Combine filters with logical AND. Empty fields and `Все` mean that the corresponding condition is not applied. Update the table and its related totals together.
+6. Treat `↻ Обновить` as a reload, not a reset: keep current filter values. For paginated pages, return to the first page after reloading.
+7. Show a clear empty state when no records match. Validate filter input before replacing displayed results; report invalid dates or an inverted date range without silently presenting an empty result.
 
 The recommended behavior intentionally standardizes category selection on Income and Expenses: unlike the current pages, changing any filter would wait until `Применить`, while clearing a single filter or resetting all filters would still reload immediately. Future pages can follow this pattern unless their requirements call for a documented exception.
 

@@ -1243,18 +1243,30 @@ impl Render for TransactionsPage {
         let has_active_category = self.categories.iter().any(|category| category.is_active);
         let danger = cx.theme().danger;
         let mut root = div().size_full().flex().flex_col().gap_2().p_3();
-        root = root.child(
-            div().flex().items_center().gap_2().child(
-                Button::new("new-transaction")
-                    .primary()
-                    .label(match self.kind {
-                        TransactionKind::Income => "+ Добавить доход",
-                        TransactionKind::Expense => "+ Добавить расход",
-                    })
-                    .disabled(self.form.is_some())
-                    .on_click(cx.listener(|page, _, window, cx| page.open_form(None, window, cx))),
-            ),
-        );
+        let add_button = Button::new("new-transaction")
+            .primary()
+            .label(match self.kind {
+                TransactionKind::Income => "+ Добавить доход",
+                TransactionKind::Expense => "+ Добавить расход",
+            })
+            .disabled(self.form.is_some())
+            .on_click(cx.listener(|page, _, window, cx| page.open_form(None, window, cx)));
+        let header = match self.kind {
+            TransactionKind::Income => div()
+                .flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(24.0))
+                        .font_weight(FontWeight::BOLD)
+                        .child("Доходы"),
+                )
+                .child(add_button),
+            TransactionKind::Expense => div().flex().items_center().gap_2().child(add_button),
+        };
+        root = root.child(header);
         root = root.child(self.render_filters(cx));
         if let Some((message, true)) = &self.message {
             root = root.child(div().text_color(danger).child(message.clone()));
