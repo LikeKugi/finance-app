@@ -15,7 +15,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::calendar::Date;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, IndexPath, Sizable as _};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_decimal::prelude::ToPrimitive;
@@ -23,8 +23,7 @@ use rust_decimal::prelude::ToPrimitive;
 const DATE_FORMAT: &str = "%Y-%m-%d";
 const NONE_LABEL: &str = "Все";
 const ROW_HEIGHT: f32 = 30.0;
-const PIE_CHART_DIAMETER: f32 = 160.0;
-const CHARTS_MAX_HEIGHT: f32 = 190.0;
+const PIE_CHART_DIAMETER: f32 = 120.0;
 /// Относительные ширины столбцов: категория, операций, сумма, доля.
 const COLUMN_WEIGHTS: [f32; 4] = [2.5, 0.8, 1.5, 0.7];
 const COLUMN_HEADERS: [&str; 4] = ["Категория", "Операций", "Сумма", "Доля"];
@@ -519,16 +518,15 @@ impl AnalysisPage {
 
     fn clear_button(
         id: &'static str,
-        enabled: bool,
         tooltip: &'static str,
         cx: &mut Context<Self>,
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-    ) -> impl IntoElement {
+    ) -> Button {
         Button::new(id)
             .compact()
+            .small()
             .label("×")
             .tooltip(tooltip)
-            .disabled(!enabled)
             .on_click(cx.listener(move |page, _, window, cx| on_click(page, window, cx)))
     }
 
@@ -538,85 +536,131 @@ impl AnalysisPage {
         let to_set = selected_date(self.to.read(cx)).is_some();
         let income_set = self.income.selected.is_some();
         let expense_set = self.expense.selected.is_some();
-        let labeled = |text: &'static str| div().child(text);
+        // Подпись над полем; кнопка «×» справа от подписи, если фильтр задан.
+        let filter =
+            |label: &'static str, width: f32, clear: Option<AnyElement>, control: AnyElement| {
+                div()
+                    .w(px(width))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .h(px(18.0))
+                            .child(div().text_size(px(12.0)).child(label))
+                            .children(clear),
+                    )
+                    .child(control)
+            };
+        let clear = |element: Button| element.into_any_element();
         div()
             .flex()
-            .flex_wrap()
-            .items_center()
+            .flex_col()
             .gap_2()
-            .child(labeled("Период"))
             .child(
                 div()
-                    .w(px(140.0))
-                    .child(Select::new(&self.period_select).placeholder("Выбрать")),
+                    .flex()
+                    .flex_wrap()
+                    .items_start()
+                    .gap_2()
+                    .child(filter(
+                        "Период",
+                        140.0,
+                        None,
+                        Select::new(&self.period_select)
+                            .placeholder("Период")
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "С",
+                        150.0,
+                        from_set.then(|| {
+                            clear(Self::clear_button(
+                                "analysis-clear-from",
+                                "Очистить начальную дату",
+                                cx,
+                                |page, window, cx| page.clear_date(false, window, cx),
+                            ))
+                        }),
+                        DatePicker::new(&self.from)
+                            .placeholder("Выбрать дату")
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "По",
+                        150.0,
+                        to_set.then(|| {
+                            clear(Self::clear_button(
+                                "analysis-clear-to",
+                                "Очистить конечную дату",
+                                cx,
+                                |page, window, cx| page.clear_date(true, window, cx),
+                            ))
+                        }),
+                        DatePicker::new(&self.to)
+                            .placeholder("Выбрать дату")
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Категория доходов",
+                        260.0,
+                        income_set.then(|| {
+                            clear(Self::clear_button(
+                                "analysis-clear-income",
+                                "Очистить категорию доходов",
+                                cx,
+                                |page, window, cx| page.clear_category(true, window, cx),
+                            ))
+                        }),
+                        Select::new(&self.income.select)
+                            .placeholder(NONE_LABEL)
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Категория расходов",
+                        260.0,
+                        expense_set.then(|| {
+                            clear(Self::clear_button(
+                                "analysis-clear-expense",
+                                "Очистить категорию расходов",
+                                cx,
+                                |page, window, cx| page.clear_category(false, window, cx),
+                            ))
+                        }),
+                        Select::new(&self.expense.select)
+                            .placeholder(NONE_LABEL)
+                            .small()
+                            .into_any_element(),
+                    )),
             )
-            .child(labeled("Период с"))
-            .child(
-                div().w(px(140.0)).child(
-                    DatePicker::new(&self.from)
-                        .placeholder("Выбрать дату")
-                        .small(),
-                ),
-            )
-            .child(Self::clear_button(
-                "analysis-clear-from",
-                from_set,
-                "Очистить начальную дату",
-                cx,
-                |page, window, cx| page.clear_date(false, window, cx),
-            ))
-            .child(labeled("по"))
-            .child(
-                div().w(px(140.0)).child(
-                    DatePicker::new(&self.to)
-                        .placeholder("Выбрать дату")
-                        .small(),
-                ),
-            )
-            .child(Self::clear_button(
-                "analysis-clear-to",
-                to_set,
-                "Очистить конечную дату",
-                cx,
-                |page, window, cx| page.clear_date(true, window, cx),
-            ))
-            .child(labeled("Категория доходов:"))
             .child(
                 div()
-                    .w(px(220.0))
-                    .child(Select::new(&self.income.select).placeholder(NONE_LABEL)),
-            )
-            .child(Self::clear_button(
-                "analysis-clear-income",
-                income_set,
-                "Очистить категорию доходов",
-                cx,
-                |page, window, cx| page.clear_category(true, window, cx),
-            ))
-            .child(labeled("Категория расходов:"))
-            .child(
-                div()
-                    .w(px(220.0))
-                    .child(Select::new(&self.expense.select).placeholder(NONE_LABEL)),
-            )
-            .child(Self::clear_button(
-                "analysis-clear-expense",
-                expense_set,
-                "Очистить категорию расходов",
-                cx,
-                |page, window, cx| page.clear_category(false, window, cx),
-            ))
-            .child(
-                Button::new("analysis-apply")
-                    .primary()
-                    .label("Применить")
-                    .on_click(cx.listener(|page, _, _, cx| page.apply_pending_filters(cx))),
-            )
-            .child(
-                Button::new("analysis-reset")
-                    .label("Сбросить фильтры")
-                    .disabled(!active)
-                    .on_click(cx.listener(|page, _, window, cx| page.reset_filters(window, cx))),
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("analysis-apply")
+                            .primary()
+                            .small()
+                            .label("Применить")
+                            .on_click(cx.listener(|page, _, _, cx| page.apply_pending_filters(cx))),
+                    )
+                    .child(
+                        Button::new("analysis-reset")
+                            .small()
+                            .label("Сбросить фильтры")
+                            .disabled(!active)
+                            .on_click(
+                                cx.listener(|page, _, window, cx| page.reset_filters(window, cx)),
+                            ),
+                    ),
             )
     }
 
@@ -762,7 +806,14 @@ impl AnalysisPage {
             [TransactionKind::Income, TransactionKind::Expense]
                 .into_iter()
                 .map(|kind| {
-                    let mut column = div().flex_1().min_w_0().flex().flex_col().gap_3();
+                    let mut column = div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_wrap()
+                        .items_start()
+                        .gap_x_4()
+                        .gap_y_2();
                     for currency in Currency::ALL {
                         if !summary
                             .totals
@@ -771,15 +822,20 @@ impl AnalysisPage {
                         {
                             continue;
                         }
-                        let heading = div().text_lg().font_weight(FontWeight::BOLD).child(format!(
+                        let heading = div().font_weight(FontWeight::BOLD).child(format!(
                             "{} — {}",
                             kind.title(),
                             currency.code()
                         ));
                         let Some(slices) = pie_chart_slices(summary, kind, currency) else {
-                            column = column
-                                .child(heading)
-                                .child("Не удалось построить диаграмму для этих данных.");
+                            column = column.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(heading)
+                                    .child("Не удалось построить диаграмму для этих данных."),
+                            );
                             continue;
                         };
                         if slices.is_empty() {
@@ -813,12 +869,14 @@ impl AnalysisPage {
                                         slice.category.share_percent.round_dp(2)
                                     ))
                             }));
-                        column = column.child(heading).child(
-                            div()
-                                .flex()
-                                .gap_4()
-                                .child(pie_chart(geometry))
-                                .child(legend),
+                        column = column.child(
+                            div().flex().flex_col().gap_1().child(heading).child(
+                                div()
+                                    .flex()
+                                    .gap_3()
+                                    .child(pie_chart(geometry))
+                                    .child(legend),
+                            ),
                         );
                     }
                     column
@@ -841,18 +899,13 @@ impl AnalysisPage {
         div()
             .flex()
             .flex_col()
+            .flex_none()
             .gap_2()
             .border_t_1()
             .border_color(border)
             .pt_2()
             .when_some(self.tracker.current_report(), |footer, summary| {
-                footer.child(
-                    div()
-                        .id("analysis-pie-scroll")
-                        .max_h(px(CHARTS_MAX_HEIGHT))
-                        .overflow_y_scroll()
-                        .child(Self::render_pie_charts(summary)),
-                )
+                footer.child(Self::render_pie_charts(summary))
             })
             .child(notes)
     }
@@ -864,6 +917,26 @@ impl Render for AnalysisPage {
         let stripe = cx.theme().muted;
         let border = cx.theme().border;
         let mut root = div().size_full().flex().flex_col().gap_2().p_3();
+        let header = div()
+            .flex()
+            .w_full()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_size(px(24.0))
+                    .font_weight(FontWeight::BOLD)
+                    .child("Анализ"),
+            )
+            .child(
+                Button::new("refresh-analysis")
+                    .secondary()
+                    .large()
+                    .label("Обновить")
+                    .icon(IconName::Replace)
+                    .on_click(cx.listener(|page, _, window, cx| page.reload(window, cx))),
+            );
+        root = root.child(header);
         root = root.child(self.render_filters(cx));
         if let Some(message) = &self.message {
             root = root.child(div().text_color(danger).child(message.clone()));
