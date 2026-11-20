@@ -7,6 +7,14 @@ use super::{AnalysisPage, ModuleTab};
 
 pub(super) const TABLE_ROW_HEIGHT: f32 = 48.0;
 const FILTER_ACTIONS_MIN_WIDTH: f32 = 250.0;
+const FILTER_ITEM_SPACING: f32 = 8.0;
+
+pub(super) fn filter_layout(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(FILTER_ITEM_SPACING, FILTER_ITEM_SPACING);
+        ui.horizontal_wrapped(add_contents);
+    });
+}
 
 pub(super) fn filter_group(
     ui: &mut egui::Ui,

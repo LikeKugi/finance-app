@@ -1,4 +1,4 @@
-use crate::common::{filter_group, render_filter_actions, TABLE_ROW_HEIGHT};
+use crate::common::{filter_group, filter_layout, render_filter_actions, TABLE_ROW_HEIGHT};
 use chrono::NaiveDate;
 use eframe::egui;
 use finance_core::{
@@ -94,7 +94,7 @@ impl PaymentDocumentsPage {
         let mut should_refresh = false;
         let mut apply_filters = false;
         let mut reset_filters = false;
-        ui.horizontal_wrapped(|ui| {
+        filter_layout(ui, |ui| {
             filter_group(ui, 240.0, |ui| {
                 ui.label("Банк");
                 let selected_bank = self

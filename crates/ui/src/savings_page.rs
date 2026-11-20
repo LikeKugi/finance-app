@@ -6,7 +6,7 @@ use finance_core::{
 };
 use finance_db::{self, Database};
 
-use super::common::{filter_group, render_filter_actions, TABLE_ROW_HEIGHT};
+use super::common::{filter_group, filter_layout, render_filter_actions, TABLE_ROW_HEIGHT};
 use super::date_input::{date_input, DateInputState};
 
 const SAVINGS_PAGE_SIZE: usize = 100;
@@ -124,7 +124,7 @@ impl SavingsPage {
         let mut should_refresh = false;
         let mut apply_filters = false;
         let mut reset_filters = false;
-        ui.horizontal_wrapped(|ui| {
+        filter_layout(ui, |ui| {
             filter_group(ui, 300.0, |ui| {
                 ui.label("Поиск");
                 ui.add(

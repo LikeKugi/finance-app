@@ -606,7 +606,7 @@ mod tests {
 
     use super::category_tree::{category_tree_labels, category_tree_rows};
     use super::common::{
-        filter_group, render_analysis_footer, render_filter_actions,
+        filter_group, filter_layout, render_analysis_footer, render_filter_actions,
         render_transaction_balance_footer, render_transaction_list_total, TABLE_ROW_HEIGHT,
     };
     use super::directories_page::currency_rate_label;
@@ -1429,6 +1429,7 @@ mod tests {
         let context = egui::Context::default();
         let render_filter_layout = |width| {
             let mut output = None;
+            let mut item_spacing = egui::Vec2::ZERO;
             for _ in 0..2 {
                 output = Some(context.run(
                     egui::RawInput {
@@ -1440,7 +1441,8 @@ mod tests {
                     },
                     |context| {
                         egui::CentralPanel::default().show(context, |ui| {
-                            ui.horizontal_wrapped(|ui| {
+                            filter_layout(ui, |ui| {
+                                item_spacing = ui.spacing().item_spacing;
                                 for index in 0..4 {
                                     filter_group(ui, 260.0, |ui| {
                                         ui.label(format!("Фильтр {index}"));
@@ -1452,7 +1454,10 @@ mod tests {
                     },
                 ));
             }
-            output.expect("filter layout should render twice")
+            (
+                output.expect("filter layout should render twice"),
+                item_spacing,
+            )
         };
         let text_right = |output: &egui::FullOutput, text: &str| {
             output
@@ -1466,8 +1471,8 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("{text} should be rendered"))
         };
-        let wide = render_filter_layout(2_000.0);
-        let narrow = render_filter_layout(600.0);
+        let (wide, wide_item_spacing) = render_filter_layout(2_000.0);
+        let (narrow, narrow_item_spacing) = render_filter_layout(600.0);
 
         let wide_filter_y: Vec<_> = (0..4)
             .map(|index| text_positions(&wide, &format!("Фильтр {index}"))[0].y)
@@ -1485,6 +1490,11 @@ mod tests {
         let narrow_filter_y: Vec<_> = (0..4)
             .map(|index| text_positions(&narrow, &format!("Фильтр {index}"))[0].y)
             .collect();
+        assert!(
+            wide_item_spacing == egui::vec2(8.0, 8.0)
+                && narrow_item_spacing == egui::vec2(8.0, 8.0),
+            "filter gaps should be 8 px horizontally and vertically: wide={wide_item_spacing:?}, narrow={narrow_item_spacing:?}"
+        );
         let last_filter_y = narrow_filter_y.iter().copied().fold(0.0, f32::max);
         let narrow_actions_y = text_positions(&narrow, "Применить")[0].y;
         assert!(narrow_actions_y >= last_filter_y);

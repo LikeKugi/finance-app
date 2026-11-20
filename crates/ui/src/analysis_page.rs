@@ -11,7 +11,7 @@ use finance_core::{
 use rust_decimal::prelude::ToPrimitive;
 
 use super::category_tree::category_tree_labels;
-use super::common::render_filter_actions;
+use super::common::{filter_layout, render_filter_actions};
 use super::date_input::{date_input, DateInputState};
 
 const ANALYSIS_COLUMN_MIN_WIDTHS: [f32; 4] = [170.0, 75.0, 120.0, 75.0];
@@ -115,7 +115,7 @@ impl AnalysisPage {
         let mut clear_income_category = false;
         let mut clear_expense_category = false;
         let filter_height = ui.spacing().interact_size.y;
-        ui.horizontal_wrapped(|ui| {
+        filter_layout(ui, |ui| {
             ui.allocate_ui_with_layout(
                 egui::vec2(252.0, filter_height),
                 egui::Layout::left_to_right(egui::Align::Center),

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use super::category_tree::category_tree_labels;
-use super::common::{filter_group, render_filter_actions, TABLE_ROW_HEIGHT};
+use super::common::{filter_group, filter_layout, render_filter_actions, TABLE_ROW_HEIGHT};
 use super::date_input::date_input;
 use super::{DeleteTarget, FinanceApp, TransactionForm, TRANSACTION_TABLE_SCROLL_AREA_ID};
 use chrono::NaiveDate;
@@ -403,7 +403,7 @@ impl FinanceApp {
     pub(super) fn render_transactions(&mut self, ui: &mut egui::Ui, kind: TransactionKind) {
         let mut apply_filters = false;
         let mut reset_filters = false;
-        ui.horizontal_wrapped(|ui| {
+        filter_layout(ui, |ui| {
             filter_group(ui, 260.0, |ui| {
                 ui.label("Поиск");
                 ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(150.0));
@@ -416,7 +416,6 @@ impl FinanceApp {
                 }
             });
             filter_group(ui, 185.0, |ui| {
-                ui.add_space(8.0);
                 ui.label("С");
                 date_input(
                     ui,
@@ -434,7 +433,6 @@ impl FinanceApp {
                 }
             });
             filter_group(ui, 185.0, |ui| {
-                ui.add_space(8.0);
                 ui.label("По");
                 date_input(
                     ui,
@@ -452,7 +450,6 @@ impl FinanceApp {
                 }
             });
             filter_group(ui, 360.0, |ui| {
-                ui.add_space(8.0);
                 ui.label("Категория:");
                 let category_labels = category_tree_labels(&self.categories);
                 let selected_name = self
