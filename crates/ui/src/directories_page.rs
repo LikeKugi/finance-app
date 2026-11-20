@@ -3,7 +3,7 @@ use std::str::FromStr;
 use chrono::NaiveDate;
 use eframe::egui;
 use finance_core::{CurrencyDefinition, TransactionKind};
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, RoundingStrategy};
 
 use super::category_tree::category_tree_rows;
 use super::common::add_button_text;
@@ -17,13 +17,31 @@ pub(super) fn currency_rate_label(currency: &CurrencyDefinition, primary_code: &
         return "Основная валюта".to_owned();
     }
     match (currency.rate_to_primary, currency.rate_date) {
-        (Some(rate), Some(date)) => format!(
-            "1 {} = {} {} · курс от {}",
-            currency.code,
-            rate,
-            primary_code,
-            date.format("%d.%m.%Y")
-        ),
+        (Some(rate), Some(date)) => {
+            let rounded_rate =
+                rate.round_dp_with_strategy(5, RoundingStrategy::MidpointNearestEven);
+            let rate_text = if !rate.is_zero() && rounded_rate.is_zero() {
+                if rate.is_sign_negative() {
+                    ">-0.00001".to_owned()
+                } else {
+                    "<0.00001".to_owned()
+                }
+            } else {
+                let formatted_rate = format!("{rounded_rate:.5}");
+                if rate == rounded_rate {
+                    formatted_rate
+                } else {
+                    format!("{formatted_rate} (округлено)")
+                }
+            };
+            format!(
+                "1 {} = {} {} · курс от {}",
+                currency.code,
+                rate_text,
+                primary_code,
+                date.format("%d.%m.%Y")
+            )
+        }
         _ => "Курс не задан".to_owned(),
     }
 }

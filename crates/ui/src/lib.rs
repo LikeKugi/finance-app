@@ -613,7 +613,7 @@ pub fn run(database: Database, database_path: PathBuf) -> eframe::Result<()> {
 mod tests {
     use chrono::NaiveDate;
     use eframe::egui;
-    use finance_core::{Currency, FinancialTransaction, TransactionBalance};
+    use finance_core::{Currency, CurrencyDefinition, FinancialTransaction, TransactionBalance};
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
@@ -1964,7 +1964,7 @@ mod tests {
             .cloned()
             .unwrap();
         app.edit_currency_rate(&euro);
-        app.currency_form.rate = "95.125".to_owned();
+        app.currency_form.rate = "95.123456789012".to_owned();
         app.currency_form.rate_date = "2026-02-01".to_owned();
         app.save_currency();
 
@@ -1972,15 +1972,18 @@ mod tests {
             .currencies
             .iter()
             .find(|currency| currency.code == "EUR")
+            .cloned()
             .unwrap();
         assert_eq!(
             euro.rate_to_primary.map(|rate| rate.to_string()),
-            Some("95.125".to_owned())
+            Some("95.123456789012".to_owned())
         );
         assert_eq!(
-            currency_rate_label(euro, "RUB"),
-            "1 EUR = 95.125 RUB · курс от 01.02.2026"
+            currency_rate_label(&euro, "RUB"),
+            "1 EUR = 95.12346 (округлено) RUB · курс от 01.02.2026"
         );
+        app.edit_currency_rate(&euro);
+        assert_eq!(app.currency_form.rate, "95.123456789012");
 
         let context = egui::Context::default();
         let output = render_directories_at_width(&mut app, &context, 1280.0);
@@ -1992,6 +1995,22 @@ mod tests {
         app.change_primary_currency("EUR");
         assert_eq!(app.currencies[0].code, "EUR");
         assert!(app.currencies[0].is_primary);
+    }
+
+    #[test]
+    fn currency_rate_label_does_not_hide_nonzero_rates_below_display_precision() {
+        let currency = CurrencyDefinition {
+            code: "BTC".to_owned(),
+            name: "Биткоин".to_owned(),
+            is_primary: false,
+            rate_to_primary: Some(Decimal::new(1, 7)),
+            rate_date: Some(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()),
+        };
+
+        assert_eq!(
+            currency_rate_label(&currency, "RUB"),
+            "1 BTC = <0.00001 RUB · курс от 01.02.2026"
+        );
     }
 
     #[test]
