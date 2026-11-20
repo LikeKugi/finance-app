@@ -424,6 +424,17 @@ impl FinanceApp {
         let mut apply_filters = false;
         let mut reset_filters = false;
         filter_layout(ui, |ui| {
+            filter_group(ui, 260.0, |ui| {
+                ui.label("Поиск");
+                ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(150.0));
+                if ui
+                    .add_enabled(!self.search.is_empty(), egui::Button::new("×"))
+                    .on_hover_text("Очистить поиск")
+                    .clicked()
+                {
+                    self.clear_search_filter(kind);
+                }
+            });
             filter_group(ui, 185.0, |ui| {
                 if let Some(period) = render_period_filter(ui, "transaction_date_period") {
                     if set_period_dates(
@@ -435,17 +446,6 @@ impl FinanceApp {
                         self.from_date_input.reset();
                         self.to_date_input.reset();
                     }
-                }
-            });
-            filter_group(ui, 260.0, |ui| {
-                ui.label("Поиск");
-                ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(150.0));
-                if ui
-                    .add_enabled(!self.search.is_empty(), egui::Button::new("×"))
-                    .on_hover_text("Очистить поиск")
-                    .clicked()
-                {
-                    self.clear_search_filter(kind);
                 }
             });
             filter_group(ui, 185.0, |ui| {

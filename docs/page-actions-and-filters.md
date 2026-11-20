@@ -22,6 +22,7 @@ Shared date pickers retain previous/next-month arrow navigation and also let use
 ### Income and Expenses
 
 - Filters appear above the table and wrap onto additional lines when they do not fit; horizontal scrolling is not used.
+- The filter order is `Поиск`, `Период`, start date (`С`), end date (`По`), category, and currency.
 - Filter groups and wrapped rows have a small, consistent gap for visual separation.
 - `Применить` and `Сбросить фильтры` remain aligned to the right of the final filter row, moving to the bottom-right row when needed.
 - Search text and date edits do not reload the list on their own. Use `Применить` to apply them.
