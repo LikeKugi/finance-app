@@ -13,10 +13,9 @@ use finance_core::{
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::dialog::AlertDialog;
+use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, IndexPath, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -1029,7 +1028,7 @@ impl TransactionsPage {
             .children(values.into_iter().enumerate().map(|(column, value)| {
                 if is_income {
                     if column == 4 && !value.is_empty() {
-                        income_comment_cell(id, value).into_any_element()
+                        income_comment_cell(id, value, cx).into_any_element()
                     } else {
                         income_cell(column, value).into_any_element()
                     }
@@ -1163,8 +1162,8 @@ fn income_cell(index: usize, text: String) -> Div {
     }
 }
 
-fn income_comment_cell(id: i64, text: String) -> AnyElement {
-    let tooltip_text = text.clone();
+fn income_comment_cell(id: i64, text: String, cx: &mut Context<TransactionsPage>) -> AnyElement {
+    let preview = comment_preview(&text);
     div()
         .id(("income-comment", id as usize))
         .flex_1()
@@ -1172,10 +1171,34 @@ fn income_comment_cell(id: i64, text: String) -> AnyElement {
         .px_2()
         .overflow_hidden()
         .whitespace_nowrap()
-        .text_ellipsis()
-        .child(text)
-        .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
+        .child(preview)
+        .cursor_pointer()
+        .on_click(cx.listener(move |_, _, window, cx| {
+            let comment = text.clone();
+            window.open_dialog(cx, move |dialog: Dialog, _, _| {
+                dialog.title("Комментарий").centered().child(
+                    div()
+                        .id("income-comment-dialog-body")
+                        .max_h(px(420.0))
+                        .overflow_y_scroll()
+                        .overflow_x_scroll()
+                        .child(comment.clone()),
+                )
+            });
+        }))
         .into_any_element()
+}
+
+fn comment_preview(text: &str) -> String {
+    let first_line = text.lines().next().unwrap_or_default();
+    let mut chars = first_line.chars();
+    let mut preview = chars.by_ref().take(25).collect::<String>();
+
+    if chars.next().is_some() || text.contains('\n') || text.contains('\r') {
+        preview.push('…');
+    }
+
+    preview
 }
 
 pub(crate) fn period_label(from: Option<NaiveDate>, to: Option<NaiveDate>) -> String {
@@ -1220,5 +1243,38 @@ impl Render for TransactionsPage {
         }
         root.child(self.render_table(cx))
             .child(self.render_footer(cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::comment_preview;
+
+    #[test]
+    fn comment_preview_keeps_short_single_line_text_unchanged() {
+        assert_eq!(
+            comment_preview("Короткий комментарий"),
+            "Короткий комментарий"
+        );
+    }
+
+    #[test]
+    fn comment_preview_truncates_after_25_unicode_characters() {
+        assert_eq!(
+            comment_preview("Комментарий очень длинный, дальше текст"),
+            "Комментарий очень длинный…"
+        );
+    }
+
+    #[test]
+    fn comment_preview_adds_ellipsis_for_multiline_text() {
+        assert_eq!(
+            comment_preview("Первая строка\nВторая строка"),
+            "Первая строка…"
+        );
+        assert_eq!(
+            comment_preview("Первая строка\r\nВторая строка"),
+            "Первая строка…"
+        );
     }
 }
