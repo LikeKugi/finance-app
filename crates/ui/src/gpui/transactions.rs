@@ -612,8 +612,7 @@ impl TransactionsPage {
             dialog
                 .title(title)
                 .centered()
-                .w(px(680.0))
-                .max_w(px(900.0))
+                .w(px(800.0))
                 .close_button(false)
                 .overlay_closable(false)
                 .keyboard(false)
@@ -966,30 +965,7 @@ impl TransactionsPage {
                 .child(control)
         };
 
-        let mut fields = div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(field(
-                "Дата",
-                DatePicker::new(&form.date)
-                    .placeholder("Выбрать дату")
-                    .into_any_element(),
-            ))
-            .child(field("Сумма", Input::new(&form.amount).into_any_element()))
-            .child(field(
-                "Валюта",
-                Select::new(&form.currency_select)
-                    .placeholder("Выберите валюту")
-                    .into_any_element(),
-            ))
-            .child(field(
-                "Категория",
-                Select::new(&form.category_select)
-                    .placeholder("Выберите категорию")
-                    .into_any_element(),
-            ));
-
+        let cell = |element: Div| element.flex_1().min_w_0();
         let mut card_field = div()
             .flex()
             .flex_col()
@@ -1009,10 +985,47 @@ impl TransactionsPage {
                 }
             }));
         }
-        fields = fields.child(card_field);
+
+        let mut fields = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .gap_4()
+                    .child(cell(field(
+                        "Дата",
+                        DatePicker::new(&form.date)
+                            .placeholder("Выбрать дату")
+                            .into_any_element(),
+                    )))
+                    .child(cell(field(
+                        "Сумма",
+                        Input::new(&form.amount).into_any_element(),
+                    )))
+                    .child(cell(field(
+                        "Валюта",
+                        Select::new(&form.currency_select)
+                            .placeholder("Выберите валюту")
+                            .into_any_element(),
+                    ))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_4()
+                    .child(cell(field(
+                        "Категория",
+                        Select::new(&form.category_select)
+                            .placeholder("Выберите категорию")
+                            .into_any_element(),
+                    )))
+                    .child(cell(card_field)),
+            );
         match kind {
             TransactionKind::Income => {
-                fields = fields.child(div().text_color(muted).child(
+                fields = fields.child(div().text_xs().text_color(muted).child(
                     "Доступны дебетовые карты с указанной валютой. Для ранее созданных карт сначала укажите валюту в разделе «Платёжные карты».",
                 ));
             }
@@ -1032,15 +1045,15 @@ impl TransactionsPage {
                             })),
                     )
                     .when(!rate_eligible, |f| {
-                        f.child(div().text_color(muted).child(
+                        f.child(div().text_xs().text_color(muted).child(
                             "Для учёта выберите карту с совпадающей валютой и включённым влиянием на ставку.",
                         ))
                     })
-                    .child(div().text_color(muted).child(
+                    .child(div().text_xs().text_color(muted).child(
                         "Расход с дебетовой карты списывается с её баланса; кредитный лимит не меняется. Оценка процентов пока не рассчитывается.",
                     ))
                     .when(legacy_debit_expense, |f| {
-                        f.child(div().text_color(warning).child(
+                        f.child(div().text_xs().text_color(warning).child(
                             "Этот расход ранее не списывался с баланса. При сохранении будет списана его текущая сумма.",
                         ))
                     });
@@ -1078,14 +1091,11 @@ impl TransactionsPage {
             );
         }
         if amount_text.contains('/') {
-            fields = fields.child(div().text_color(muted).child(DIVISION_ROUNDING_WARNING));
+            fields = fields.child(div().text_xs().text_color(muted).child(DIVISION_ROUNDING_WARNING));
         }
 
         let mut panel = div().flex().flex_col().gap_3().p_4().child(
-            fields
-                .id("transaction-form-fields")
-                .max_h(px(440.0))
-                .overflow_y_scroll(),
+            fields,
         );
         if let Some((message, true)) = &self.message {
             panel = panel.child(div().text_color(danger).child(message.clone()));
