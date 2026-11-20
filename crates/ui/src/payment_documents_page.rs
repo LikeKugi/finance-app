@@ -1,4 +1,4 @@
-use crate::common::TABLE_ROW_HEIGHT;
+use crate::common::{filter_group, render_filter_actions, TABLE_ROW_HEIGHT};
 use chrono::NaiveDate;
 use eframe::egui;
 use finance_core::{
@@ -92,109 +92,109 @@ impl PaymentDocumentsPage {
             );
         }
         let mut should_refresh = false;
-        egui::ScrollArea::horizontal()
-            .id_salt("payment_documents_filters_scroll")
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Банк");
-                    let selected_bank = self
-                        .bank_filter
-                        .and_then(|id| banks.iter().find(|bank| bank.id == id))
-                        .map_or("Все банки", |bank| bank.name.as_str());
-                    egui::ComboBox::from_id_salt("payment_documents_bank_filter")
-                        .selected_text(selected_bank)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.bank_filter, None, "Все банки");
-                            for bank in banks {
-                                ui.selectable_value(
-                                    &mut self.bank_filter,
-                                    Some(bank.id),
-                                    &bank.name,
-                                );
-                            }
-                        });
-                    if ui
-                        .add_enabled(self.bank_filter.is_some(), egui::Button::new("×"))
-                        .on_hover_text("Очистить банк")
-                        .clicked()
-                    {
-                        self.bank_filter = None;
-                        should_refresh = true;
-                    }
-
-                    ui.label("Платёжная система");
-                    egui::ComboBox::from_id_salt("payment_documents_system_filter")
-                        .selected_text(
-                            self.payment_system_filter
-                                .map_or("Все", PaymentSystem::code),
-                        )
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.payment_system_filter, None, "Все");
-                            for system in PaymentSystem::ALL {
-                                ui.selectable_value(
-                                    &mut self.payment_system_filter,
-                                    Some(system),
-                                    system.code(),
-                                );
-                            }
-                        });
-
-                    ui.label("Тип карты");
-                    egui::ComboBox::from_id_salt("payment_documents_type_filter")
-                        .selected_text(self.card_type_filter.map_or("Все", PaymentCardType::title))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.card_type_filter, None, "Все");
-                            for card_type in PaymentCardType::ALL {
-                                ui.selectable_value(
-                                    &mut self.card_type_filter,
-                                    Some(card_type),
-                                    card_type.title(),
-                                );
-                            }
-                        });
-
-                    ui.label("Валюта");
-                    egui::ComboBox::from_id_salt("payment_documents_currency_filter")
-                        .width(80.0)
-                        .selected_text(self.currency_filter.map_or("Все", Currency::code))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.currency_filter, None, "Все");
-                            for currency in Currency::ALL {
-                                ui.selectable_value(
-                                    &mut self.currency_filter,
-                                    Some(currency),
-                                    currency.code(),
-                                );
-                            }
-                        });
-                    if ui
-                        .add_enabled(self.currency_filter.is_some(), egui::Button::new("×"))
-                        .on_hover_text("Очистить валюту")
-                        .clicked()
-                    {
-                        self.clear_currency_filter();
-                        should_refresh = true;
-                    }
-
-                    if ui.button("Применить").clicked() {
-                        should_refresh = true;
-                    }
-                    if ui
-                        .add_enabled(
-                            self.bank_filter.is_some()
-                                || self.currency_filter.is_some()
-                                || self.card_type_filter.is_some()
-                                || self.payment_system_filter.is_some(),
-                            egui::Button::new("Сбросить фильтры"),
-                        )
-                        .clicked()
-                    {
-                        self.reset_filters();
-                        should_refresh = true;
-                    }
-                });
+        let mut apply_filters = false;
+        let mut reset_filters = false;
+        ui.horizontal_wrapped(|ui| {
+            filter_group(ui, 240.0, |ui| {
+                ui.label("Банк");
+                let selected_bank = self
+                    .bank_filter
+                    .and_then(|id| banks.iter().find(|bank| bank.id == id))
+                    .map_or("Все банки", |bank| bank.name.as_str());
+                egui::ComboBox::from_id_salt("payment_documents_bank_filter")
+                    .width(150.0)
+                    .selected_text(selected_bank)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.bank_filter, None, "Все банки");
+                        for bank in banks {
+                            ui.selectable_value(&mut self.bank_filter, Some(bank.id), &bank.name);
+                        }
+                    });
+                if ui
+                    .add_enabled(self.bank_filter.is_some(), egui::Button::new("×"))
+                    .on_hover_text("Очистить банк")
+                    .clicked()
+                {
+                    self.bank_filter = None;
+                    should_refresh = true;
+                }
             });
+
+            filter_group(ui, 300.0, |ui| {
+                ui.label("Платёжная система");
+                egui::ComboBox::from_id_salt("payment_documents_system_filter")
+                    .width(140.0)
+                    .selected_text(
+                        self.payment_system_filter
+                            .map_or("Все", PaymentSystem::code),
+                    )
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.payment_system_filter, None, "Все");
+                        for system in PaymentSystem::ALL {
+                            ui.selectable_value(
+                                &mut self.payment_system_filter,
+                                Some(system),
+                                system.code(),
+                            );
+                        }
+                    });
+            });
+
+            filter_group(ui, 240.0, |ui| {
+                ui.label("Тип карты");
+                egui::ComboBox::from_id_salt("payment_documents_type_filter")
+                    .width(120.0)
+                    .selected_text(self.card_type_filter.map_or("Все", PaymentCardType::title))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.card_type_filter, None, "Все");
+                        for card_type in PaymentCardType::ALL {
+                            ui.selectable_value(
+                                &mut self.card_type_filter,
+                                Some(card_type),
+                                card_type.title(),
+                            );
+                        }
+                    });
+            });
+
+            filter_group(ui, 190.0, |ui| {
+                ui.label("Валюта");
+                egui::ComboBox::from_id_salt("payment_documents_currency_filter")
+                    .width(80.0)
+                    .selected_text(self.currency_filter.map_or("Все", Currency::code))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.currency_filter, None, "Все");
+                        for currency in Currency::ALL {
+                            ui.selectable_value(
+                                &mut self.currency_filter,
+                                Some(currency),
+                                currency.code(),
+                            );
+                        }
+                    });
+                if ui
+                    .add_enabled(self.currency_filter.is_some(), egui::Button::new("×"))
+                    .on_hover_text("Очистить валюту")
+                    .clicked()
+                {
+                    self.clear_currency_filter();
+                    should_refresh = true;
+                }
+            });
+
+            let has_active_filters = self.bank_filter.is_some()
+                || self.currency_filter.is_some()
+                || self.card_type_filter.is_some()
+                || self.payment_system_filter.is_some();
+            (apply_filters, reset_filters) = render_filter_actions(ui, has_active_filters);
+        });
+
+        if reset_filters {
+            self.reset_filters();
+            should_refresh = true;
+        } else if apply_filters {
+            should_refresh = true;
+        }
 
         if should_refresh {
             if let Err(error) = self.refresh(database) {
@@ -770,6 +770,83 @@ mod tests {
             .execute_batch("INSERT INTO banks (id, name) VALUES (1, 'Банк Альфа');")
             .unwrap();
         database
+    }
+
+    #[test]
+    fn payment_document_filters_wrap_and_keep_actions_on_the_last_row() {
+        let database = database_with_bank();
+        let banks = finance_db::list_banks(&database).unwrap();
+        for width in [2_000.0, 1_280.0, 900.0] {
+            let mut page = PaymentDocumentsPage::default();
+            let context = egui::Context::default();
+            let mut output = None;
+            for _ in 0..2 {
+                output = Some(context.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, 720.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |context| {
+                        egui::CentralPanel::default().show(context, |ui| {
+                            page.render(context, ui, &database, &banks);
+                        });
+                    },
+                ));
+            }
+            let output = output.expect("payment filters should render twice");
+            let labels = ["Банк", "Платёжная система", "Тип карты", "Валюта"];
+            let filter_y: Vec<_> = labels
+                .iter()
+                .map(|label| {
+                    output
+                        .shapes
+                        .iter()
+                        .find_map(|clipped_shape| match &clipped_shape.shape {
+                            egui::epaint::Shape::Text(text_shape)
+                                if text_shape.galley.job.text == *label =>
+                            {
+                                Some(text_shape.pos.y)
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| panic!("filter {label} should render"))
+                })
+                .collect();
+            assert!(filter_y.windows(2).all(|pair| pair[0] <= pair[1]));
+            let apply = output
+                .shapes
+                .iter()
+                .find_map(|clipped_shape| match &clipped_shape.shape {
+                    egui::epaint::Shape::Text(text_shape)
+                        if text_shape.galley.job.text == "Применить" =>
+                    {
+                        Some(text_shape.pos)
+                    }
+                    _ => None,
+                })
+                .expect("apply action should render");
+            let reset_right = output
+                .shapes
+                .iter()
+                .find_map(|clipped_shape| match &clipped_shape.shape {
+                    egui::epaint::Shape::Text(text_shape)
+                        if text_shape.galley.job.text == "Сбросить фильтры" =>
+                    {
+                        Some((
+                            text_shape.pos.y,
+                            text_shape.pos.x + text_shape.galley.size().x,
+                        ))
+                    }
+                    _ => None,
+                })
+                .expect("reset action should render");
+            assert!(apply.y >= *filter_y.last().expect("filters should not be empty"));
+            assert!((apply.y - reset_right.0).abs() < 6.0);
+            assert!(reset_right.1 > width - 40.0);
+        }
     }
 
     #[test]

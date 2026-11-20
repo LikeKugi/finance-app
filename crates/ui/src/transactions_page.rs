@@ -1,12 +1,9 @@
 use std::collections::HashSet;
 
 use super::category_tree::category_tree_labels;
-use super::common::TABLE_ROW_HEIGHT;
+use super::common::{filter_group, render_filter_actions, TABLE_ROW_HEIGHT};
 use super::date_input::date_input;
-use super::{
-    DeleteTarget, FinanceApp, TransactionForm, TRANSACTION_FILTERS_SCROLL_AREA_ID,
-    TRANSACTION_TABLE_SCROLL_AREA_ID,
-};
+use super::{DeleteTarget, FinanceApp, TransactionForm, TRANSACTION_TABLE_SCROLL_AREA_ID};
 use chrono::NaiveDate;
 use eframe::egui;
 use finance_core::{
@@ -404,147 +401,150 @@ impl FinanceApp {
     }
 
     pub(super) fn render_transactions(&mut self, ui: &mut egui::Ui, kind: TransactionKind) {
-        egui::ScrollArea::horizontal()
-            .id_salt(TRANSACTION_FILTERS_SCROLL_AREA_ID)
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Поиск");
-                    ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(150.0));
-                    if ui
-                        .add_enabled(!self.search.is_empty(), egui::Button::new("×"))
-                        .on_hover_text("Очистить поиск")
-                        .clicked()
-                    {
-                        self.clear_search_filter(kind);
-                    }
-                    ui.add_space(8.0);
-                    ui.label("С");
-                    date_input(
-                        ui,
-                        "from_date_filter",
-                        &mut self.from_date,
-                        &mut self.from_date_input,
-                        95.0,
-                    );
-                    if ui
-                        .add_enabled(!self.from_date.is_empty(), egui::Button::new("×"))
-                        .on_hover_text("Очистить начальную дату")
-                        .clicked()
-                    {
-                        self.clear_from_date_filter(kind);
-                    }
-                    ui.add_space(8.0);
-                    ui.label("По");
-                    date_input(
-                        ui,
-                        "to_date_filter",
-                        &mut self.to_date,
-                        &mut self.to_date_input,
-                        95.0,
-                    );
-                    if ui
-                        .add_enabled(!self.to_date.is_empty(), egui::Button::new("×"))
-                        .on_hover_text("Очистить конечную дату")
-                        .clicked()
-                    {
-                        self.clear_to_date_filter(kind);
-                    }
-                    ui.add_space(8.0);
-                    ui.label("Категория:");
-                    let category_labels = category_tree_labels(&self.categories);
-                    let selected_name = self
-                        .category_filter
-                        .and_then(|id| {
-                            category_labels
-                                .iter()
-                                .find(|(category_id, _)| *category_id == id)
-                                .map(|(_, label)| label.as_str())
-                        })
-                        .unwrap_or("Все");
-                    egui::ComboBox::from_id_salt("transaction_category_filter")
-                        .width(220.0)
-                        .selected_text(selected_name)
-                        .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_value(&mut self.category_filter, None, "Все")
-                                .clicked()
-                            {
-                                self.refresh_transactions(kind);
-                            }
-                            for (category_id, label) in &category_labels {
-                                if ui
-                                    .selectable_value(
-                                        &mut self.category_filter,
-                                        Some(*category_id),
-                                        label,
-                                    )
-                                    .clicked()
-                                {
-                                    self.refresh_transactions(kind);
-                                }
-                            }
-                        });
-                    if ui
-                        .add_enabled(self.category_filter.is_some(), egui::Button::new("×"))
-                        .on_hover_text("Очистить категорию")
-                        .clicked()
-                    {
-                        self.clear_category_filter(kind);
-                    }
-                    ui.add_space(8.0);
-                    ui.label("Валюта:");
-                    egui::ComboBox::from_id_salt("transaction_currency_filter")
-                        .width(80.0)
-                        .selected_text(self.currency_filter.map(Currency::code).unwrap_or("Все"))
-                        .show_ui(ui, |ui| {
-                            if ui
-                                .selectable_value(&mut self.currency_filter, None, "Все")
-                                .clicked()
-                            {
-                                self.refresh_transactions(kind);
-                            }
-                            for currency in Currency::ALL {
-                                if ui
-                                    .selectable_value(
-                                        &mut self.currency_filter,
-                                        Some(currency),
-                                        currency.code(),
-                                    )
-                                    .clicked()
-                                {
-                                    self.refresh_transactions(kind);
-                                }
-                            }
-                        });
-                    if ui
-                        .add_enabled(self.currency_filter.is_some(), egui::Button::new("×"))
-                        .on_hover_text("Очистить валюту")
-                        .clicked()
-                    {
-                        self.clear_currency_filter(kind);
-                    }
-                    ui.add_space(8.0);
-                    if ui.button("Применить").clicked() {
-                        self.refresh_transactions(kind);
-                    }
-                    let has_active_filters = !self.search.is_empty()
-                        || !self.from_date.is_empty()
-                        || !self.to_date.is_empty()
-                        || self.category_filter.is_some()
-                        || self.currency_filter.is_some();
-                    if ui
-                        .add_enabled(has_active_filters, egui::Button::new("Сбросить фильтры"))
-                        .clicked()
-                    {
-                        self.reset_transaction_filters(kind);
-                    }
-                    if !self.categories.iter().any(|category| category.is_active) {
-                        ui.add_space(8.0);
-                        ui.label("Сначала добавьте категорию в разделе «Справочники».");
-                    }
-                });
+        let mut apply_filters = false;
+        let mut reset_filters = false;
+        ui.horizontal_wrapped(|ui| {
+            filter_group(ui, 260.0, |ui| {
+                ui.label("Поиск");
+                ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(150.0));
+                if ui
+                    .add_enabled(!self.search.is_empty(), egui::Button::new("×"))
+                    .on_hover_text("Очистить поиск")
+                    .clicked()
+                {
+                    self.clear_search_filter(kind);
+                }
             });
+            filter_group(ui, 185.0, |ui| {
+                ui.add_space(8.0);
+                ui.label("С");
+                date_input(
+                    ui,
+                    "from_date_filter",
+                    &mut self.from_date,
+                    &mut self.from_date_input,
+                    95.0,
+                );
+                if ui
+                    .add_enabled(!self.from_date.is_empty(), egui::Button::new("×"))
+                    .on_hover_text("Очистить начальную дату")
+                    .clicked()
+                {
+                    self.clear_from_date_filter(kind);
+                }
+            });
+            filter_group(ui, 185.0, |ui| {
+                ui.add_space(8.0);
+                ui.label("По");
+                date_input(
+                    ui,
+                    "to_date_filter",
+                    &mut self.to_date,
+                    &mut self.to_date_input,
+                    95.0,
+                );
+                if ui
+                    .add_enabled(!self.to_date.is_empty(), egui::Button::new("×"))
+                    .on_hover_text("Очистить конечную дату")
+                    .clicked()
+                {
+                    self.clear_to_date_filter(kind);
+                }
+            });
+            filter_group(ui, 360.0, |ui| {
+                ui.add_space(8.0);
+                ui.label("Категория:");
+                let category_labels = category_tree_labels(&self.categories);
+                let selected_name = self
+                    .category_filter
+                    .and_then(|id| {
+                        category_labels
+                            .iter()
+                            .find(|(category_id, _)| *category_id == id)
+                            .map(|(_, label)| label.as_str())
+                    })
+                    .unwrap_or("Все");
+                egui::ComboBox::from_id_salt("transaction_category_filter")
+                    .width(220.0)
+                    .selected_text(selected_name)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_value(&mut self.category_filter, None, "Все")
+                            .clicked()
+                        {
+                            self.refresh_transactions(kind);
+                        }
+                        for (category_id, label) in &category_labels {
+                            if ui
+                                .selectable_value(
+                                    &mut self.category_filter,
+                                    Some(*category_id),
+                                    label,
+                                )
+                                .clicked()
+                            {
+                                self.refresh_transactions(kind);
+                            }
+                        }
+                    });
+                if ui
+                    .add_enabled(self.category_filter.is_some(), egui::Button::new("×"))
+                    .on_hover_text("Очистить категорию")
+                    .clicked()
+                {
+                    self.clear_category_filter(kind);
+                }
+            });
+            filter_group(ui, 205.0, |ui| {
+                ui.add_space(8.0);
+                ui.label("Валюта:");
+                egui::ComboBox::from_id_salt("transaction_currency_filter")
+                    .width(80.0)
+                    .selected_text(self.currency_filter.map(Currency::code).unwrap_or("Все"))
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_value(&mut self.currency_filter, None, "Все")
+                            .clicked()
+                        {
+                            self.refresh_transactions(kind);
+                        }
+                        for currency in Currency::ALL {
+                            if ui
+                                .selectable_value(
+                                    &mut self.currency_filter,
+                                    Some(currency),
+                                    currency.code(),
+                                )
+                                .clicked()
+                            {
+                                self.refresh_transactions(kind);
+                            }
+                        }
+                    });
+                if ui
+                    .add_enabled(self.currency_filter.is_some(), egui::Button::new("×"))
+                    .on_hover_text("Очистить валюту")
+                    .clicked()
+                {
+                    self.clear_currency_filter(kind);
+                }
+            });
+            let has_active_filters = !self.search.is_empty()
+                || !self.from_date.is_empty()
+                || !self.to_date.is_empty()
+                || self.category_filter.is_some()
+                || self.currency_filter.is_some();
+            (apply_filters, reset_filters) = render_filter_actions(ui, has_active_filters);
+        });
+
+        if reset_filters {
+            self.reset_transaction_filters(kind);
+        } else if apply_filters {
+            self.refresh_transactions(kind);
+        }
+        if !self.categories.iter().any(|category| category.is_active) {
+            ui.label("Сначала добавьте категорию в разделе «Справочники».");
+        }
 
         if self.show_transaction_form {
             self.render_transaction_form(ui, kind);

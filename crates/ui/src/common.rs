@@ -6,6 +6,41 @@ use rust_decimal::Decimal;
 use super::{AnalysisPage, ModuleTab};
 
 pub(super) const TABLE_ROW_HEIGHT: f32 = 48.0;
+const FILTER_ACTIONS_MIN_WIDTH: f32 = 250.0;
+
+pub(super) fn filter_group(
+    ui: &mut egui::Ui,
+    width: f32,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let height = ui.spacing().interact_size.y;
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, height),
+        egui::Layout::left_to_right(egui::Align::Center),
+        add_contents,
+    );
+}
+
+pub(super) fn render_filter_actions(ui: &mut egui::Ui, has_active_filters: bool) -> (bool, bool) {
+    let available_width = ui.available_size_before_wrap().x;
+    let width = if available_width < FILTER_ACTIONS_MIN_WIDTH {
+        ui.max_rect().width()
+    } else {
+        available_width
+    };
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, ui.spacing().interact_size.y),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            let reset = ui
+                .add_enabled(has_active_filters, egui::Button::new("Сбросить фильтры"))
+                .clicked();
+            let apply = ui.button("Применить").clicked();
+            (apply, reset)
+        },
+    )
+    .inner
+}
 
 pub(super) fn render_analysis_footer(
     context: &egui::Context,

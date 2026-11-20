@@ -6,7 +6,7 @@ use finance_core::{
 };
 use finance_db::{self, Database};
 
-use super::common::TABLE_ROW_HEIGHT;
+use super::common::{filter_group, render_filter_actions, TABLE_ROW_HEIGHT};
 use super::date_input::{date_input, DateInputState};
 
 const SAVINGS_PAGE_SIZE: usize = 100;
@@ -122,116 +122,112 @@ impl SavingsPage {
         }
 
         let mut should_refresh = false;
-        egui::ScrollArea::horizontal()
-            .id_salt("savings_filters_scroll")
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Поиск");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.search)
-                            .hint_text("Название или банк")
-                            .desired_width(180.0),
-                    );
-                    if ui
-                        .add_enabled(!self.search.is_empty(), egui::Button::new("×"))
-                        .on_hover_text("Очистить поиск")
-                        .clicked()
-                    {
-                        self.clear_search_filter();
-                        should_refresh = true;
-                    }
-                    ui.add_space(8.0);
-
-                    ui.label("Банк");
-                    let selected_bank = self
-                        .bank_filter
-                        .and_then(|id| banks.iter().find(|bank| bank.id == id))
-                        .map_or("Все банки", |bank| bank.name.as_str());
-                    egui::ComboBox::from_id_salt("savings_bank_filter")
-                        .selected_text(selected_bank)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.bank_filter, None, "Все банки");
-                            for bank in banks {
-                                ui.selectable_value(
-                                    &mut self.bank_filter,
-                                    Some(bank.id),
-                                    &bank.name,
-                                );
-                            }
-                        });
-                    if ui
-                        .add_enabled(self.bank_filter.is_some(), egui::Button::new("×"))
-                        .on_hover_text("Очистить банк")
-                        .clicked()
-                    {
-                        self.clear_bank_filter();
-                        should_refresh = true;
-                    }
-                    ui.add_space(8.0);
-
-                    ui.label("Валюта");
-                    egui::ComboBox::from_id_salt("savings_currency_filter")
-                        .width(80.0)
-                        .selected_text(self.currency_filter.map_or("Все", Currency::code))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.currency_filter, None, "Все");
-                            for currency in Currency::ALL {
-                                ui.selectable_value(
-                                    &mut self.currency_filter,
-                                    Some(currency),
-                                    currency.code(),
-                                );
-                            }
-                        });
-                    if ui
-                        .add_enabled(self.currency_filter.is_some(), egui::Button::new("×"))
-                        .on_hover_text("Очистить валюту")
-                        .clicked()
-                    {
-                        self.clear_currency_filter();
-                        should_refresh = true;
-                    }
-                    ui.add_space(8.0);
-
-                    ui.label("Статус");
-                    egui::ComboBox::from_id_salt("savings_active_filter")
-                        .selected_text(match self.active_filter {
-                            None => "Все",
-                            Some(true) => "Активные",
-                            Some(false) => "Неактивные",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.active_filter, None, "Все");
-                            ui.selectable_value(&mut self.active_filter, Some(true), "Активные");
-                            ui.selectable_value(&mut self.active_filter, Some(false), "Неактивные");
-                        });
-                    if ui
-                        .add_enabled(self.active_filter.is_some(), egui::Button::new("×"))
-                        .on_hover_text("Очистить статус")
-                        .clicked()
-                    {
-                        self.clear_active_filter();
-                        should_refresh = true;
-                    }
-                    ui.add_space(8.0);
-
-                    if ui.button("Применить").clicked() {
-                        should_refresh = true;
-                    }
-                    let has_active_filters = !self.search.is_empty()
-                        || self.bank_filter.is_some()
-                        || self.currency_filter.is_some()
-                        || self.active_filter.is_some();
-                    if ui
-                        .add_enabled(has_active_filters, egui::Button::new("Сбросить фильтры"))
-                        .clicked()
-                    {
-                        self.reset_filters();
-                        should_refresh = true;
-                    }
-                });
+        let mut apply_filters = false;
+        let mut reset_filters = false;
+        ui.horizontal_wrapped(|ui| {
+            filter_group(ui, 300.0, |ui| {
+                ui.label("Поиск");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.search)
+                        .hint_text("Название или банк")
+                        .desired_width(180.0),
+                );
+                if ui
+                    .add_enabled(!self.search.is_empty(), egui::Button::new("×"))
+                    .on_hover_text("Очистить поиск")
+                    .clicked()
+                {
+                    self.clear_search_filter();
+                    should_refresh = true;
+                }
             });
+
+            filter_group(ui, 240.0, |ui| {
+                ui.label("Банк");
+                let selected_bank = self
+                    .bank_filter
+                    .and_then(|id| banks.iter().find(|bank| bank.id == id))
+                    .map_or("Все банки", |bank| bank.name.as_str());
+                egui::ComboBox::from_id_salt("savings_bank_filter")
+                    .width(150.0)
+                    .selected_text(selected_bank)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.bank_filter, None, "Все банки");
+                        for bank in banks {
+                            ui.selectable_value(&mut self.bank_filter, Some(bank.id), &bank.name);
+                        }
+                    });
+                if ui
+                    .add_enabled(self.bank_filter.is_some(), egui::Button::new("×"))
+                    .on_hover_text("Очистить банк")
+                    .clicked()
+                {
+                    self.clear_bank_filter();
+                    should_refresh = true;
+                }
+            });
+
+            filter_group(ui, 190.0, |ui| {
+                ui.label("Валюта");
+                egui::ComboBox::from_id_salt("savings_currency_filter")
+                    .width(80.0)
+                    .selected_text(self.currency_filter.map_or("Все", Currency::code))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.currency_filter, None, "Все");
+                        for currency in Currency::ALL {
+                            ui.selectable_value(
+                                &mut self.currency_filter,
+                                Some(currency),
+                                currency.code(),
+                            );
+                        }
+                    });
+                if ui
+                    .add_enabled(self.currency_filter.is_some(), egui::Button::new("×"))
+                    .on_hover_text("Очистить валюту")
+                    .clicked()
+                {
+                    self.clear_currency_filter();
+                    should_refresh = true;
+                }
+            });
+
+            filter_group(ui, 210.0, |ui| {
+                ui.label("Статус");
+                egui::ComboBox::from_id_salt("savings_active_filter")
+                    .width(130.0)
+                    .selected_text(match self.active_filter {
+                        None => "Все",
+                        Some(true) => "Активные",
+                        Some(false) => "Неактивные",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.active_filter, None, "Все");
+                        ui.selectable_value(&mut self.active_filter, Some(true), "Активные");
+                        ui.selectable_value(&mut self.active_filter, Some(false), "Неактивные");
+                    });
+                if ui
+                    .add_enabled(self.active_filter.is_some(), egui::Button::new("×"))
+                    .on_hover_text("Очистить статус")
+                    .clicked()
+                {
+                    self.clear_active_filter();
+                    should_refresh = true;
+                }
+            });
+            let has_active_filters = !self.search.is_empty()
+                || self.bank_filter.is_some()
+                || self.currency_filter.is_some()
+                || self.active_filter.is_some();
+            (apply_filters, reset_filters) = render_filter_actions(ui, has_active_filters);
+        });
+
+        if reset_filters {
+            self.reset_filters();
+            should_refresh = true;
+        } else if apply_filters {
+            should_refresh = true;
+        }
 
         ui.separator();
 

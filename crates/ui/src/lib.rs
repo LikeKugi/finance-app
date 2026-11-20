@@ -167,7 +167,6 @@ struct FinanceApp {
     message: Option<(String, bool)>,
 }
 
-const TRANSACTION_FILTERS_SCROLL_AREA_ID: &str = "transaction_filters_scroll_area";
 const TRANSACTION_TABLE_SCROLL_AREA_ID: &str = "transaction_table_scroll_area";
 const DIRECTORY_CATEGORIES_SCROLL_AREA_ID: &str = "directory_categories_scroll_area";
 const DIRECTORY_BANKS_SCROLL_AREA_ID: &str = "directory_banks_scroll_area";
@@ -607,8 +606,8 @@ mod tests {
 
     use super::category_tree::{category_tree_labels, category_tree_rows};
     use super::common::{
-        render_analysis_footer, render_transaction_balance_footer, render_transaction_list_total,
-        TABLE_ROW_HEIGHT,
+        filter_group, render_analysis_footer, render_filter_actions,
+        render_transaction_balance_footer, render_transaction_list_total, TABLE_ROW_HEIGHT,
     };
     use super::directories_page::currency_rate_label;
     use super::transactions_page::{
@@ -617,8 +616,7 @@ mod tests {
     use super::{
         AnalysisPage, Category, CurrencyForm, DirectoryRightTab, FinanceApp, ModuleTab,
         SavingsPage, TransactionKind, DIRECTORY_BANKS_SCROLL_AREA_ID,
-        DIRECTORY_CATEGORIES_SCROLL_AREA_ID, TRANSACTION_FILTERS_SCROLL_AREA_ID,
-        TRANSACTION_TABLE_SCROLL_AREA_ID,
+        DIRECTORY_CATEGORIES_SCROLL_AREA_ID,
     };
 
     fn category(id: i64, parent_id: Option<i64>, is_active: bool) -> Category {
@@ -1427,30 +1425,114 @@ mod tests {
     }
 
     #[test]
-    fn transaction_scroll_areas_have_distinct_ids() {
+    fn filter_actions_stay_at_the_right_end_of_the_last_wrapped_row() {
         let context = egui::Context::default();
-        let mut scroll_area_ids = None;
+        let render_filter_layout = |width| {
+            let mut output = None;
+            for _ in 0..2 {
+                output = Some(context.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, 720.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |context| {
+                        egui::CentralPanel::default().show(context, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                for index in 0..4 {
+                                    filter_group(ui, 260.0, |ui| {
+                                        ui.label(format!("Фильтр {index}"));
+                                    });
+                                }
+                                render_filter_actions(ui, true);
+                            });
+                        });
+                    },
+                ));
+            }
+            output.expect("filter layout should render twice")
+        };
+        let text_right = |output: &egui::FullOutput, text: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|clipped_shape| match &clipped_shape.shape {
+                    egui::epaint::Shape::Text(shape) if shape.galley.job.text == text => {
+                        Some(shape.pos.x + shape.galley.size().x)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{text} should be rendered"))
+        };
+        let wide = render_filter_layout(2_000.0);
+        let narrow = render_filter_layout(600.0);
 
-        let _output = context.run(Default::default(), |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                let filters = egui::ScrollArea::horizontal()
-                    .id_salt(TRANSACTION_FILTERS_SCROLL_AREA_ID)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.label("Фильтры");
-                    });
-                let table = egui::ScrollArea::vertical()
-                    .id_salt(TRANSACTION_TABLE_SCROLL_AREA_ID)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.label("Таблица");
-                    });
-                scroll_area_ids = Some((filters.id, table.id));
-            });
-        });
+        let wide_filter_y: Vec<_> = (0..4)
+            .map(|index| text_positions(&wide, &format!("Фильтр {index}"))[0].y)
+            .collect();
+        assert!(wide_filter_y
+            .iter()
+            .all(|y| (*y - wide_filter_y[0]).abs() < 6.0));
+        let wide_actions_y = text_positions(&wide, "Применить")[0].y;
+        assert!(
+            (wide_actions_y - wide_filter_y[0]).abs() < 6.0,
+            "wide filters: {wide_filter_y:?}, actions: {wide_actions_y}"
+        );
+        assert!(text_right(&wide, "Сбросить фильтры") > 1_960.0);
 
-        let (filters_id, table_id) = scroll_area_ids.expect("egui should render both scroll areas");
-        assert_ne!(filters_id, table_id);
+        let narrow_filter_y: Vec<_> = (0..4)
+            .map(|index| text_positions(&narrow, &format!("Фильтр {index}"))[0].y)
+            .collect();
+        let last_filter_y = narrow_filter_y.iter().copied().fold(0.0, f32::max);
+        let narrow_actions_y = text_positions(&narrow, "Применить")[0].y;
+        assert!(narrow_actions_y >= last_filter_y);
+        assert!((narrow_actions_y - text_positions(&narrow, "Сбросить фильтры")[0].y).abs() < 6.0);
+        assert!(text_right(&narrow, "Сбросить фильтры") > 560.0);
+    }
+
+    #[test]
+    fn transaction_page_filters_wrap_and_keep_actions_at_the_right() {
+        for kind in [TransactionKind::Income, TransactionKind::Expense] {
+            let mut app = filtered_transaction_app(kind);
+            let context = egui::Context::default();
+            let wide = render_transactions_at_width(&mut app, &context, kind, 2_000.0);
+            let narrow = render_transactions_at_width(&mut app, &context, kind, 1_280.0);
+            let filter_labels = ["Поиск", "С", "По", "Категория:", "Валюта:"];
+            let wide_filter_y: Vec<_> = filter_labels
+                .iter()
+                .map(|label| text_positions(&wide, label)[0].y)
+                .collect();
+            assert!(wide_filter_y
+                .iter()
+                .all(|y| (*y - wide_filter_y[0]).abs() < 6.0));
+            let wide_apply_y = text_positions(&wide, "Применить")[0].y;
+            assert!((wide_apply_y - wide_filter_y[0]).abs() < 6.0);
+
+            let narrow_filter_y: Vec<_> = filter_labels
+                .iter()
+                .map(|label| text_positions(&narrow, label)[0].y)
+                .collect();
+            let last_filter_y = narrow_filter_y.iter().copied().fold(0.0, f32::max);
+            let narrow_apply = text_positions(&narrow, "Применить")[0];
+            let narrow_reset = text_positions(&narrow, "Сбросить фильтры")[0];
+            assert!(narrow_apply.y > last_filter_y);
+            assert!((narrow_apply.y - narrow_reset.y).abs() < 6.0);
+            let reset_right = narrow
+                .shapes
+                .iter()
+                .find_map(|clipped_shape| match &clipped_shape.shape {
+                    egui::epaint::Shape::Text(text_shape)
+                        if text_shape.galley.job.text == "Сбросить фильтры" =>
+                    {
+                        Some(text_shape.pos.x + text_shape.galley.size().x)
+                    }
+                    _ => None,
+                })
+                .expect("reset action should render");
+            assert!(reset_right > 1_240.0);
+        }
     }
 
     #[test]
@@ -1605,23 +1687,55 @@ mod tests {
     fn savings_filters_render_in_search_bank_currency_status_order_with_updated_actions() {
         let database =
             finance_db::Database::open_in_memory().expect("in-memory SQLite should open");
-        let mut savings_page = SavingsPage::default();
-        let context = egui::Context::default();
-        let output = context.run(Default::default(), |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                savings_page.render(context, ui, &database, &[]);
-            });
-        });
+        for width in [2_000.0, 1_280.0, 900.0] {
+            let mut savings_page = SavingsPage::default();
+            let context = egui::Context::default();
+            let mut output = None;
+            for _ in 0..2 {
+                output = Some(context.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, 720.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |context| {
+                        egui::CentralPanel::default().show(context, |ui| {
+                            savings_page.render(context, ui, &database, &[]);
+                        });
+                    },
+                ));
+            }
+            let output = output.expect("savings filters should render twice");
 
-        let search = text_positions(&output, "Поиск")[0];
-        let bank = text_positions(&output, "Банк")[0];
-        let currency = text_positions(&output, "Валюта")[0];
-        let status = text_positions(&output, "Статус")[0];
-        assert!(search.x < bank.x && bank.x < currency.x && currency.x < status.x);
-        assert_eq!(text_positions(&output, "Применить").len(), 1);
-        assert_eq!(text_positions(&output, "Сбросить фильтры").len(), 1);
-        assert!(text_positions(&output, "Применить фильтры").is_empty());
-        assert!(text_positions(&output, "Сбросить").is_empty());
+            let search = text_positions(&output, "Поиск")[0];
+            let bank = text_positions(&output, "Банк")[0];
+            let currency = text_positions(&output, "Валюта")[0];
+            let status = text_positions(&output, "Статус")[0];
+            assert!(search.y <= bank.y && bank.y <= currency.y && currency.y <= status.y);
+            assert_eq!(text_positions(&output, "Применить").len(), 1);
+            assert_eq!(text_positions(&output, "Сбросить фильтры").len(), 1);
+            assert!(text_positions(&output, "Применить фильтры").is_empty());
+            assert!(text_positions(&output, "Сбросить").is_empty());
+            let apply = text_positions(&output, "Применить")[0];
+            let reset = text_positions(&output, "Сбросить фильтры")[0];
+            assert!(apply.y >= status.y);
+            assert!((apply.y - reset.y).abs() < 6.0);
+            let reset_right = output
+                .shapes
+                .iter()
+                .find_map(|clipped_shape| match &clipped_shape.shape {
+                    egui::epaint::Shape::Text(text_shape)
+                        if text_shape.galley.job.text == "Сбросить фильтры" =>
+                    {
+                        Some(text_shape.pos.x + text_shape.galley.size().x)
+                    }
+                    _ => None,
+                })
+                .expect("reset action should render");
+            assert!(reset_right > width - 40.0);
+        }
     }
 
     #[test]

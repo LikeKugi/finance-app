@@ -11,6 +11,7 @@ use finance_core::{
 use rust_decimal::prelude::ToPrimitive;
 
 use super::category_tree::category_tree_labels;
+use super::common::render_filter_actions;
 use super::date_input::{date_input, DateInputState};
 
 const ANALYSIS_COLUMN_MIN_WIDTHS: [f32; 4] = [170.0, 75.0, 120.0, 75.0];
@@ -197,24 +198,7 @@ impl AnalysisPage {
                     }
                 },
             );
-            ui.allocate_ui_with_layout(
-                egui::vec2(230.0, filter_height),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    if ui.button("Применить").clicked() {
-                        apply_filters = true;
-                    }
-                    if ui
-                        .add_enabled(
-                            self.has_active_filters(),
-                            egui::Button::new("Сбросить фильтры"),
-                        )
-                        .clicked()
-                    {
-                        reset_filters = true;
-                    }
-                },
-            );
+            (apply_filters, reset_filters) = render_filter_actions(ui, self.has_active_filters());
         });
         ui.separator();
 
@@ -1555,7 +1539,20 @@ mod tests {
             .iter()
             .map(|position| position.y)
             .fold(f32::NEG_INFINITY, f32::max);
-        assert!(max_y - min_y < 6.0);
+        assert!(
+            max_y - min_y < 6.0,
+            "wide filter positions: {wide_positions:?}"
+        );
+        let wide_reset = text_position(&wide_output, "Сбросить фильтры").expect("reset action");
+        let wide_reset_right = text_right_edge_on_row(
+            &wide_output,
+            "Сбросить фильтры",
+            wide_reset.y,
+            1_900.0,
+            1_000.0,
+        )
+        .expect("reset action right edge");
+        assert!(wide_reset_right > 1_960.0);
 
         let start_y = text_position(&narrow_output, "2027-01-01")
             .expect("start date filter")
@@ -1564,6 +1561,19 @@ mod tests {
             .expect("expense category selection")
             .y;
         assert!(expense_category_y > start_y);
+        let narrow_apply = text_position(&narrow_output, "Применить").expect("apply action");
+        let narrow_reset = text_position(&narrow_output, "Сбросить фильтры").expect("reset action");
+        assert!(narrow_apply.y >= expense_category_y);
+        assert!((narrow_apply.y - narrow_reset.y).abs() < 6.0);
+        let narrow_reset_right = text_right_edge_on_row(
+            &narrow_output,
+            "Сбросить фильтры",
+            narrow_reset.y,
+            800.0,
+            450.0,
+        )
+        .expect("reset action right edge");
+        assert!(narrow_reset_right > 860.0);
     }
 
     #[test]
