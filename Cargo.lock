@@ -1634,6 +1634,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "directories",
+ "embed-resource",
  "finance-db",
  "finance-ui",
  "tracing",
