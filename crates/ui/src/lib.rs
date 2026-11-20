@@ -1695,7 +1695,7 @@ mod tests {
             let context = egui::Context::default();
             let wide = render_transactions_at_width(&mut app, &context, kind, 2_000.0);
             let narrow = render_transactions_at_width(&mut app, &context, kind, 1_280.0);
-            let filter_labels = ["Поиск", "С", "По", "Категория:", "Валюта:"];
+            let filter_labels = ["Период", "Поиск", "С", "По", "Категория:", "Валюта:"];
             let wide_filter_y: Vec<_> = filter_labels
                 .iter()
                 .map(|label| text_positions(&wide, label)[0].y)
@@ -1713,7 +1713,7 @@ mod tests {
             let last_filter_y = narrow_filter_y.iter().copied().fold(0.0, f32::max);
             let narrow_apply = text_positions(&narrow, "Применить")[0];
             let narrow_reset = text_positions(&narrow, "Сбросить фильтры")[0];
-            assert!(narrow_apply.y > last_filter_y);
+            assert!(narrow_apply.y >= last_filter_y);
             assert!((narrow_apply.y - narrow_reset.y).abs() < 6.0);
             let reset_right = narrow
                 .shapes

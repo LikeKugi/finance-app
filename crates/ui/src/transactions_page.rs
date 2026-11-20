@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 
 use super::category_tree::category_tree_labels;
-use super::common::{filter_group, filter_layout, render_filter_actions, TABLE_ROW_HEIGHT};
+use super::common::{
+    filter_group, filter_layout, render_filter_actions, render_period_filter, set_period_dates,
+    TABLE_ROW_HEIGHT,
+};
 use super::date_input::date_input;
 use super::{DeleteTarget, FinanceApp, TransactionForm, TRANSACTION_TABLE_SCROLL_AREA_ID};
 use chrono::NaiveDate;
@@ -421,6 +424,19 @@ impl FinanceApp {
         let mut apply_filters = false;
         let mut reset_filters = false;
         filter_layout(ui, |ui| {
+            filter_group(ui, 185.0, |ui| {
+                if let Some(period) = render_period_filter(ui, "transaction_date_period") {
+                    if set_period_dates(
+                        period,
+                        chrono::Local::now().date_naive(),
+                        &mut self.from_date,
+                        &mut self.to_date,
+                    ) {
+                        self.from_date_input.reset();
+                        self.to_date_input.reset();
+                    }
+                }
+            });
             filter_group(ui, 260.0, |ui| {
                 ui.label("Поиск");
                 ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(150.0));

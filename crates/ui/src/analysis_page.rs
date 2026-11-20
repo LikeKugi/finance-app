@@ -11,7 +11,7 @@ use finance_core::{
 use rust_decimal::prelude::ToPrimitive;
 
 use super::category_tree::category_tree_labels;
-use super::common::{filter_layout, render_filter_actions};
+use super::common::{filter_layout, render_filter_actions, render_period_filter, set_period_dates};
 use super::date_input::{date_input, DateInputState};
 
 const ANALYSIS_COLUMN_MIN_WIDTHS: [f32; 4] = [170.0, 75.0, 120.0, 75.0];
@@ -116,6 +116,23 @@ impl AnalysisPage {
         let mut clear_expense_category = false;
         let filter_height = ui.spacing().interact_size.y;
         filter_layout(ui, |ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(252.0, filter_height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    if let Some(period) = render_period_filter(ui, "analysis_date_period") {
+                        if set_period_dates(
+                            period,
+                            chrono::Local::now().date_naive(),
+                            &mut self.from_date,
+                            &mut self.to_date,
+                        ) {
+                            self.from_date_input.reset();
+                            self.to_date_input.reset();
+                        }
+                    }
+                },
+            );
             ui.allocate_ui_with_layout(
                 egui::vec2(252.0, filter_height),
                 egui::Layout::left_to_right(egui::Align::Center),

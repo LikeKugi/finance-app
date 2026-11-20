@@ -25,6 +25,7 @@ Shared date pickers retain previous/next-month arrow navigation and also let use
 - Filter groups and wrapped rows have a small, consistent gap for visual separation.
 - `Применить` and `Сбросить фильтры` remain aligned to the right of the final filter row, moving to the bottom-right row when needed.
 - Search text and date edits do not reload the list on their own. Use `Применить` to apply them.
+- The `Период` selector fills both date fields for the current local calendar year, quarter, month, week (Monday through Sunday), or day. The resulting boundaries are inclusive; selecting another period replaces both values, and users can edit either date afterward. Use `Применить` to apply the selected range.
 - Selecting a category or currency immediately reloads the list, unlike editing search or date fields. The currency options are `Все`, `RUB`, and `USD`.
 - Each populated filter, including currency, has an `×` control. Clearing a filter immediately reloads the list using the other values currently in the controls, including values that were edited but not yet applied.
 - `Сбросить фильтры` clears all filters and reloads the list. It is disabled when no filters are active.
@@ -46,6 +47,7 @@ Shared date pickers retain previous/next-month arrow navigation and also let use
 - Filter groups and wrapped rows have a small, consistent gap for visual separation.
 - `Применить` and `Сбросить фильтры` remain aligned to the right of the final filter row, moving to the bottom-right row when needed.
 - Date and category edits remain pending until `Применить` is clicked. The report continues to reflect the last applied filter set.
+- The `Период` selector fills both date fields for the current local calendar year, quarter, month, week (Monday through Sunday), or day. The resulting boundaries are inclusive; selecting another period replaces both values, and users can edit either date afterward. Use `Применить` to apply the selected range.
 - Each of the four filters has an `×` control. Clearing one immediately applies the other values currently in the controls, including edits that were not yet applied.
 - `Сбросить фильтры` clears all filters and immediately reloads the report without conditions; it is disabled when no filters are active.
 - Invalid dates or a start date later than the end date are reported without replacing the displayed report with an empty result.
