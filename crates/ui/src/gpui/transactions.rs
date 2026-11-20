@@ -16,6 +16,7 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::AlertDialog;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, IndexPath, WindowExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -1027,9 +1028,13 @@ impl TransactionsPage {
             .when(index % 2 == 1, |row| row.bg(stripe))
             .children(values.into_iter().enumerate().map(|(column, value)| {
                 if is_income {
-                    income_cell(column, value)
+                    if column == 4 && !value.is_empty() {
+                        income_comment_cell(id, value).into_any_element()
+                    } else {
+                        income_cell(column, value).into_any_element()
+                    }
                 } else {
-                    cell(COLUMN_WIDTHS[column], value)
+                    cell(COLUMN_WIDTHS[column], value).into_any_element()
                 }
             }))
             .child(
@@ -1156,6 +1161,21 @@ fn income_cell(index: usize, text: String) -> Div {
             .whitespace_nowrap()
             .child(text),
     }
+}
+
+fn income_comment_cell(id: i64, text: String) -> AnyElement {
+    let tooltip_text = text.clone();
+    div()
+        .id(("income-comment", id as usize))
+        .flex_1()
+        .min_w_0()
+        .px_2()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .child(text)
+        .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
+        .into_any_element()
 }
 
 pub(crate) fn period_label(from: Option<NaiveDate>, to: Option<NaiveDate>) -> String {
