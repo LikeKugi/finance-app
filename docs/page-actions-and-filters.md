@@ -24,10 +24,10 @@ Shared compact DatePicker controls retain previous/next-month arrow navigation a
 
 - The Income table fills the available page width and orders columns as `Дата`, `Категория`, `Сумма`, `Валюта`, `Комментарии`, and `Действия`. The Comments column expands into the remaining width, while Actions stays at the far right; Expenses retains its existing column order.
 - Income comment cells show the first 25 characters of the first line; longer or multiline comments end with an ellipsis. Clicking a non-empty comment opens a dialog with the full original text.
-- Filters appear above the table and wrap onto additional lines when they do not fit; horizontal scrolling is not used.
+- Income filters appear above the table and wrap onto additional lines when they do not fit; horizontal scrolling is not used. Income controls are Small, each control has a label above it, and Search has a Search icon suffix. Expenses retains its existing filter presentation.
 - The filter order is `Поиск`, `Период`, start date (`С`), end date (`По`), category, and currency.
 - Filter groups and wrapped rows have a small, consistent gap for visual separation.
-- `Применить` and `Сбросить фильтры` remain aligned to the right of the final filter row, moving to the bottom-right row when needed.
+- Income `Применить` and `Сбросить фильтры` buttons use Small size and share a bottom row aligned to the right of the filters. Expenses retains its existing button presentation.
 - Search text and date edits do not reload the list on their own. Use `Применить` to apply them.
 - The date filters use compact DatePicker controls. The `Период` selector defaults to `Весь период`. Selecting it clears both dates; selecting year, quarter, month, week (Monday through Sunday), or day fills both controls using the current local calendar, with inclusive boundaries. Users can choose either date afterward. Use `Применить` to apply the selected range.
 - Selecting a category or currency immediately reloads the list, unlike editing search or date fields. The currency options are `Все`, `RUB`, and `USD`.

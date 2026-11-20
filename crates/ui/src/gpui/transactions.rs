@@ -19,7 +19,7 @@ use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _, WindowExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _, WindowExt as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -696,7 +696,115 @@ impl TransactionsPage {
 
     // ---- отрисовка ----
 
-    fn render_filters(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_filters(&mut self, cx: &mut Context<Self>) -> Div {
+        if self.kind == TransactionKind::Income {
+            return self.render_income_filters(cx);
+        }
+
+        self.render_expense_filters(cx)
+    }
+
+    fn render_income_filters(&mut self, cx: &mut Context<Self>) -> Div {
+        let active = self.has_active_filters(cx);
+        let this = cx.entity();
+        let filter = |label: &'static str, width: f32, control: AnyElement| {
+            div()
+                .w(px(width))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(label)
+                .child(control)
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_start()
+                    .gap_2()
+                    .child(filter(
+                        "Поиск",
+                        200.0,
+                        Input::new(&self.search)
+                            .cleanable(true)
+                            .small()
+                            .suffix(Icon::new(IconName::Search).small())
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Период",
+                        140.0,
+                        Select::new(&self.period_select)
+                            .placeholder("Период")
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "С",
+                        150.0,
+                        DatePicker::new(&self.from)
+                            .placeholder("Выбрать дату")
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "По",
+                        150.0,
+                        DatePicker::new(&self.to)
+                            .placeholder("Выбрать дату")
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Категория",
+                        260.0,
+                        Select::new(&self.category_filter_select)
+                            .placeholder("Категория")
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Валюта",
+                        110.0,
+                        Select::new(&self.currency_filter_select)
+                            .placeholder("Валюта")
+                            .small()
+                            .into_any_element(),
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("filters-apply")
+                            .primary()
+                            .small()
+                            .label("Применить")
+                            .on_click({
+                                let this = this.clone();
+                                move |_, _, cx| this.update(cx, |page, cx| page.refresh(cx))
+                            }),
+                    )
+                    .child(
+                        Button::new("filters-reset")
+                            .small()
+                            .label("Сбросить фильтры")
+                            .disabled(!active)
+                            .on_click(
+                                cx.listener(|page, _, window, cx| page.reset_filters(window, cx)),
+                            ),
+                    ),
+            )
+    }
+
+    fn render_expense_filters(&mut self, cx: &mut Context<Self>) -> Div {
         let active = self.has_active_filters(cx);
         let this = cx.entity();
         div()
