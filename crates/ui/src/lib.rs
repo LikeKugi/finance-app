@@ -101,6 +101,7 @@ struct TransactionForm {
     comment: String,
     payment_document_id: Option<i64>,
     affects_deposit_rate: bool,
+    payment_document_balance_applied: bool,
 }
 
 #[derive(Default)]
@@ -603,6 +604,8 @@ mod tests {
     use chrono::NaiveDate;
     use eframe::egui;
     use finance_core::{Currency, FinancialTransaction, TransactionBalance};
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
 
     use super::category_tree::{category_tree_labels, category_tree_rows};
     use super::common::{
@@ -664,6 +667,11 @@ mod tests {
         database
             .execute_batch(include_str!("../../db/migrations/V9__savings_currency.sql"))
             .unwrap();
+        database
+            .execute_batch(include_str!(
+                "../../db/migrations/V10__expense_card_balances.sql"
+            ))
+            .unwrap();
 
         let (category_table, transaction_table, active_tab) = match kind {
             TransactionKind::Income => ("income_categories", "incomes", ModuleTab::Income),
@@ -711,6 +719,7 @@ mod tests {
             include_str!("../../db/migrations/V7__expense_cards.sql"),
             include_str!("../../db/migrations/V8__currencies.sql"),
             include_str!("../../db/migrations/V9__savings_currency.sql"),
+            include_str!("../../db/migrations/V10__expense_card_balances.sql"),
         ] {
             database.execute_batch(migration).unwrap();
         }
@@ -832,9 +841,15 @@ mod tests {
             .unwrap()
             .clone();
         assert!(saved.affects_deposit_rate);
+        assert!(!saved.payment_document_balance_applied);
+        assert_eq!(
+            finance_db::list_payment_documents(&app.database, None, None, None).unwrap()[0].amount,
+            5000.into()
+        );
         app.edit_transaction(&saved);
         assert_eq!(app.transaction_form.payment_document_id, Some(card));
         assert!(app.transaction_form.affects_deposit_rate);
+        assert!(!app.transaction_form.payment_document_balance_applied);
 
         app.transaction_form.affects_deposit_rate = false;
         app.save_transaction(TransactionKind::Expense);
@@ -852,6 +867,63 @@ mod tests {
         .find(|transaction| transaction.payment_document_id == Some(card))
         .unwrap();
         assert!(!updated.affects_deposit_rate);
+        assert!(!updated.payment_document_balance_applied);
+        assert_eq!(
+            finance_db::list_payment_documents(&app.database, None, None, None).unwrap()[0].amount,
+            5000.into()
+        );
+    }
+
+    #[test]
+    fn expense_form_debits_and_edits_a_debit_card_balance() {
+        let mut app = filtered_transaction_app(TransactionKind::Expense);
+        let bank = finance_db::save_bank(&app.database, None, "Банк", "").unwrap();
+        let card = finance_db::save_payment_document(
+            &app.database,
+            None,
+            &finance_core::PaymentDocumentDetails {
+                bank_id: bank,
+                payment_system: finance_core::PaymentSystem::Mir,
+                card_type: finance_core::PaymentCardType::Debit,
+                amount: 100.into(),
+                currency: Some(Currency::Rub),
+                due_date: None,
+                grace_period_days: None,
+                affects_deposit_rate: false,
+                min_monthly_spend: None,
+                savings_ids: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        app.start_new_transaction();
+        app.transaction_form.date = "2024-01-20".to_owned();
+        app.transaction_form.category_id = Some(1);
+        app.transaction_form.amount = "12.50".to_owned();
+        app.transaction_form.comment = "найти расход по карте".to_owned();
+        app.transaction_form.payment_document_id = Some(card);
+        app.save_transaction(TransactionKind::Expense);
+
+        let saved = app
+            .transactions
+            .iter()
+            .find(|transaction| transaction.payment_document_id == Some(card))
+            .unwrap()
+            .clone();
+        assert!(saved.payment_document_balance_applied);
+        assert_eq!(
+            finance_db::list_payment_documents(&app.database, None, None, None).unwrap()[0].amount,
+            Decimal::from_str("87.5").unwrap()
+        );
+
+        app.edit_transaction(&saved);
+        assert!(app.transaction_form.payment_document_balance_applied);
+        app.transaction_form.amount = "20".to_owned();
+        app.save_transaction(TransactionKind::Expense);
+        assert_eq!(
+            finance_db::list_payment_documents(&app.database, None, None, None).unwrap()[0].amount,
+            Decimal::from(80)
+        );
     }
 
     #[test]
@@ -1119,6 +1191,7 @@ mod tests {
             comment: String::new(),
             payment_document_id: None,
             affects_deposit_rate: false,
+            payment_document_balance_applied: false,
         }
     }
 

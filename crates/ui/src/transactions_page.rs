@@ -28,8 +28,12 @@ pub(super) fn transaction_column_widths(available_width: f32) -> [f32; 6] {
 }
 
 fn payment_document_label(card: &PaymentDocument) -> String {
+    let card_type = match card.card_type {
+        PaymentCardType::Debit => "дебетовая",
+        PaymentCardType::Credit => "кредитная",
+    };
     format!(
-        "{} — {} #{} ({})",
+        "{} — {} #{} ({card_type}, {})",
         card.bank_name,
         card.payment_system.code(),
         card.id,
@@ -96,6 +100,7 @@ impl FinanceApp {
             comment: transaction.comment.clone(),
             payment_document_id: transaction.payment_document_id,
             affects_deposit_rate: transaction.affects_deposit_rate,
+            payment_document_balance_applied: transaction.payment_document_balance_applied,
         };
         self.show_transaction_form = true;
     }
@@ -361,7 +366,19 @@ impl FinanceApp {
             if !rate_eligible {
                 ui.weak("Для учёта выберите карту с совпадающей валютой и включённым влиянием на ставку.");
             }
-            ui.weak("Связь с картой и отметка не изменяют её баланс; оценка процентов пока не рассчитывается.");
+            ui.weak("Расход с дебетовой карты списывается с её баланса; кредитный лимит не меняется. Оценка процентов пока не рассчитывается.");
+            if self.transaction_form.id.is_some()
+                && !self.transaction_form.payment_document_balance_applied
+                && self.transaction_cards.iter().any(|card| {
+                    Some(card.id) == self.transaction_form.payment_document_id
+                        && card.card_type == PaymentCardType::Debit
+                })
+            {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "Этот расход ранее не списывался с баланса. При сохранении будет списана его текущая сумма.",
+                );
+            }
             ui.add_space(8.0);
         }
         ui.horizontal(|ui| {

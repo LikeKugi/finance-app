@@ -1420,6 +1420,11 @@ mod tests {
             .execute_batch(include_str!("../../db/migrations/V9__savings_currency.sql"))
             .expect("savings currency migration should apply");
         database
+            .execute_batch(include_str!(
+                "../../db/migrations/V10__expense_card_balances.sql"
+            ))
+            .expect("expense card balance migration should apply");
+        database
             .execute_batch(
                 "INSERT INTO banks (id, name) VALUES (1, 'Банк Альфа'), (2, 'Банк Бета');
                  INSERT INTO savings (

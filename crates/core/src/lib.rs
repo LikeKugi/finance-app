@@ -200,6 +200,7 @@ pub struct FinancialTransaction {
     pub comment: String,
     pub payment_document_id: Option<i64>,
     pub affects_deposit_rate: bool,
+    pub payment_document_balance_applied: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

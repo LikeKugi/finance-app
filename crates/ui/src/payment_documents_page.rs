@@ -767,6 +767,11 @@ mod tests {
             .execute_batch(include_str!("../../db/migrations/V9__savings_currency.sql"))
             .unwrap();
         database
+            .execute_batch(include_str!(
+                "../../db/migrations/V10__expense_card_balances.sql"
+            ))
+            .unwrap();
+        database
             .execute_batch("INSERT INTO banks (id, name) VALUES (1, 'Банк Альфа');")
             .unwrap();
         database
