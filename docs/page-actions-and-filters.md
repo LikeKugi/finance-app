@@ -21,6 +21,7 @@ Shared date pickers retain previous/next-month arrow navigation and also let use
 
 ### Income and Expenses
 
+- The Income table fills the available page width and orders columns as `Дата`, `Категория`, `Сумма`, `Валюта`, `Комментарии`, and `Действия`. The Comments column expands into the remaining width, while Actions stays at the far right; Expenses retains its existing column order.
 - Filters appear above the table and wrap onto additional lines when they do not fit; horizontal scrolling is not used.
 - The filter order is `Поиск`, `Период`, start date (`С`), end date (`По`), category, and currency.
 - Filter groups and wrapped rows have a small, consistent gap for visual separation.

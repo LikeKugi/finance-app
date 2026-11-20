@@ -922,28 +922,44 @@ impl TransactionsPage {
         let border = cx.theme().border;
         let stripe = cx.theme().muted;
         let count = self.transactions.len();
+        let is_income = self.kind == TransactionKind::Income;
+        let headers = if is_income {
+            [
+                "Дата",
+                "Категория",
+                "Сумма",
+                "Валюта",
+                "Комментарии",
+                "Действия",
+            ]
+        } else {
+            [
+                "Дата",
+                "Сумма",
+                "Валюта",
+                "Категория",
+                "Комментарий",
+                "Действия",
+            ]
+        };
         let header = div()
             .flex()
+            .when(is_income, |header| header.w_full())
             .h(px(ROW_HEIGHT))
             .items_center()
             .border_b_1()
             .border_color(border)
             .font_weight(FontWeight::BOLD)
-            .children(
-                [
-                    "Дата",
-                    "Сумма",
-                    "Валюта",
-                    "Категория",
-                    "Комментарий",
-                    "Действия",
-                ]
-                .into_iter()
-                .zip(COLUMN_WIDTHS)
-                .map(|(title, width)| cell(width, title.into())),
-            );
+            .children(headers.into_iter().enumerate().map(|(index, title)| {
+                if is_income {
+                    income_cell(index, title.into())
+                } else {
+                    cell(COLUMN_WIDTHS[index], title.into())
+                }
+            }));
         let body = if count == 0 {
             div()
+                .when(is_income, |body| body.w_full())
                 .p_4()
                 .child("Операций по выбранным условиям нет.")
                 .into_any_element()
@@ -958,6 +974,7 @@ impl TransactionsPage {
                 }),
             )
             .flex_1()
+            .when(is_income, |body| body.w_full())
             .into_any_element()
         };
         div()
@@ -965,6 +982,7 @@ impl TransactionsPage {
             .min_h_0()
             .flex()
             .flex_col()
+            .when(is_income, |table| table.w_full())
             .child(header)
             .child(body)
     }
@@ -977,32 +995,49 @@ impl TransactionsPage {
     ) -> impl IntoElement {
         let transaction = self.transactions[index].clone();
         let id = transaction.id;
-        let values = [
-            transaction.date.format("%d.%m.%Y").to_string(),
-            transaction.amount.to_string(),
-            transaction.currency.code().to_owned(),
-            transaction.category_name.clone(),
-            transaction.comment.clone(),
-        ];
+        let is_income = self.kind == TransactionKind::Income;
+        let date = transaction.date.format("%d.%m.%Y").to_string();
+        let amount = transaction.amount.to_string();
+        let currency = transaction.currency.code().to_owned();
+        let values = if is_income {
+            vec![
+                date,
+                transaction.category_name.clone(),
+                amount,
+                currency,
+                transaction.comment.clone(),
+            ]
+        } else {
+            vec![
+                date,
+                amount,
+                currency,
+                transaction.category_name.clone(),
+                transaction.comment.clone(),
+            ]
+        };
         let edit_target = transaction.clone();
         let delete_target = transaction;
         div()
             .id(("transaction-row", id as usize))
             .flex()
+            .when(is_income, |row| row.w_full())
             .h(px(ROW_HEIGHT))
             .items_center()
             .when(index % 2 == 1, |row| row.bg(stripe))
-            .children(
-                values
-                    .into_iter()
-                    .zip(COLUMN_WIDTHS)
-                    .map(|(v, w)| cell(w, v)),
-            )
+            .children(values.into_iter().enumerate().map(|(column, value)| {
+                if is_income {
+                    income_cell(column, value)
+                } else {
+                    cell(COLUMN_WIDTHS[column], value)
+                }
+            }))
             .child(
                 div()
                     .w(px(COLUMN_WIDTHS[5]))
                     .flex()
                     .gap_1()
+                    .when(is_income, |actions| actions.justify_end())
                     .child(
                         Button::new(("edit", id as usize))
                             .compact()
@@ -1094,9 +1129,33 @@ impl TransactionsPage {
 }
 
 const COLUMN_WIDTHS: [f32; 6] = [115.0, 135.0, 90.0, 220.0, 320.0, 180.0];
+const INCOME_FIXED_COLUMN_WIDTHS: [f32; 4] = [115.0, 220.0, 135.0, 90.0];
+const ACTIONS_COLUMN_WIDTH: f32 = 180.0;
 
 fn cell(width: f32, text: String) -> Div {
     div().w(px(width)).px_2().overflow_hidden().child(text)
+}
+
+fn income_cell(index: usize, text: String) -> Div {
+    match index {
+        0..=3 => cell(INCOME_FIXED_COLUMN_WIDTHS[index], text),
+        4 => div()
+            .flex_1()
+            .min_w_0()
+            .px_2()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .child(text),
+        _ => div()
+            .w(px(ACTIONS_COLUMN_WIDTH))
+            .px_2()
+            .flex()
+            .justify_end()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .child(text),
+    }
 }
 
 pub(crate) fn period_label(from: Option<NaiveDate>, to: Option<NaiveDate>) -> String {
