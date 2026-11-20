@@ -86,7 +86,7 @@ fn eligible_cards(cards: &[PaymentDocument], currency: Option<Currency>) -> Vec<
 
 struct Form {
     id: Option<i64>,
-    date: FormDate,
+    date: Entity<DatePickerState>,
     amount: Entity<InputState>,
     comment: Entity<TextareaState>,
     currency: Option<Currency>,
@@ -101,11 +101,6 @@ struct Form {
     balance_applied: bool,
     suggestions: Vec<String>,
     initial_values: FormValues,
-}
-
-enum FormDate {
-    Input(Entity<InputState>),
-    Picker(Entity<DatePickerState>),
 }
 
 #[derive(Debug, PartialEq)]
@@ -463,25 +458,15 @@ impl TransactionsPage {
             affects_deposit_rate: existing.is_some_and(|t| t.affects_deposit_rate),
         };
 
-        let form_date = if self.kind == TransactionKind::Income {
-            let picker = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
-            picker.update(cx, |state, cx| {
-                state.set_date(Date::Single(Some(date)), window, cx)
-            });
-            self._subscriptions.push(cx.subscribe_in(
-                &picker,
-                window,
-                |_, _, _: &DatePickerEvent, _, cx| cx.notify(),
-            ));
-            FormDate::Picker(picker)
-        } else {
-            let input = cx.new(|cx| {
-                let mut state = InputState::new(window, cx).placeholder("ГГГГ-ММ-ДД");
-                state.set_value(date.format(DATE_FORMAT).to_string(), window, cx);
-                state
-            });
-            FormDate::Input(input)
-        };
+        let form_date = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
+        form_date.update(cx, |state, cx| {
+            state.set_date(Date::Single(Some(date)), window, cx)
+        });
+        self._subscriptions.push(cx.subscribe_in(
+            &form_date,
+            window,
+            |_, _, _: &DatePickerEvent, _, cx| cx.notify(),
+        ));
         let amount_input = cx.new(|cx| {
             let mut state =
                 InputState::new(window, cx).placeholder("например: 100 + 20 - 5 * 2 / 4");
@@ -606,26 +591,23 @@ impl TransactionsPage {
         self.rebuild_category_select(window, cx);
         self.rebuild_card_select(window, cx);
         cx.notify();
-        if self.kind == TransactionKind::Income {
-            self.open_income_dialog(window, cx);
-        }
+        self.open_form_dialog(window, cx);
     }
 
-    fn open_income_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_form_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity();
         window.open_dialog(cx, move |dialog: Dialog, _, cx| {
             let (title, body) = this.update(cx, |page, cx| {
                 let title = page.form.as_ref().map_or_else(
-                    || "Доход".to_owned(),
-                    |form| {
-                        if form.id.is_some() {
-                            "Изменить доход".to_owned()
-                        } else {
-                            "Новый доход".to_owned()
-                        }
+                    || "Операция".to_owned(),
+                    |form| match (page.kind, form.id.is_some()) {
+                        (TransactionKind::Income, true) => "Изменить доход".to_owned(),
+                        (TransactionKind::Income, false) => "Новый доход".to_owned(),
+                        (TransactionKind::Expense, true) => "Изменить расход".to_owned(),
+                        (TransactionKind::Expense, false) => "Новый расход".to_owned(),
                     },
                 );
-                (title, page.render_income_dialog(cx))
+                (title, page.render_form_dialog(cx))
             });
             dialog
                 .title(title)
@@ -639,13 +621,12 @@ impl TransactionsPage {
         });
     }
 
-    fn render_income_dialog(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_form_dialog(&mut self, cx: &mut Context<Self>) -> AnyElement {
         if self.confirm_discard {
             return self.render_discard_confirmation(cx);
         }
 
         self.render_form(cx)
-            .unwrap_or_else(|| div().into_any_element())
     }
 
     fn render_discard_confirmation(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -683,15 +664,10 @@ impl TransactionsPage {
             .into_any_element()
     }
 
-    fn request_income_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn request_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let has_changes = self.form.as_ref().is_some_and(|form| {
             let current = FormValues {
-                date: match &form.date {
-                    FormDate::Input(input) => {
-                        NaiveDate::parse_from_str(input.read(cx).value().trim(), DATE_FORMAT).ok()
-                    }
-                    FormDate::Picker(picker) => selected_date(&picker.read(cx)),
-                },
+                date: selected_date(form.date.read(cx)),
                 amount: form.amount.read(cx).value().to_string(),
                 comment: form.comment.read(cx).value().to_string(),
                 currency: form.currency,
@@ -770,13 +746,7 @@ impl TransactionsPage {
         let Some(form) = self.form.as_ref() else {
             return false;
         };
-        let parsed_date = match &form.date {
-            FormDate::Input(input) => {
-                NaiveDate::parse_from_str(input.read(cx).value().trim(), DATE_FORMAT)
-                    .map_err(|_| "Введите дату в формате ГГГГ-ММ-ДД")
-            }
-            FormDate::Picker(picker) => selected_date(&picker.read(cx)).ok_or("Выберите дату"),
-        };
+        let parsed_date = selected_date(form.date.read(cx)).ok_or("Выберите дату");
         let amount_text = form.amount.read(cx).value().to_string();
         let comment = form.comment.read(cx).value().to_string();
         let date = match parsed_date {
@@ -865,14 +835,6 @@ impl TransactionsPage {
     // ---- отрисовка ----
 
     fn render_filters(&mut self, cx: &mut Context<Self>) -> Div {
-        if self.kind == TransactionKind::Income {
-            return self.render_income_filters(cx);
-        }
-
-        self.render_expense_filters(cx)
-    }
-
-    fn render_income_filters(&mut self, cx: &mut Context<Self>) -> Div {
         let active = self.has_active_filters(cx);
         let this = cx.entity();
         let filter = |label: &'static str, width: f32, control: AnyElement| {
@@ -972,68 +934,23 @@ impl TransactionsPage {
             )
     }
 
-    fn render_expense_filters(&mut self, cx: &mut Context<Self>) -> Div {
-        let active = self.has_active_filters(cx);
-        let this = cx.entity();
-        div()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .w(px(200.0))
-                    .child(Input::new(&self.search).cleanable(true)),
-            )
-            .child(
-                div()
-                    .w(px(140.0))
-                    .child(Select::new(&self.period_select).placeholder("Период")),
-            )
-            .child(
-                div()
-                    .w(px(150.0))
-                    .child(DatePicker::new(&self.from).placeholder("С").small()),
-            )
-            .child(
-                div()
-                    .w(px(150.0))
-                    .child(DatePicker::new(&self.to).placeholder("По").small()),
-            )
-            .child(
-                div()
-                    .w(px(260.0))
-                    .child(Select::new(&self.category_filter_select).placeholder("Категория")),
-            )
-            .child(
-                div()
-                    .w(px(110.0))
-                    .child(Select::new(&self.currency_filter_select).placeholder("Валюта")),
-            )
-            .child(
-                Button::new("filters-apply")
-                    .primary()
-                    .label("Применить")
-                    .on_click({
-                        let this = this.clone();
-                        move |_, _, cx| this.update(cx, |page, cx| page.refresh(cx))
-                    }),
-            )
-            .child(
-                Button::new("filters-reset")
-                    .label("Сбросить фильтры")
-                    .disabled(!active)
-                    .on_click(cx.listener(|page, _, window, cx| page.reset_filters(window, cx))),
-            )
-    }
-
-    fn render_income_form(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_form(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let Some(form) = self.form.as_ref() else {
             return div().into_any_element();
         };
+        let kind = self.kind;
         let danger = cx.theme().danger;
         let muted = cx.theme().muted_foreground;
         let amount_text = form.amount.read(cx).value().to_string();
+        let rate_eligible = eligible_cards(&self.cards, form.currency)
+            .iter()
+            .any(|card| Some(card.id) == form.card_id && card.affects_deposit_rate);
+        let legacy_debit_expense = form.id.is_some()
+            && !form.balance_applied
+            && self.cards.iter().any(|card| {
+                Some(card.id) == form.card_id && card.card_type == PaymentCardType::Debit
+            });
+        let warning = cx.theme().warning;
         let total = (!amount_text.trim().is_empty())
             .then(|| parse_amount_expression(&amount_text).map_err(|error| error.to_string()));
         let card_missing_currency = form.card_id.is_some()
@@ -1055,12 +972,9 @@ impl TransactionsPage {
             .gap_3()
             .child(field(
                 "Дата",
-                match &form.date {
-                    FormDate::Picker(picker) => DatePicker::new(picker)
-                        .placeholder("Выбрать дату")
-                        .into_any_element(),
-                    FormDate::Input(input) => Input::new(input).into_any_element(),
-                },
+                DatePicker::new(&form.date)
+                    .placeholder("Выбрать дату")
+                    .into_any_element(),
             ))
             .child(field("Сумма", Input::new(&form.amount).into_any_element()))
             .child(field(
@@ -1080,24 +994,62 @@ impl TransactionsPage {
             .flex()
             .flex_col()
             .gap_1()
-            .child(div().text_size(px(12.0)).child("Зачислить на карту"))
+            .child(div().text_size(px(12.0)).child(match kind {
+                TransactionKind::Income => "Зачислить на карту",
+                TransactionKind::Expense => "Оплачено картой",
+            }))
             .child(Select::new(&form.card_select));
         if card_missing_currency {
-            card_field = card_field.child(
-                div()
-                    .text_color(danger)
-                    .child("Выберите карту в валюте дохода или отмените выбор карты"),
-            );
+            card_field = card_field.child(div().text_color(danger).child(match kind {
+                TransactionKind::Income => {
+                    "Выберите карту в валюте дохода или отмените выбор карты"
+                }
+                TransactionKind::Expense => {
+                    "Выберите карту в валюте расхода или отмените выбор карты"
+                }
+            }));
         }
-        fields = fields
-            .child(card_field)
-            .child(div().text_color(muted).child(
-                "Доступны дебетовые карты с указанной валютой. Для ранее созданных карт сначала укажите валюту в разделе «Платёжные карты».",
-            ))
-            .child(field(
-                "Комментарий",
-                Textarea::new(&form.comment).into_any_element(),
-            ));
+        fields = fields.child(card_field);
+        match kind {
+            TransactionKind::Income => {
+                fields = fields.child(div().text_color(muted).child(
+                    "Доступны дебетовые карты с указанной валютой. Для ранее созданных карт сначала укажите валюту в разделе «Платёжные карты».",
+                ));
+            }
+            TransactionKind::Expense => {
+                let enabled = rate_eligible || form.affects_deposit_rate;
+                fields = fields
+                    .child(
+                        Checkbox::new("affects-rate")
+                            .label("Учитывать расход при расчёте процентов по вкладам")
+                            .checked(form.affects_deposit_rate)
+                            .disabled(!enabled)
+                            .on_click(cx.listener(|page, checked: &bool, _, cx| {
+                                if let Some(form) = page.form.as_mut() {
+                                    form.affects_deposit_rate = *checked;
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .when(!rate_eligible, |f| {
+                        f.child(div().text_color(muted).child(
+                            "Для учёта выберите карту с совпадающей валютой и включённым влиянием на ставку.",
+                        ))
+                    })
+                    .child(div().text_color(muted).child(
+                        "Расход с дебетовой карты списывается с её баланса; кредитный лимит не меняется. Оценка процентов пока не рассчитывается.",
+                    ))
+                    .when(legacy_debit_expense, |f| {
+                        f.child(div().text_color(warning).child(
+                            "Этот расход ранее не списывался с баланса. При сохранении будет списана его текущая сумма.",
+                        ))
+                    });
+            }
+        }
+        fields = fields.child(field(
+            "Комментарий",
+            Textarea::new(&form.comment).into_any_element(),
+        ));
 
         if !form.suggestions.is_empty() {
             let buttons = form.suggestions.iter().enumerate().map(|(index, text)| {
@@ -1131,7 +1083,7 @@ impl TransactionsPage {
 
         let mut panel = div().flex().flex_col().gap_3().p_4().child(
             fields
-                .id("income-form-fields")
+                .id("transaction-form-fields")
                 .max_h(px(440.0))
                 .overflow_y_scroll(),
         );
@@ -1161,259 +1113,41 @@ impl TransactionsPage {
                             })),
                     )
                     .child(Button::new("income-form-cancel").label("Отмена").on_click(
-                        cx.listener(|page, _, window, cx| page.request_income_cancel(window, cx)),
+                        cx.listener(|page, _, window, cx| page.request_cancel(window, cx)),
                     )),
             );
         panel.into_any_element()
-    }
-
-    fn render_form(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.kind == TransactionKind::Income {
-            return Some(self.render_income_form(cx));
-        }
-        let form = self.form.as_ref()?;
-        let kind = self.kind;
-        let amount_text = form.amount.read(cx).value().to_string();
-        let comment_text = form.comment.read(cx).value().to_string();
-        let danger = cx.theme().danger;
-        let muted = cx.theme().muted_foreground;
-        let card_missing_currency = form.card_id.is_some()
-            && !eligible_cards(&self.cards, form.currency)
-                .iter()
-                .any(|card| Some(card.id) == form.card_id);
-        let rate_eligible = eligible_cards(&self.cards, form.currency)
-            .iter()
-            .any(|card| Some(card.id) == form.card_id && card.affects_deposit_rate);
-        let legacy_debit_expense = form.id.is_some()
-            && !form.balance_applied
-            && self.cards.iter().any(|card| {
-                Some(card.id) == form.card_id && card.card_type == PaymentCardType::Debit
-            });
-
-        let total: Option<Result<Decimal, String>> = (!amount_text.trim().is_empty())
-            .then(|| parse_amount_expression(&amount_text).map_err(|e| e.to_string()));
-        let card_caption = if kind == TransactionKind::Income {
-            "Зачислить на карту"
-        } else {
-            "Оплачено картой"
-        };
-
-        let mut panel = div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .p_3()
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded_md()
-            .child(
-                div()
-                    .font_weight(FontWeight::BOLD)
-                    .child(if form.id.is_some() {
-                        "Изменить операцию"
-                    } else {
-                        "Новая операция"
-                    }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_3()
-                    .child("Дата")
-                    .child(
-                        div().w(px(140.0)).child(match &form.date {
-                            FormDate::Input(input) => Input::new(input).into_any_element(),
-                            FormDate::Picker(picker) => DatePicker::new(picker)
-                                .placeholder("Выбрать дату")
-                                .into_any_element(),
-                        }),
-                    )
-                    .child("Сумма")
-                    .child(div().w(px(260.0)).child(Input::new(&form.amount)))
-                    .child("Валюта")
-                    .child(
-                        div()
-                            .w(px(100.0))
-                            .child(Select::new(&form.currency_select).placeholder("Выберите")),
-                    )
-                    .child("Категория")
-                    .child(
-                        div()
-                            .w(px(280.0))
-                            .child(Select::new(&form.category_select).placeholder("Выберите")),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_3()
-                    .child(card_caption)
-                    .child(div().w(px(420.0)).child(Select::new(&form.card_select)))
-                    .when(card_missing_currency, |row| {
-                        row.child(div().text_color(danger).child(
-                            if kind == TransactionKind::Income {
-                                "Выберите карту в валюте дохода или отмените выбор карты"
-                            } else {
-                                "Выберите карту в валюте расхода или отмените выбор карты"
-                            },
-                        ))
-                    }),
-            );
-
-        if kind == TransactionKind::Income {
-            panel = panel.child(div().text_color(muted).child(
-                "Доступны дебетовые карты с указанной валютой. Для ранее созданных карт сначала укажите валюту в разделе «Платёжные карты».",
-            ));
-        } else {
-            let enabled = rate_eligible || form.affects_deposit_rate;
-            panel = panel
-                .child(
-                    Checkbox::new("affects-rate")
-                        .label("Учитывать расход при расчёте процентов по вкладам")
-                        .checked(form.affects_deposit_rate)
-                        .disabled(!enabled)
-                        .on_click(cx.listener(|page, checked: &bool, _, cx| {
-                            if let Some(form) = page.form.as_mut() {
-                                form.affects_deposit_rate = *checked;
-                            }
-                            cx.notify();
-                        })),
-                )
-                .when(!rate_eligible, |p| {
-                    p.child(div().text_color(muted).child(
-                        "Для учёта выберите карту с совпадающей валютой и включённым влиянием на ставку.",
-                    ))
-                })
-                .child(div().text_color(muted).child(
-                    "Расход с дебетовой карты списывается с её баланса; кредитный лимит не меняется. Оценка процентов пока не рассчитывается.",
-                ))
-                .when(legacy_debit_expense, |p| {
-                    p.child(div().text_color(cx.theme().warning).child(
-                        "Этот расход ранее не списывался с баланса. При сохранении будет списана его текущая сумма.",
-                    ))
-                });
-        }
-
-        panel = panel
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap_3()
-                    .child("Комментарий")
-                    .child(div().w(px(480.0)).child(Textarea::new(&form.comment))),
-            )
-            .when(!form.suggestions.is_empty(), |p| {
-                let buttons = form.suggestions.iter().enumerate().map(|(index, text)| {
-                    let text = text.clone();
-                    Button::new(("suggestion", index))
-                        .compact()
-                        .label(text.clone())
-                        .on_click(cx.listener(move |page, _, window, cx| {
-                            if let Some(form) = page.form.as_mut() {
-                                form.suggestions.clear();
-                                let comment = form.comment.clone();
-                                comment.update(cx, |state, cx| {
-                                    state.set_value(text.clone(), window, cx)
-                                });
-                            }
-                            cx.notify();
-                        }))
-                });
-                p.child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_2()
-                        .child("Ранее использованные комментарии:")
-                        .children(buttons),
-                )
-            })
-            .when(amount_text.contains('/'), |p| {
-                p.child(div().text_color(muted).child(DIVISION_ROUNDING_WARNING))
-            });
-        let _ = comment_text;
-
-        Some(
-            panel
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .child(div().flex_1().child(match total {
-                            Some(Ok(total)) => div().child(format!("Итого: {total}")),
-                            Some(Err(error)) => div().text_color(danger).child(error),
-                            None => div(),
-                        }))
-                        .child(
-                            Button::new("form-cancel")
-                                .label("Отмена")
-                                .on_click(cx.listener(|page, _, _, cx| {
-                                    page.form = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("form-save")
-                                .primary()
-                                .label("Сохранить")
-                                .on_click(cx.listener(|page, _, _, cx| {
-                                    page.save(cx);
-                                })),
-                        ),
-                )
-                .into_any_element(),
-        )
     }
 
     fn render_table(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let border = cx.theme().border;
         let stripe = cx.theme().muted;
         let count = self.transactions.len();
-        let is_income = self.kind == TransactionKind::Income;
-        let headers = if is_income {
-            [
-                "Дата",
-                "Категория",
-                "Сумма",
-                "Валюта",
-                "Комментарии",
-                "Действия",
-            ]
-        } else {
-            [
-                "Дата",
-                "Сумма",
-                "Валюта",
-                "Категория",
-                "Комментарий",
-                "Действия",
-            ]
-        };
+        let headers = [
+            "Дата",
+            "Категория",
+            "Сумма",
+            "Валюта",
+            "Комментарии",
+            "Действия",
+        ];
         let header = div()
             .flex()
-            .when(is_income, |header| header.w_full())
+            .w_full()
             .h(px(ROW_HEIGHT))
             .items_center()
             .border_1()
             .border_color(border)
             .font_weight(FontWeight::BOLD)
-            .children(headers.into_iter().enumerate().map(|(index, title)| {
-                if is_income {
-                    income_cell(index, title.into(), border)
-                } else {
-                    cell(COLUMN_WIDTHS[index], title.into(), border, index > 0)
-                }
-            }));
+            .children(
+                headers
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, title)| table_cell(index, title.into(), border)),
+            );
         let body = if count == 0 {
             div()
-                .when(is_income, |body| body.w_full())
+                .w_full()
                 .p_4()
                 .child("Операций по выбранным условиям нет.")
                 .into_any_element()
@@ -1428,7 +1162,7 @@ impl TransactionsPage {
                 }),
             )
             .flex_1()
-            .when(is_income, |body| body.w_full())
+            .w_full()
             .into_any_element()
         };
         div()
@@ -1436,7 +1170,7 @@ impl TransactionsPage {
             .min_h_0()
             .flex()
             .flex_col()
-            .when(is_income, |table| table.w_full())
+            .w_full()
             .child(header)
             .child(body)
     }
@@ -1450,33 +1184,19 @@ impl TransactionsPage {
         let transaction = self.transactions[index].clone();
         let border = cx.theme().border;
         let id = transaction.id;
-        let is_income = self.kind == TransactionKind::Income;
-        let date = transaction.date.format("%d.%m.%Y").to_string();
-        let amount = transaction.amount.to_string();
-        let currency = transaction.currency.code().to_owned();
-        let values = if is_income {
-            vec![
-                date,
-                transaction.category_name.clone(),
-                amount,
-                currency,
-                transaction.comment.clone(),
-            ]
-        } else {
-            vec![
-                date,
-                amount,
-                currency,
-                transaction.category_name.clone(),
-                transaction.comment.clone(),
-            ]
-        };
+        let values = vec![
+            transaction.date.format("%d.%m.%Y").to_string(),
+            transaction.category_name.clone(),
+            transaction.amount.to_string(),
+            transaction.currency.code().to_owned(),
+            transaction.comment.clone(),
+        ];
         let edit_target = transaction.clone();
         let delete_target = transaction;
         div()
             .id(("transaction-row", id as usize))
             .flex()
-            .when(is_income, |row| row.w_full())
+            .w_full()
             .h(px(ROW_HEIGHT))
             .items_center()
             .border_l_1()
@@ -1485,26 +1205,22 @@ impl TransactionsPage {
             .border_color(border)
             .when(index % 2 == 1, |row| row.bg(stripe))
             .children(values.into_iter().enumerate().map(|(column, value)| {
-                if is_income {
-                    if column == 4 && !value.is_empty() {
-                        income_comment_cell(id, value, cx).into_any_element()
-                    } else {
-                        income_cell(column, value, border).into_any_element()
-                    }
+                if column == 4 && !value.is_empty() {
+                    comment_cell(id, value, cx).into_any_element()
                 } else {
-                    cell(COLUMN_WIDTHS[column], value, border, column > 0).into_any_element()
+                    table_cell(column, value, border).into_any_element()
                 }
             }))
             .child(
                 div()
-                    .w(px(COLUMN_WIDTHS[5]))
+                    .w(px(ACTIONS_COLUMN_WIDTH))
                     .h_full()
                     .flex()
                     .items_center()
                     .border_l_1()
                     .border_color(border)
                     .gap_1()
-                    .when(is_income, |actions| actions.justify_end())
+                    .justify_end()
                     .child(
                         Button::new(("edit", id as usize))
                             .xsmall()
@@ -1596,8 +1312,7 @@ impl TransactionsPage {
     }
 }
 
-const COLUMN_WIDTHS: [f32; 6] = [115.0, 135.0, 90.0, 220.0, 320.0, 180.0];
-const INCOME_FIXED_COLUMN_WIDTHS: [f32; 4] = [115.0, 220.0, 135.0, 90.0];
+const FIXED_COLUMN_WIDTHS: [f32; 4] = [115.0, 220.0, 135.0, 90.0];
 const ACTIONS_COLUMN_WIDTH: f32 = 180.0;
 
 fn cell(width: f32, text: String, border: Hsla, separator: bool) -> Div {
@@ -1612,9 +1327,9 @@ fn cell(width: f32, text: String, border: Hsla, separator: bool) -> Div {
         .child(text)
 }
 
-fn income_cell(index: usize, text: String, border: Hsla) -> Div {
+fn table_cell(index: usize, text: String, border: Hsla) -> Div {
     match index {
-        0..=3 => cell(INCOME_FIXED_COLUMN_WIDTHS[index], text, border, index > 0),
+        0..=3 => cell(FIXED_COLUMN_WIDTHS[index], text, border, index > 0),
         4 => div()
             .flex_1()
             .min_w_0()
@@ -1643,7 +1358,7 @@ fn income_cell(index: usize, text: String, border: Hsla) -> Div {
     }
 }
 
-fn income_comment_cell(id: i64, text: String, cx: &mut Context<TransactionsPage>) -> AnyElement {
+fn comment_cell(id: i64, text: String, cx: &mut Context<TransactionsPage>) -> AnyElement {
     let preview = comment_preview(&text);
     div()
         .id(("income-comment", id as usize))
@@ -1704,57 +1419,56 @@ impl Render for TransactionsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let has_active_category = self.categories.iter().any(|category| category.is_active);
         let danger = cx.theme().danger;
+        let (title, add_label) = match self.kind {
+            TransactionKind::Income => ("Доходы", "Добавить доход"),
+            TransactionKind::Expense => ("Расходы", "Добавить расход"),
+        };
         let mut root = div().size_full().flex().flex_col().gap_2().p_3();
-        let add_button = Button::new("new-transaction")
-            .primary()
-            .label(match self.kind {
-                TransactionKind::Income => "Добавить доход",
-                TransactionKind::Expense => "Добавить расход",
-            })
-            .icon(IconName::Plus)
-            .when(matches!(self.kind, TransactionKind::Income), |button| {
-                button.large()
-            })
-            .disabled(self.form.is_some())
-            .on_click(cx.listener(|page, _, window, cx| page.open_form(None, window, cx)));
-        let header = match self.kind {
-            TransactionKind::Income => div()
-                .flex()
-                .w_full()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_size(px(24.0))
-                        .font_weight(FontWeight::BOLD)
-                        .child("Доходы"),
-                )
-                .child(
-                    div().flex().items_center().gap_2().child(add_button).child(
-                        Button::new("refresh-income")
+        let header = div()
+            .flex()
+            .w_full()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_size(px(24.0))
+                    .font_weight(FontWeight::BOLD)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("new-transaction")
+                            .primary()
+                            .large()
+                            .label(add_label)
+                            .icon(IconName::Plus)
+                            .disabled(self.form.is_some())
+                            .on_click(
+                                cx.listener(|page, _, window, cx| page.open_form(None, window, cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("refresh-transactions")
                             .secondary()
                             .large()
                             .label("Обновить")
                             .icon(IconName::Replace)
                             .on_click(cx.listener(|page, _, _, cx| page.refresh(cx))),
                     ),
-                ),
-            TransactionKind::Expense => div().flex().items_center().gap_2().child(add_button),
-        };
+            );
         root = root.child(header);
         root = root.child(self.render_filters(cx));
-        if !(self.kind == TransactionKind::Income && self.form.is_some()) {
+        if self.form.is_none() {
             if let Some((message, true)) = &self.message {
                 root = root.child(div().text_color(danger).child(message.clone()));
             }
         }
         if !has_active_category {
             root = root.child("Сначала добавьте категорию в разделе «Справочники».");
-        }
-        if self.kind == TransactionKind::Expense {
-            if let Some(form) = self.render_form(cx) {
-                root = root.child(form);
-            }
         }
         root.child(self.render_table(cx))
             .child(self.render_footer(cx))

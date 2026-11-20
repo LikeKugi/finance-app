@@ -6,7 +6,7 @@ This document records the action-button and filter patterns on the existing Inco
 
 All page-level add buttons use a Plus icon instead of a textual plus and retain the icon's normal button foreground color. Add opens a form for a new record; fields may be prefilled with page defaults.
 
-On Income, the page title is on the left side of the header row and `Добавить доход` with the Plus icon is aligned to the right, followed by `Обновить` with the Replace icon. Both actions use the Large button size; Add uses the Primary variant and refresh uses Secondary. Refresh reloads the transaction list with the current filter values and does not reset them.
+On Income and Expenses, the page title is on the left side of the header row and `Добавить доход` / `Добавить расход` with the Plus icon is aligned to the right, followed by `Обновить` with the Replace icon. Both actions use the Large button size; Add uses the Primary variant and refresh uses Secondary. Refresh reloads the transaction list with the current filter values and does not reset them.
 
 On Directories, the add buttons for categories, banks, and currencies use the default Medium button size and the Plus icon.
 
@@ -22,12 +22,12 @@ Shared compact DatePicker controls retain previous/next-month arrow navigation a
 
 ### Income and Expenses
 
-- The Income table fills the available page width and orders columns as `Дата`, `Категория`, `Сумма`, `Валюта`, `Комментарии`, and `Действия`. The Comments column expands into the remaining width, while Actions stays at the far right; Expenses retains its existing column order.
-- Income comment cells show the first 25 characters of the first line; longer or multiline comments end with an ellipsis. Clicking a non-empty comment opens a dialog with the full original text.
-- Income filters appear above the table and wrap onto additional lines when they do not fit; horizontal scrolling is not used. Income controls are Small, each control has a label above it, and Search has a Search icon suffix. Expenses retains its existing filter presentation.
+- The Income table fills the available page width and orders columns as `Дата`, `Категория`, `Сумма`, `Валюта`, `Комментарии`, and `Действия`. The Comments column expands into the remaining width, while Actions stays at the far right, and Expenses uses the same layout.
+- Income and Expenses comment cells show the first 25 characters of the first line; longer or multiline comments end with an ellipsis. Clicking a non-empty comment opens a dialog with the full original text.
+- Income filters appear above the table and wrap onto additional lines when they do not fit; horizontal scrolling is not used. Controls are Small, each control has a label above it, and Search has a Search icon suffix. Expenses uses the same presentation.
 - The filter order is `Поиск`, `Период`, start date (`С`), end date (`По`), category, and currency.
 - Filter groups and wrapped rows have a small, consistent gap for visual separation.
-- Income `Применить` and `Сбросить фильтры` buttons use Small size and share a bottom row aligned to the right of the filters. Expenses retains its existing button presentation.
+- `Применить` and `Сбросить фильтры` buttons on Income and Expenses use Small size and share a bottom row aligned to the right of the filters.
 - Search text and date edits do not reload the list on their own. Use `Применить` to apply them.
 - The date filters use compact DatePicker controls. The `Период` selector defaults to `Весь период`. Selecting it clears both dates; selecting year, quarter, month, week (Monday through Sunday), or day fills both controls using the current local calendar, with inclusive boundaries. Users can choose either date afterward. Use `Применить` to apply the selected range.
 - Selecting a category or currency immediately reloads the list, unlike editing search or date fields. The currency options are `Все`, `RUB`, and `USD`.
@@ -35,8 +35,8 @@ Shared compact DatePicker controls retain previous/next-month arrow navigation a
 - `Сбросить фильтры` clears all filters, returns the period selector to `Весь период`, and reloads the list. It is disabled when no filters are active.
 - Date boundaries are inclusive. A start date later than the end date is reported as an error; the existing results are not replaced with an empty list. Dates are selected through the calendar rather than entered as free-form text.
 - Applying filters updates the table and its totals. When no transactions match, the current page shows no data rows but has no dedicated filtered-empty-state message; future pages should provide one.
-- Creating and editing an income opens a modal dialog over the page. The dialog keeps its fields and validation errors while open; clicking `Отмена` asks for confirmation if values have changed, and the dialog cannot be dismissed by clicking the overlay, pressing Escape, or using a close button.
-- The income form date is selected with a DatePicker rather than entered as free-form text.
+- Creating and editing an income or expense opens a modal dialog over the page. The dialog keeps its fields and validation errors while open; clicking `Отмена` asks for confirmation if values have changed, and the dialog cannot be dismissed by clicking the overlay, pressing Escape, or using a close button.
+- The income and expense form date is selected with a DatePicker rather than entered as free-form text.
 
 ### Income and Expenses Comment Suggestions
 
