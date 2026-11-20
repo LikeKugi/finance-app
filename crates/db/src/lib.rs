@@ -657,9 +657,10 @@ pub fn set_currency_exchange_rate(
 ///
 /// The target currency must have a known rate. Currencies without a known rate remain
 /// unknown; transaction amounts are not modified.
-pub fn set_primary_currency(connection: &mut Connection, code: &str) -> Result<(), DbError> {
+pub fn set_primary_currency(connection: &Connection, code: &str) -> Result<(), DbError> {
     validate_currency_code(code)?;
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let transaction =
+        rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
     let currencies = list_currencies(&transaction)?;
     if currencies
         .iter()
@@ -3035,7 +3036,7 @@ mod tests {
     #[test]
     fn set_primary_currency_overflow_rolls_back_without_changing_rates() {
         let directory = tempfile::tempdir().unwrap();
-        let mut connection = initialize(&directory.path().join("data.db")).unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
         add_currency(&connection, "EUR", "Евро").unwrap();
         set_currency_exchange_rate(
             &connection,
@@ -3052,7 +3053,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = set_primary_currency(&mut connection, "EUR");
+        let result = set_primary_currency(&connection, "EUR");
         assert!(matches!(
             result,
             Err(DbError::Domain(DomainError::ExchangeRateOverflow))
@@ -3068,7 +3069,7 @@ mod tests {
     #[test]
     fn set_primary_currency_rebases_known_rates_and_preserves_unknown_rates() {
         let directory = tempfile::tempdir().unwrap();
-        let mut connection = initialize(&directory.path().join("data.db")).unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
         add_currency(&connection, "EUR", "Евро").unwrap();
         add_currency(&connection, "GBP", "Фунт стерлингов").unwrap();
         set_currency_exchange_rate(
@@ -3086,7 +3087,7 @@ mod tests {
         )
         .unwrap();
 
-        set_primary_currency(&mut connection, "EUR").unwrap();
+        set_primary_currency(&connection, "EUR").unwrap();
         let currencies = list_currencies(&connection).unwrap();
         let currency_by_code =
             |code: &str| currencies.iter().find(|currency| currency.code == code);
@@ -3106,7 +3107,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 1, 3)
         );
 
-        let change_to_unknown = set_primary_currency(&mut connection, "GBP");
+        let change_to_unknown = set_primary_currency(&connection, "GBP");
         assert!(matches!(
             change_to_unknown,
             Err(DbError::PrimaryCurrencyRateUnavailable)

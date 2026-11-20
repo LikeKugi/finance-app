@@ -6,7 +6,7 @@ FinanceApp is a local desktop application for personal and family finance manage
 
 - `finance-app` — application entry point, user data paths, and logging.
 - `finance-core` — transaction, currency, directory types, and exact decimal input handling.
-- `finance-ui` — native `eframe` tables and Russian-language workflows.
+- `finance-ui` — native `gpui-kit` tables and Russian-language workflows.
 - `finance-db` — SQLite connection setup, embedded migrations, and repositories.
 
 Income and expense records support create, edit, delete with confirmation, inclusive date filters, category filters, text search, and exact RUB/USD totals. Directories support bank and hierarchical income/expense category management, activation, and deletion safeguards for categories in use. Savings support create, edit, delete with confirmation, bank/status/text filters, term and interest-destination fields, optional opening and interest-accrual dates, and exact decimal storage. Payment documents support create, edit, delete with confirmation, bank/system/card-type filters, credit payment dates and grace periods, and links to savings at the same bank. Analysis supports inclusive date ranges and independent income-category and expense-category selectors; each selector includes all categories (including inactive ones) using the same hierarchical labels as the income and expense filters. Both transaction groups remain visible, with exact category totals and shares grouped separately by transaction type and currency. Forecasts, currency conversion, and exports remain deferred.
