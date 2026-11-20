@@ -12,11 +12,11 @@ use finance_core::{
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::dialog::AlertDialog;
+use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _, WindowExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _, WindowExt as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -256,6 +256,7 @@ pub(crate) struct SavingsPage {
     active_filter: Option<bool>,
     active_filter_select: Choice,
     form: Option<Form>,
+    confirm_discard: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -330,6 +331,7 @@ impl SavingsPage {
             active_filter: None,
             active_filter_select,
             form: None,
+            confirm_discard: false,
             _subscriptions: subscriptions,
         };
         page.reload_banks(window, cx);
@@ -607,7 +609,31 @@ impl SavingsPage {
             error: None,
             _subscriptions: subscriptions,
         });
+        self.confirm_discard = false;
         cx.notify();
+        self.open_form_dialog(window, cx);
+    }
+
+    fn open_form_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity();
+        window.open_dialog(cx, move |dialog: Dialog, _, cx| {
+            let (title, body) = this.update(cx, |page, cx| {
+                let title = match page.form.as_ref().map(|form| form.id.is_some()) {
+                    Some(true) => "Изменить накопление",
+                    _ => "Новое накопление",
+                };
+                (title, page.render_form_dialog(cx))
+            });
+            dialog
+                .title(title)
+                .centered()
+                .w(px(800.0))
+                .max_w(px(900.0))
+                .close_button(false)
+                .overlay_closable(false)
+                .keyboard(false)
+                .child(body)
+        });
     }
 
     /// Текущие значения формы, собранные из полей ввода.
@@ -640,15 +666,15 @@ impl SavingsPage {
         cx.notify();
     }
 
-    fn save(&mut self, cx: &mut Context<Self>) {
+    fn save(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(values) = self.read_form(cx) else {
-            return;
+            return false;
         };
         let details = match values.details() {
             Ok(details) => details,
             Err(error) => {
                 self.set_form_error(error, cx);
-                return;
+                return false;
             }
         };
         match finance_db::save_savings(&self.database, values.id, &details) {
@@ -658,8 +684,12 @@ impl SavingsPage {
                     self.message = Some(("Накопление сохранено".to_owned(), false));
                 }
                 cx.notify();
+                true
             }
-            Err(error) => self.set_form_error(error.to_string(), cx),
+            Err(error) => {
+                self.set_form_error(error.to_string(), cx);
+                false
+            }
         }
     }
 
@@ -668,28 +698,56 @@ impl SavingsPage {
             (Some(current), Some(form)) => current != form.snapshot,
             _ => false,
         };
-        if !dirty {
+        if dirty {
+            self.confirm_discard = true;
+        } else {
             self.form = None;
-            cx.notify();
-            return;
+            self.confirm_discard = false;
+            window.close_dialog(cx);
         }
-        let this = cx.entity();
-        window.open_alert_dialog(cx, move |alert: AlertDialog, _, _| {
-            let this = this.clone();
-            alert
-                .title("Несохранённые изменения")
-                .description("Отменить изменения и закрыть форму?")
-                .ok_text("Отменить изменения")
-                .cancel_text("Продолжить редактирование")
-                .show_cancel(true)
-                .on_ok(move |_, _, cx| {
-                    this.update(cx, |page, cx| {
-                        page.form = None;
-                        cx.notify();
-                    });
-                    true
-                })
-        });
+        cx.notify();
+    }
+
+    fn render_form_dialog(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.confirm_discard {
+            return self.render_discard_confirmation(cx);
+        }
+        self.render_form(cx)
+    }
+
+    fn render_discard_confirmation(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_4()
+            .child("Несохранённые изменения будут потеряны.")
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("savings-continue-editing")
+                            .label("Вернуться к форме")
+                            .on_click(cx.listener(|page, _, _, cx| {
+                                page.confirm_discard = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("savings-discard-changes")
+                            .primary()
+                            .label("Не сохранять")
+                            .on_click(cx.listener(|page, _, window, cx| {
+                                page.form = None;
+                                page.confirm_discard = false;
+                                window.close_dialog(cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn confirm_delete(
@@ -726,51 +784,90 @@ impl SavingsPage {
 
     // ---- отрисовка ----
 
-    fn render_filters(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_filters(&mut self, cx: &mut Context<Self>) -> Div {
         let active = self.has_active_filters(cx);
+        let filter = |label: &'static str, width: f32, control: AnyElement| {
+            div()
+                .w(px(width))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_size(px(12.0)).child(label))
+                .child(control)
+        };
         div()
             .flex()
-            .flex_wrap()
-            .items_center()
+            .flex_col()
             .gap_2()
             .child(
                 div()
-                    .w(px(220.0))
-                    .child(Input::new(&self.search).cleanable(true)),
+                    .flex()
+                    .flex_wrap()
+                    .items_start()
+                    .gap_2()
+                    .child(filter(
+                        "Поиск",
+                        220.0,
+                        Input::new(&self.search)
+                            .cleanable(true)
+                            .small()
+                            .suffix(Icon::new(IconName::Search).small())
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Банк",
+                        200.0,
+                        Select::new(&self.bank_filter_select)
+                            .placeholder("Банк")
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Валюта",
+                        110.0,
+                        Select::new(&self.currency_filter_select)
+                            .placeholder("Валюта")
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Статус",
+                        150.0,
+                        Select::new(&self.active_filter_select)
+                            .placeholder("Статус")
+                            .small()
+                            .into_any_element(),
+                    )),
             )
             .child(
                 div()
-                    .w(px(180.0))
-                    .child(Select::new(&self.bank_filter_select).placeholder("Банк")),
-            )
-            .child(
-                div()
-                    .w(px(110.0))
-                    .child(Select::new(&self.currency_filter_select).placeholder("Валюта")),
-            )
-            .child(
-                div()
-                    .w(px(150.0))
-                    .child(Select::new(&self.active_filter_select).placeholder("Статус")),
-            )
-            .child(
-                Button::new("filters-apply")
-                    .primary()
-                    .label("Применить")
-                    .on_click(cx.listener(|page, _, _, cx| page.apply_filters(cx))),
-            )
-            .child(
-                Button::new("filters-reset")
-                    .label("Сбросить фильтры")
-                    .disabled(!active)
-                    .on_click(cx.listener(|page, _, window, cx| page.reset_filters(window, cx))),
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("filters-apply")
+                            .primary()
+                            .small()
+                            .label("Применить")
+                            .on_click(cx.listener(|page, _, _, cx| page.apply_filters(cx))),
+                    )
+                    .child(
+                        Button::new("filters-reset")
+                            .small()
+                            .label("Сбросить фильтры")
+                            .disabled(!active)
+                            .on_click(
+                                cx.listener(|page, _, window, cx| page.reset_filters(window, cx)),
+                            ),
+                    ),
             )
     }
 
-    fn render_form(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let form = self.form.as_ref()?;
+    fn render_form(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(form) = self.form.as_ref() else {
+            return div().into_any_element();
+        };
         let danger = cx.theme().danger;
-        let muted = cx.theme().muted_foreground;
         let limited = form.term_type == Some(SavingsTerm::Limited);
         let labelled = |label: &'static str, width: f32, child: AnyElement| {
             div()
@@ -778,29 +875,20 @@ impl SavingsPage {
                 .flex_col()
                 .gap_1()
                 .w(px(width))
-                .child(div().text_color(muted).child(label))
+                .child(div().text_size(px(12.0)).child(label))
                 .child(child)
         };
-        let section = |title: &'static str| div().font_weight(FontWeight::BOLD).child(title);
+        let row = || div().flex().items_end().gap_4();
 
         let mut fields = div()
-            .id("savings-form-fields")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
             .flex()
             .flex_col()
             .gap_3()
-            .child(section("Основное"))
             .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_end()
-                    .gap_3()
+                row()
                     .child(labelled(
                         "Название",
-                        280.0,
+                        300.0,
                         Input::new(&form.title).into_any_element(),
                     ))
                     .child(labelled(
@@ -814,7 +902,41 @@ impl SavingsPage {
                         "Валюта",
                         140.0,
                         Select::new(&form.currency_select).into_any_element(),
+                    )),
+            )
+            .child(
+                row()
+                    .child(labelled(
+                        "Сумма",
+                        220.0,
+                        Input::new(&form.amount).into_any_element(),
                     ))
+                    .child(labelled(
+                        "Базовая ставка, %",
+                        220.0,
+                        Input::new(&form.base_rate).into_any_element(),
+                    ))
+                    .child(labelled(
+                        "Выплата процентов",
+                        240.0,
+                        Select::new(&form.destination_select)
+                            .placeholder("Выберите назначение")
+                            .into_any_element(),
+                    )),
+            )
+            .child(
+                row()
+                    .child(
+                        Checkbox::new("form-threshold")
+                            .label("Есть повышение ставки при выполнении условий")
+                            .checked(form.use_threshold)
+                            .on_click(cx.listener(|page, checked: &bool, _, cx| {
+                                if let Some(form) = page.form.as_mut() {
+                                    form.use_threshold = *checked;
+                                }
+                                cx.notify();
+                            })),
+                    )
                     .child(
                         Checkbox::new("form-active")
                             .label("Активно")
@@ -826,132 +948,76 @@ impl SavingsPage {
                                 cx.notify();
                             })),
                     ),
-            )
-            .child(section("Сумма и ставки"))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_end()
-                    .gap_3()
-                    .child(labelled(
-                        "Сумма",
-                        220.0,
-                        Input::new(&form.amount).into_any_element(),
-                    ))
-                    .child(labelled(
-                        "Базовая ставка, %",
-                        220.0,
-                        Input::new(&form.base_rate).into_any_element(),
-                    ))
-                    .child(
-                        Checkbox::new("form-threshold")
-                            .label("Есть повышение ставки при выполнении условий")
-                            .checked(form.use_threshold)
-                            .on_click(cx.listener(|page, checked: &bool, _, cx| {
-                                if let Some(form) = page.form.as_mut() {
-                                    form.use_threshold = *checked;
-                                }
-                                cx.notify();
-                            })),
-                    ),
             );
         if form.use_threshold {
             fields = fields.child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_3()
+                row()
                     .child(labelled(
                         "Пороговая сумма трат",
-                        280.0,
+                        300.0,
                         Input::new(&form.threshold_amount).into_any_element(),
                     ))
                     .child(labelled(
                         "Ставка при выполнении условий, %",
-                        280.0,
+                        300.0,
                         Input::new(&form.rate_after_threshold).into_any_element(),
                     )),
             );
         }
-        fields = fields.child(section("Даты и срок")).child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_3()
+        fields = fields.child(
+            row()
                 .child(labelled(
-                    "Дата открытия (ГГГГ-ММ-ДД)",
-                    220.0,
+                    "Дата открытия",
+                    170.0,
                     Input::new(&form.opened_date).into_any_element(),
                 ))
                 .child(labelled(
-                    "Дата начисления процентов (ГГГГ-ММ-ДД)",
-                    280.0,
+                    "Дата начисления %",
+                    170.0,
                     Input::new(&form.interest_accrual_date).into_any_element(),
                 ))
                 .child(labelled(
                     "Срок",
-                    200.0,
+                    170.0,
                     Select::new(&form.term_select)
                         .placeholder("Выберите срок")
                         .into_any_element(),
                 ))
-                .when(limited, |row| {
-                    row.child(labelled(
-                        "Дата закрытия (ГГГГ-ММ-ДД)",
-                        220.0,
+                .when(limited, |r| {
+                    r.child(labelled(
+                        "Дата закрытия",
+                        170.0,
                         Input::new(&form.term_end_date).into_any_element(),
                     ))
                 }),
         );
-        fields = fields.child(labelled(
-            "Выплата процентов",
-            320.0,
-            Select::new(&form.destination_select)
-                .placeholder("Выберите назначение")
-                .into_any_element(),
-        ));
 
-        Some(
-            div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .p_3()
-                .border_1()
-                .border_color(cx.theme().border)
-                .rounded_md()
-                .child(
-                    div()
-                        .font_weight(FontWeight::BOLD)
-                        .child(if form.id.is_some() {
-                            "Изменить накопление"
-                        } else {
-                            "Новое накопление"
-                        }),
-                )
-                .child(fields)
-                .when_some(form.error.clone(), |panel, error| {
-                    panel.child(div().text_color(danger).child(error))
-                })
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            Button::new("form-save")
-                                .primary()
-                                .label("Сохранить")
-                                .on_click(cx.listener(|page, _, _, cx| page.save(cx))),
-                        )
-                        .child(Button::new("form-cancel").label("Отмена").on_click(
-                            cx.listener(|page, _, window, cx| page.request_cancel(window, cx)),
-                        )),
-                ),
-        )
+        let mut panel = div().flex().flex_col().gap_3().p_4().child(fields);
+        if let Some(error) = form.error.clone() {
+            panel = panel.child(div().text_color(danger).child(error));
+        }
+        panel
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("form-save")
+                            .primary()
+                            .label("Сохранить")
+                            .on_click(cx.listener(|page, _, window, cx| {
+                                if page.save(cx) {
+                                    page.confirm_discard = false;
+                                    window.close_dialog(cx);
+                                }
+                            })),
+                    )
+                    .child(Button::new("form-cancel").label("Отмена").on_click(
+                        cx.listener(|page, _, window, cx| page.request_cancel(window, cx)),
+                    )),
+            )
+            .into_any_element()
     }
 
     fn page_count(&self) -> usize {
@@ -1005,6 +1071,7 @@ impl SavingsPage {
             ));
         let header = div()
             .flex()
+            .w_full()
             .h(px(ROW_HEIGHT))
             .items_center()
             .border_1()
@@ -1015,7 +1082,7 @@ impl SavingsPage {
                     .into_iter()
                     .zip(COLUMN_WIDTHS)
                     .enumerate()
-                    .map(|(index, (title, width))| cell(width, title.into(), border, index > 0)),
+                    .map(|(index, (title, width))| cell(index, width, title.into(), border)),
             );
         let body = uniform_list(
             "savings-rows",
@@ -1089,6 +1156,7 @@ impl SavingsPage {
         div()
             .id(("savings-row", id as usize))
             .flex()
+            .w_full()
             .h(px(ROW_HEIGHT))
             .items_center()
             .border_l_1()
@@ -1101,7 +1169,7 @@ impl SavingsPage {
                     .into_iter()
                     .zip(COLUMN_WIDTHS)
                     .enumerate()
-                    .map(|(index, (value, width))| cell(width, value, border, index > 0)),
+                    .map(|(index, (value, width))| cell(index, width, value, border)),
             )
             .child(
                 div()
@@ -1109,6 +1177,7 @@ impl SavingsPage {
                     .h_full()
                     .flex()
                     .items_center()
+                    .justify_end()
                     .border_l_1()
                     .border_color(border)
                     .gap_1()
@@ -1133,13 +1202,21 @@ impl SavingsPage {
     }
 }
 
-fn cell(width: f32, text: String, border: Hsla, separator: bool) -> Div {
-    div()
-        .w(px(width))
-        .h_full()
+/// Колонка «Название» занимает свободную ширину, остальные имеют фиксированную.
+fn cell(index: usize, width: f32, text: String, border: Hsla) -> Div {
+    let base = if index == 1 {
+        div()
+            .flex_1()
+            .min_w(px(width))
+            .whitespace_nowrap()
+            .text_ellipsis()
+    } else {
+        div().w(px(width)).flex_none()
+    };
+    base.h_full()
         .flex()
         .items_center()
-        .when(separator, |cell| cell.border_l_1().border_color(border))
+        .when(index > 0, |cell| cell.border_l_1().border_color(border))
         .px_2()
         .overflow_hidden()
         .child(text)
@@ -1153,15 +1230,46 @@ impl Render for SavingsPage {
         let muted = cx.theme().muted_foreground;
         let mut root = div().size_full().flex().flex_col().gap_2().p_3();
         root = root.child(
-            div().flex().items_center().gap_2().child(
-                Button::new("new-savings")
-                    .primary()
-                    .label("Добавить накопление")
-                    .icon(IconName::Plus)
-                    .disabled(self.form.is_some() || self.banks.is_empty())
-                    .on_click(cx.listener(|page, _, window, cx| page.begin_new(window, cx))),
-            ),
+            div()
+                .flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(24.0))
+                        .font_weight(FontWeight::BOLD)
+                        .child("Накопления"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Button::new("new-savings")
+                                .primary()
+                                .large()
+                                .label("Добавить накопление")
+                                .icon(IconName::Plus)
+                                .disabled(self.form.is_some() || self.banks.is_empty())
+                                .on_click(
+                                    cx.listener(|page, _, window, cx| page.begin_new(window, cx)),
+                                ),
+                        )
+                        .child(
+                            Button::new("refresh-savings")
+                                .secondary()
+                                .large()
+                                .label("Обновить")
+                                .icon(IconName::Replace)
+                                .on_click(
+                                    cx.listener(|page, _, window, cx| page.reload(window, cx)),
+                                ),
+                        ),
+                ),
         );
+        root = root.child(self.render_filters(cx));
         if self.banks.is_empty() {
             root = root
                 .child("Сначала добавьте банк в разделе «Справочники», чтобы создать накопление.");
@@ -1173,15 +1281,7 @@ impl Render for SavingsPage {
                     .child(message.clone()),
             );
         }
-        if self.form.is_some() {
-            if let Some(form) = self.render_form(cx) {
-                root = root.child(form);
-            }
-        } else {
-            root = root
-                .child(self.render_filters(cx))
-                .child(self.render_table(cx));
-        }
+        root = root.child(self.render_table(cx));
         root.child(div().text_color(muted).child(FOOTER_NOTE))
             .child(div().text_color(warning).child(FOOTER_WARNING))
     }
