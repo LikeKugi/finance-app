@@ -143,6 +143,8 @@ struct FinanceApp {
     currencies: Vec<CurrencyDefinition>,
     used_currencies: HashSet<String>,
     transaction_form: TransactionForm,
+    transaction_comment_history: Vec<String>,
+    transaction_comment_suggestions: Vec<String>,
     transaction_cards: Vec<PaymentDocument>,
     category_form: CategoryForm,
     bank_form: BankForm,
@@ -195,6 +197,8 @@ impl FinanceApp {
             currencies: Vec::new(),
             used_currencies: HashSet::new(),
             transaction_form: TransactionForm::default(),
+            transaction_comment_history: Vec::new(),
+            transaction_comment_suggestions: Vec::new(),
             transaction_cards: Vec::new(),
             category_form: CategoryForm::default(),
             bank_form: BankForm::default(),
@@ -624,7 +628,8 @@ mod tests {
     };
     use super::directories_page::currency_rate_label;
     use super::transactions_page::{
-        transaction_column_widths, DIVISION_ROUNDING_WARNING, TRANSACTION_COLUMN_MIN_WIDTHS,
+        comment_suggestions, transaction_column_widths, DIVISION_ROUNDING_WARNING,
+        TRANSACTION_COLUMN_MIN_WIDTHS,
     };
     use super::{
         AnalysisPage, Category, CurrencyForm, DirectoryRightTab, FinanceApp, ModuleTab,
@@ -1887,6 +1892,60 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn comment_suggestions_match_case_insensitive_substrings_and_limit_unique_results() {
+        let history = [
+            "Покупки в магазине",
+            "Покупки в МАГАЗИНЕ",
+            "магазин у дома",
+            "В магазин",
+            "Магазин за углом",
+            "Ещё один магазин",
+            "Последний магазин",
+        ]
+        .map(str::to_owned);
+
+        assert_eq!(
+            comment_suggestions(&history, "МАГАЗИН"),
+            [
+                "Покупки в магазине",
+                "магазин у дома",
+                "В магазин",
+                "Магазин за углом",
+                "Ещё один магазин",
+            ]
+        );
+        assert!(comment_suggestions(&history, "  ").is_empty());
+        assert!(comment_suggestions(&history, "покупки в магазине").is_empty());
+    }
+
+    #[test]
+    fn income_and_expense_forms_use_unfiltered_comment_history_and_apply_suggestions() {
+        for kind in [TransactionKind::Income, TransactionKind::Expense] {
+            let mut app = filtered_transaction_app(kind);
+            assert_eq!(app.transactions.len(), 1, "fixture should be filtered");
+
+            app.start_new_transaction();
+            assert_eq!(app.transaction_comment_history, ["найти", "пропустить"]);
+            app.transaction_form.comment = "ПРОП".to_owned();
+            app.refresh_comment_suggestions();
+            assert_eq!(app.transaction_comment_suggestions, ["пропустить"]);
+
+            let context = egui::Context::default();
+            let output = render_transaction_form_at_width(&mut app, &context, kind, 1_280.0);
+            assert!(!text_positions(&output, "пропустить").is_empty());
+
+            let transaction = app.transactions[0].clone();
+            app.edit_transaction(&transaction);
+            assert_eq!(app.transaction_comment_history, ["найти", "пропустить"]);
+            app.transaction_form.comment = "най".to_owned();
+            app.refresh_comment_suggestions();
+            app.select_comment_suggestion("найти".to_owned());
+            assert_eq!(app.transaction_form.comment, "найти");
+            assert!(app.transaction_comment_suggestions.is_empty());
         }
     }
 

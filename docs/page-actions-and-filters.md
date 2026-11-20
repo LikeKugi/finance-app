@@ -33,6 +33,12 @@ Shared date pickers retain previous/next-month arrow navigation and also let use
 - Date boundaries are inclusive. Invalid dates or a start date later than the end date are reported as errors; the existing results are not replaced with an empty list.
 - Applying filters updates the table and its totals. When no transactions match, the current page shows no data rows but has no dedicated filtered-empty-state message; future pages should provide one.
 
+### Income and Expenses Comment Suggestions
+
+- The transaction form offers suggestions from the distinct, non-empty comments already stored for both incomes and expenses.
+- Suggestions are loaded when an add/edit form opens and do not depend on the currently applied table filters.
+- While typing, up to five comments containing the entered text are shown, matched without regard to letter case. Blank input and an exact match do not show suggestions; selecting one replaces the comment field with the saved comment.
+
 ### Income and Expenses Balance
 
 - The table footer shows the transaction count and total for the configured primary currency only. It does not convert other currencies.

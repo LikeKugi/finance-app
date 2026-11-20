@@ -18,6 +18,7 @@ pub(super) const TRANSACTION_COLUMN_MIN_WIDTHS: [f32; 6] =
     [115.0, 135.0, 90.0, 180.0, 220.0, 180.0];
 const TRANSACTION_COLUMN_GROWTH_WEIGHTS: [f32; 6] = [0.8, 0.8, 0.6, 1.1, 1.8, 1.0];
 pub(super) const DIVISION_ROUNDING_WARNING: &str = "Деление округляется до 2 знаков после запятой; погрешность может накапливаться при нескольких делениях.";
+const MAX_COMMENT_SUGGESTIONS: usize = 5;
 
 pub(super) fn transaction_column_widths(available_width: f32) -> [f32; 6] {
     let minimum_width: f32 = TRANSACTION_COLUMN_MIN_WIDTHS.iter().sum();
@@ -42,6 +43,24 @@ fn payment_document_label(card: &PaymentDocument) -> String {
         card.id,
         card.currency.map_or("валюта не указана", Currency::code)
     )
+}
+
+pub(super) fn comment_suggestions(history: &[String], query: &str) -> Vec<String> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let mut seen = HashSet::new();
+    history
+        .iter()
+        .filter_map(|comment| {
+            let normalized = comment.to_lowercase();
+            (normalized != query && normalized.contains(&query) && seen.insert(normalized))
+                .then(|| comment.clone())
+        })
+        .take(MAX_COMMENT_SUGGESTIONS)
+        .collect()
 }
 
 fn parse_optional_date(value: &str) -> Result<Option<NaiveDate>, String> {
@@ -93,6 +112,7 @@ impl FinanceApp {
         {
             return;
         }
+        self.load_transaction_comment_history();
         self.transaction_date_input.reset();
         self.transaction_form = TransactionForm {
             id: Some(transaction.id),
@@ -124,6 +144,27 @@ impl FinanceApp {
                 false
             }
         }
+    }
+
+    fn load_transaction_comment_history(&mut self) {
+        self.transaction_comment_history.clear();
+        self.transaction_comment_suggestions.clear();
+        match finance_db::list_transaction_comments(&self.database) {
+            Ok(comments) => self.transaction_comment_history = comments,
+            Err(error) => self.show_error(error.to_string()),
+        }
+    }
+
+    pub(super) fn refresh_comment_suggestions(&mut self) {
+        self.transaction_comment_suggestions = comment_suggestions(
+            &self.transaction_comment_history,
+            &self.transaction_form.comment,
+        );
+    }
+
+    pub(super) fn select_comment_suggestion(&mut self, comment: String) {
+        self.transaction_form.comment = comment;
+        self.transaction_comment_suggestions.clear();
     }
 
     pub(super) fn refresh_transactions(&mut self, kind: TransactionKind) {
@@ -387,12 +428,27 @@ impl FinanceApp {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
             ui.label("Комментарий");
-            ui.add(
+            let response = ui.add(
                 egui::TextEdit::multiline(&mut self.transaction_form.comment)
                     .desired_width(480.0)
                     .desired_rows(3),
             );
+            if response.changed() {
+                self.refresh_comment_suggestions();
+            }
         });
+        if !self.transaction_comment_suggestions.is_empty() {
+            let suggestions = self.transaction_comment_suggestions.clone();
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Ранее использованные комментарии:");
+                for suggestion in suggestions {
+                    if ui.small_button(&suggestion).clicked() {
+                        self.select_comment_suggestion(suggestion);
+                        break;
+                    }
+                }
+            });
+        }
         if self.transaction_form.amount.contains('/') {
             ui.weak(DIVISION_ROUNDING_WARNING);
         }
@@ -729,6 +785,7 @@ impl FinanceApp {
         {
             return;
         }
+        self.load_transaction_comment_history();
         self.transaction_date_input.reset();
         self.transaction_form = TransactionForm {
             date: chrono::Local::now()
