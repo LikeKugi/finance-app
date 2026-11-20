@@ -65,3 +65,4 @@ The native UI exposes six Russian-language tabs: income, expenses, savings, paym
 - `docs/decisions.md` — accepted implementation decisions and financial semantics.
 - `README.md` — product overview and build instructions.
 - `docs/page-actions-and-filters.md` — page-level action and filter requirements.
+- [Form guidelines](form-guidelines.md) — Russian-language target standard for all forms; it does not imply that the current forms already comply.

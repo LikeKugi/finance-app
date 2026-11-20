@@ -69,3 +69,7 @@ Use the following pattern unless a page has a documented reason to differ:
 8. Show a clear empty state when no records match. Validate filter input before replacing displayed results; report invalid dates or an inverted date range without silently presenting an empty result.
 
 The recommended behavior intentionally standardizes category selection on Income and Expenses: unlike the current pages, changing any filter would wait until `Применить`, while clearing a single filter or resetting all filters would still reload immediately. Future pages can follow this pattern unless their requirements call for a documented exception.
+
+## Form Layout
+
+All create and edit forms, including inline forms and dialogs, must follow the shared spacing, field-layout, validation, and action-button rules in [`form-guidelines.md`](form-guidelines.md). That document defines the required button labels (`Сохранить` and `Отмена`) and their bottom-right placement; this page describes page-level actions and filters, not proof that existing forms already match the form standard.
