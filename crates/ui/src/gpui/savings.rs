@@ -11,7 +11,9 @@ use finance_core::{
 };
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::calendar::Date;
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
@@ -224,9 +226,9 @@ struct Form {
     base_rate: Entity<InputState>,
     threshold_amount: Entity<InputState>,
     rate_after_threshold: Entity<InputState>,
-    opened_date: Entity<InputState>,
-    interest_accrual_date: Entity<InputState>,
-    term_end_date: Entity<InputState>,
+    opened_date: Entity<DatePickerState>,
+    interest_accrual_date: Entity<DatePickerState>,
+    term_end_date: Entity<DatePickerState>,
     bank_select: Choice,
     currency_select: Choice,
     term_select: Choice,
@@ -485,10 +487,17 @@ impl SavingsPage {
         let base_rate = text_input(&initial.base_rate, "Например, 5,5", window, cx);
         let threshold_amount = text_input(&initial.threshold_amount, "", window, cx);
         let rate_after_threshold = text_input(&initial.rate_after_threshold, "", window, cx);
-        let opened_date = text_input(&initial.opened_date, "ГГГГ-ММ-ДД", window, cx);
-        let interest_accrual_date =
-            text_input(&initial.interest_accrual_date, "ГГГГ-ММ-ДД", window, cx);
-        let term_end_date = text_input(&initial.term_end_date, "ГГГГ-ММ-ДД", window, cx);
+        let date_input = |value: &str, window: &mut Window, cx: &mut Context<Self>| {
+            let date = NaiveDate::parse_from_str(value.trim(), DATE_FORMAT).ok();
+            cx.new(|cx| {
+                let mut state = DatePickerState::new(window, cx).date_format(DATE_FORMAT);
+                state.set_date(Date::Single(date), window, cx);
+                state
+            })
+        };
+        let opened_date = date_input(&initial.opened_date, window, cx);
+        let interest_accrual_date = date_input(&initial.interest_accrual_date, window, cx);
+        let term_end_date = date_input(&initial.term_end_date, window, cx);
 
         let bank_items: Vec<String> = self.banks.iter().map(|bank| bank.name.clone()).collect();
         let bank_selected = initial
@@ -526,7 +535,15 @@ impl SavingsPage {
             cx,
         );
 
-        let subscriptions = vec![
+        let mut subscriptions = Vec::new();
+        for picker in [&opened_date, &interest_accrual_date, &term_end_date] {
+            subscriptions.push(cx.subscribe_in(
+                picker,
+                window,
+                |_, _, _: &DatePickerEvent, _, cx| cx.notify(),
+            ));
+        }
+        subscriptions.extend([
             cx.subscribe_in(
                 &bank_select,
                 window,
@@ -583,7 +600,7 @@ impl SavingsPage {
                     cx.notify();
                 },
             ),
-        ];
+        ]);
 
         self.form = Some(Form {
             id: initial.id,
@@ -640,6 +657,10 @@ impl SavingsPage {
     fn read_form(&self, cx: &App) -> Option<SavingsForm> {
         let form = self.form.as_ref()?;
         let text = |input: &Entity<InputState>| input.read(cx).value().to_string();
+        let date_text = |picker: &Entity<DatePickerState>| match picker.read(cx).date() {
+            Date::Single(Some(date)) => date.format(DATE_FORMAT).to_string(),
+            _ => String::new(),
+        };
         Some(SavingsForm {
             id: form.id,
             bank_id: form.bank_id,
@@ -650,10 +671,10 @@ impl SavingsPage {
             use_threshold: form.use_threshold,
             rate_after_threshold: text(&form.rate_after_threshold),
             threshold_amount: text(&form.threshold_amount),
-            opened_date: text(&form.opened_date),
-            interest_accrual_date: text(&form.interest_accrual_date),
+            opened_date: date_text(&form.opened_date),
+            interest_accrual_date: date_text(&form.interest_accrual_date),
             term_type: form.term_type,
-            term_end_date: text(&form.term_end_date),
+            term_end_date: date_text(&form.term_end_date),
             interest_destination: form.interest_destination,
             is_active: form.is_active,
         })
@@ -969,12 +990,18 @@ impl SavingsPage {
                 .child(labelled(
                     "Дата открытия",
                     170.0,
-                    Input::new(&form.opened_date).into_any_element(),
+                    DatePicker::new(&form.opened_date)
+                        .placeholder("Выбрать дату")
+                        .cleanable(true)
+                        .into_any_element(),
                 ))
                 .child(labelled(
                     "Дата начисления %",
                     170.0,
-                    Input::new(&form.interest_accrual_date).into_any_element(),
+                    DatePicker::new(&form.interest_accrual_date)
+                        .placeholder("Выбрать дату")
+                        .cleanable(true)
+                        .into_any_element(),
                 ))
                 .child(labelled(
                     "Срок",
@@ -987,7 +1014,10 @@ impl SavingsPage {
                     r.child(labelled(
                         "Дата закрытия",
                         170.0,
-                        Input::new(&form.term_end_date).into_any_element(),
+                        DatePicker::new(&form.term_end_date)
+                            .placeholder("Выбрать дату")
+                            .cleanable(true)
+                            .into_any_element(),
                     ))
                 }),
         );
