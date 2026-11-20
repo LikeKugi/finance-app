@@ -53,7 +53,7 @@ impl ModuleTab {
             Self::Income => "Доходы",
             Self::Expenses => "Расходы",
             Self::Savings => "Накопления",
-            Self::PaymentDocuments => "Платёжные документы",
+            Self::PaymentDocuments => "Платёжные карты",
             Self::Analysis => "Анализ",
             Self::Directories => "Справочники",
         }

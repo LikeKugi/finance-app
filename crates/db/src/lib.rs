@@ -88,11 +88,11 @@ pub enum DbError {
     EmptyName,
     #[error("Банк не найден")]
     SavingsBankUnavailable,
-    #[error("Банк платёжного документа не найден")]
+    #[error("Банк платёжной карты не найден")]
     PaymentDocumentBankUnavailable,
     #[error("Одно или несколько накоплений не найдены")]
     PaymentDocumentSavingsUnavailable,
-    #[error("Банк платёжного документа и выбранных накоплений должен совпадать")]
+    #[error("Банк платёжной карты и выбранных накоплений должен совпадать")]
     PaymentDocumentSavingsBankMismatch,
     #[error("Начало периода не может быть позже его окончания")]
     InvalidAnalysisDateRange,
@@ -114,7 +114,7 @@ pub enum DbError {
     CurrencyNotFound,
     #[error("Основную валюту нельзя удалить; сначала выберите другую основную валюту")]
     PrimaryCurrencyCannotDelete,
-    #[error("Валюта используется доходами, расходами или платёжными документами")]
+    #[error("Валюта используется доходами, расходами или платёжными картами")]
     CurrencyInUse,
     #[error("Валюта с таким кодом уже существует")]
     CurrencyAlreadyExists,

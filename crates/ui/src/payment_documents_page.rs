@@ -75,7 +75,7 @@ impl PaymentDocumentsPage {
     ) -> Option<(String, bool)> {
         if banks.is_empty() {
             ui.label(
-                "Сначала добавьте банк в разделе «Справочники», чтобы создать платёжный документ.",
+                "Сначала добавьте банк в разделе «Справочники», чтобы создать платёжную карту.",
             );
         }
         let mut should_refresh = false;
@@ -176,7 +176,7 @@ impl PaymentDocumentsPage {
         ui.separator();
 
         if self.entries.is_empty() {
-            ui.label("Платёжных документов по выбранным условиям нет.");
+            ui.label("Платёжных карт по выбранным условиям нет.");
         } else {
             self.render_table(ui, database);
         }
@@ -354,9 +354,9 @@ impl PaymentDocumentsPage {
     ) -> Option<(String, bool)> {
         ui.separator();
         ui.heading(if self.form.id.is_some() {
-            "Изменить платёжный документ"
+            "Изменить платёжную карту"
         } else {
-            "Новый платёжный документ"
+            "Новая платёжная карта"
         });
         ui.add_space(8.0);
 
@@ -556,8 +556,7 @@ impl PaymentDocumentsPage {
                             self.form.error = None;
                             match self.refresh(database) {
                                 Ok(()) => {
-                                    result =
-                                        Some(("Платёжный документ сохранён".to_owned(), false));
+                                    result = Some(("Платёжная карта сохранена".to_owned(), false));
                                 }
                                 Err(error) => result = Some((error.to_string(), true)),
                             }
@@ -651,7 +650,7 @@ impl PaymentDocumentsPage {
             .resizable(false)
             .show(context, |ui| {
                 ui.label(format!(
-                    "Удалить платёжный документ «{bank_name}»? Его связи с накоплениями также будут удалены."
+                    "Удалить платёжную карту «{bank_name}»? Её связи с накоплениями также будут удалены."
                 ));
                 ui.horizontal(|ui| {
                     if ui.button("Удалить").clicked() {
@@ -660,10 +659,7 @@ impl PaymentDocumentsPage {
                                 self.pending_delete = None;
                                 match self.refresh(database) {
                                     Ok(()) => {
-                                        result = Some((
-                                            "Платёжный документ удалён".to_owned(),
-                                            false,
-                                        ));
+                                        result = Some(("Платёжная карта удалена".to_owned(), false));
                                     }
                                     Err(error) => result = Some((error.to_string(), true)),
                                 }
@@ -834,10 +830,10 @@ mod tests {
                 },
             );
 
-            let form_title = text_positions(&output, "Новый платёжный документ")[0];
+            let form_title = text_positions(&output, "Новая платёжная карта")[0];
             let filters = text_positions(&output, "Применить")[0];
             let empty_list =
-                text_positions(&output, "Платёжных документов по выбранным условиям нет.")[0];
+                text_positions(&output, "Платёжных карт по выбранным условиям нет.")[0];
             let warning_text = "Условие сохраняется как возможность; приложение не подтверждает выполнение порога трат.";
             let warnings = text_positions(&output, warning_text);
             let save = text_positions(&output, "Сохранить")[0];
@@ -887,7 +883,7 @@ mod tests {
         );
 
         let filters = text_positions(&output, "Применить")[0];
-        let form_title = text_positions(&output, "Изменить платёжный документ")[0];
+        let form_title = text_positions(&output, "Изменить платёжную карту")[0];
         let table_header = text_positions(&output, "Дата платежа")[0];
 
         assert!(filters.y < form_title.y);
