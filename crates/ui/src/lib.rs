@@ -1048,25 +1048,50 @@ mod tests {
             for (primary_currency, expected, other_currency) in [
                 (
                     "RUB",
-                    "Доходы за весь период: 100 RUB − Расходы за весь период: 25 RUB = Сальдо за весь период: 75 RUB",
+                    "Доходы: 100 RUB − Расходы: 25 RUB = Сальдо: 75 RUB",
                     "USD",
                 ),
                 (
                     "USD",
-                    "Доходы за весь период: 20 USD − Расходы за весь период: 5 USD = Сальдо за весь период: 15 USD",
+                    "Доходы: 20 USD − Расходы: 5 USD = Сальдо: 15 USD",
                     "RUB",
                 ),
             ] {
-                let rendered_text =
-                    transaction_balance_footer_texts(active_tab, Some(primary_currency));
+                let rendered_text = transaction_balance_footer_texts(
+                    active_tab,
+                    Some(primary_currency),
+                    Some((None, None)),
+                );
                 assert_eq!(
-                    rendered_text.iter().filter(|text| text.as_str() == expected).count(),
+                    rendered_text
+                        .iter()
+                        .filter(|text| text.as_str() == expected)
+                        .count(),
                     1,
                     "rendered labels: {rendered_text:?}"
                 );
                 assert!(
-                    rendered_text.iter().all(|text| !text.contains(other_currency)),
+                    rendered_text
+                        .iter()
+                        .all(|text| !text.contains(other_currency)),
                     "the footer should show only {primary_currency}: {rendered_text:?}"
+                );
+                assert_eq!(
+                    rendered_text
+                        .iter()
+                        .filter(|text| text.as_str() == "За весь период:")
+                        .count(),
+                    1,
+                    "rendered labels: {rendered_text:?}"
+                );
+                let output = transaction_balance_footer_output(
+                    active_tab,
+                    Some(primary_currency),
+                    Some((None, None)),
+                );
+                assert!(
+                    text_positions(&output, "За весь период:")[0].y
+                        < text_positions(&output, expected)[0].y
                 );
                 assert!(
                     rendered_text
@@ -1079,8 +1104,55 @@ mod tests {
     }
 
     #[test]
+    fn transaction_balance_footer_shows_period_once_before_balance_at_matching_size() {
+        let from = NaiveDate::from_ymd_opt(2024, 1, 1);
+        let to = NaiveDate::from_ymd_opt(2024, 1, 31);
+        let expected_formula = "Доходы: 100 RUB − Расходы: 25 RUB = Сальдо: 75 RUB";
+
+        for active_tab in [ModuleTab::Income, ModuleTab::Expenses] {
+            for (period, expected_period) in [
+                ((None, None), "За весь период:"),
+                ((from, to), "За период с 01.01.2024 по 31.01.2024:"),
+                ((from, None), "За период с 01.01.2024:"),
+                ((None, to), "За период по 31.01.2024:"),
+            ] {
+                let rendered_text =
+                    transaction_balance_footer_texts(active_tab, Some("RUB"), Some(period));
+                let output =
+                    transaction_balance_footer_output(active_tab, Some("RUB"), Some(period));
+
+                assert_eq!(
+                    rendered_text
+                        .iter()
+                        .filter(|text| text.as_str() == expected_period)
+                        .count(),
+                    1,
+                    "rendered labels: {rendered_text:?}"
+                );
+                assert_eq!(
+                    rendered_text
+                        .iter()
+                        .filter(|text| text.as_str() == expected_formula)
+                        .count(),
+                    1,
+                    "rendered labels: {rendered_text:?}"
+                );
+                let period_position = text_positions(&output, expected_period)[0];
+                let formula_position = text_positions(&output, expected_formula)[0];
+                assert!(period_position.y < formula_position.y);
+                assert_eq!(
+                    text_font_sizes(&output, expected_period),
+                    text_font_sizes(&output, expected_formula),
+                    "period and formula should use the same font size"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn transaction_balance_footer_explains_unsupported_or_missing_primary_currency() {
-        let unsupported = transaction_balance_footer_texts(ModuleTab::Income, Some("EUR"));
+        let unsupported =
+            transaction_balance_footer_texts(ModuleTab::Income, Some("EUR"), Some((None, None)));
         assert!(unsupported.iter().any(|text| {
             text.contains("основная валюта EUR не поддерживается")
         }));
@@ -1088,7 +1160,8 @@ mod tests {
             .iter()
             .all(|text| !text.contains("Доходы за весь период:")));
 
-        let missing = transaction_balance_footer_texts(ModuleTab::Expenses, None);
+        let missing =
+            transaction_balance_footer_texts(ModuleTab::Expenses, None, Some((None, None)));
         assert!(missing
             .iter()
             .any(|text| text.contains("не удалось определить основную валюту")));
@@ -1133,10 +1206,11 @@ mod tests {
         assert_eq!(text_positions(&output, "100 RUB").len(), 0);
     }
 
-    fn transaction_balance_footer_texts(
+    fn transaction_balance_footer_output(
         active_tab: ModuleTab,
         primary_currency: Option<&str>,
-    ) -> Vec<String> {
+        period: Option<(Option<NaiveDate>, Option<NaiveDate>)>,
+    ) -> egui::FullOutput {
         let balances = [
             TransactionBalance {
                 currency: Currency::Rub,
@@ -1170,7 +1244,7 @@ mod tests {
                                 render_transaction_balance_footer(
                                     ui,
                                     Some(&balances),
-                                    Some((None, None)),
+                                    period,
                                     primary_currency,
                                 );
                             },
@@ -1179,8 +1253,15 @@ mod tests {
                 },
             ));
         }
-        output
-            .expect("balance footer should render twice")
+        output.expect("balance footer should render twice")
+    }
+
+    fn transaction_balance_footer_texts(
+        active_tab: ModuleTab,
+        primary_currency: Option<&str>,
+        period: Option<(Option<NaiveDate>, Option<NaiveDate>)>,
+    ) -> Vec<String> {
+        transaction_balance_footer_output(active_tab, primary_currency, period)
             .shapes
             .iter()
             .filter_map(|clipped_shape| match &clipped_shape.shape {
@@ -1305,6 +1386,28 @@ mod tests {
                 }
                 _ => None,
             })
+            .collect()
+    }
+
+    fn text_font_sizes(output: &egui::FullOutput, text: &str) -> Vec<f32> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped_shape| match &clipped_shape.shape {
+                egui::epaint::Shape::Text(text_shape) if text_shape.galley.job.text == text => {
+                    Some(
+                        text_shape
+                            .galley
+                            .job
+                            .sections
+                            .iter()
+                            .map(|section| section.format.font_id.size)
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                _ => None,
+            })
+            .flatten()
             .collect()
     }
 

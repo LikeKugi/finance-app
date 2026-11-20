@@ -93,14 +93,14 @@ pub(super) fn transaction_balance_period_label(
     to: Option<NaiveDate>,
 ) -> String {
     match (from, to) {
-        (None, None) => "за весь период".to_owned(),
+        (None, None) => "За весь период".to_owned(),
         (Some(from), Some(to)) => format!(
-            "за период с {} по {}",
+            "За период с {} по {}",
             from.format("%d.%m.%Y"),
             to.format("%d.%m.%Y")
         ),
-        (Some(from), None) => format!("за период с {}", from.format("%d.%m.%Y")),
-        (None, Some(to)) => format!("за период по {}", to.format("%d.%m.%Y")),
+        (Some(from), None) => format!("За период с {}", from.format("%d.%m.%Y")),
+        (None, Some(to)) => format!("За период по {}", to.format("%d.%m.%Y")),
     }
 }
 
@@ -132,9 +132,15 @@ pub(super) fn render_transaction_balance_footer(
                 return;
             };
             let period_label = transaction_balance_period_label(from, to);
+            let footer_font_size = egui::TextStyle::Body.resolve(ui.style()).size + 4.0;
+            ui.label(
+                egui::RichText::new(format!("{period_label}:"))
+                    .size(footer_font_size)
+                    .strong(),
+            );
             ui.label(
                 egui::RichText::new(format!(
-                    "Доходы {period_label}: {} {} − Расходы {period_label}: {} {} = Сальдо {period_label}: {} {}",
+                    "Доходы: {} {} − Расходы: {} {} = Сальдо: {} {}",
                     balance.income,
                     balance.currency.code(),
                     balance.expenses,
@@ -142,7 +148,7 @@ pub(super) fn render_transaction_balance_footer(
                     balance.balance,
                     balance.currency.code(),
                 ))
-                .size(egui::TextStyle::Body.resolve(ui.style()).size + 4.0)
+                .size(footer_font_size)
                 .strong(),
             );
             ui.weak(

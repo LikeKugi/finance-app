@@ -32,9 +32,9 @@ On Savings, refresh also reloads the bank list and returns the results table to 
 ### Income and Expenses Balance
 
 - The table footer shows the transaction count and total for the configured primary currency only. It does not convert other currencies.
-- The bottom of both pages shows one `Доходы за период − Расходы за период = Сальдо за период` formula in the configured primary currency only. If that currency is not supported for transactions (currently only RUB and USD are supported), or the primary currency cannot be determined, the amount is hidden and the footer explains why.
+- The bottom of both pages shows the applied date range on a separate line before one `Доходы − Расходы = Сальдо` formula (for example, `За период с … по …:`). With no date boundaries, the separate line says `За весь период:`. The period line and balance formula use the same prominent text size; the formula uses the configured primary currency only. If that currency is not supported for transactions (currently only RUB and USD are supported), or the primary currency cannot be determined, the amount is hidden and the footer explains why.
 - The balance includes every income and expense within the last successfully applied inclusive date range. Category, currency, and search filters affect the table, but do not affect this balance.
-- When both date fields are empty, the balance covers all transactions in the database. Editing a date does not change the displayed result until a refresh applies the date values; the footer identifies the period used for its calculation.
+- When both date fields are empty, the balance covers all transactions in the database and the footer shows `За весь период:` above the formula. Editing a date does not change the displayed result until a refresh applies the date values; the footer identifies the applied period once, above the balance formula.
 - Currency totals are not converted or combined. If loading or calculating the balance fails, the old balance is hidden instead of being presented as current.
 - This is the net of recorded income and expense operations, not a confirmed amount of cash on hand: opening balances and transfers are not represented by the current transaction model.
 
