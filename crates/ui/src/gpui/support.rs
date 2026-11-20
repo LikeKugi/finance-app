@@ -11,6 +11,7 @@ const MAX_COMMENT_SUGGESTIONS: usize = 5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum DatePeriod {
+    All,
     Year,
     Quarter,
     Month,
@@ -18,8 +19,15 @@ pub(crate) enum DatePeriod {
     Day,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DatePeriodRange {
+    Unbounded,
+    Bounded(NaiveDate, NaiveDate),
+}
+
 impl DatePeriod {
-    pub(crate) const ALL: [(Self, &'static str); 5] = [
+    pub(crate) const ALL: [(Self, &'static str); 6] = [
+        (Self::All, "Весь период"),
         (Self::Year, "Год"),
         (Self::Quarter, "Квартал"),
         (Self::Month, "Месяц"),
@@ -28,12 +36,10 @@ impl DatePeriod {
     ];
 }
 
-pub(crate) fn date_period_range(
-    period: DatePeriod,
-    today: NaiveDate,
-) -> Option<(NaiveDate, NaiveDate)> {
+pub(crate) fn date_period_range(period: DatePeriod, today: NaiveDate) -> Option<DatePeriodRange> {
     match period {
-        DatePeriod::Year => Some((
+        DatePeriod::All => Some(DatePeriodRange::Unbounded),
+        DatePeriod::Year => Some(DatePeriodRange::Bounded(
             NaiveDate::from_ymd_opt(today.year(), 1, 1)?,
             NaiveDate::from_ymd_opt(today.year(), 12, 31)?,
         )),
@@ -41,37 +47,45 @@ pub(crate) fn date_period_range(
             let first_month = (today.month0() / 3) * 3 + 1;
             let from = NaiveDate::from_ymd_opt(today.year(), first_month, 1)?;
             let to = from.checked_add_months(Months::new(3))?.pred_opt()?;
-            Some((from, to))
+            Some(DatePeriodRange::Bounded(from, to))
         }
         DatePeriod::Month => {
             let from = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)?;
             let to = from.checked_add_months(Months::new(1))?.pred_opt()?;
-            Some((from, to))
+            Some(DatePeriodRange::Bounded(from, to))
         }
         DatePeriod::Week => {
             let from = today
                 .checked_sub_days(Days::new(u64::from(today.weekday().num_days_from_monday())))?;
             let to = from.checked_add_days(Days::new(6))?;
-            Some((from, to))
+            Some(DatePeriodRange::Bounded(from, to))
         }
-        DatePeriod::Day => Some((today, today)),
+        DatePeriod::Day => Some(DatePeriodRange::Bounded(today, today)),
     }
 }
 
-#[cfg(test)]
 pub(crate) fn set_period_dates(
     period: DatePeriod,
     today: NaiveDate,
     from_date: &mut String,
     to_date: &mut String,
 ) -> bool {
-    let Some((from, to)) = date_period_range(period, today) else {
+    let Some(range) = date_period_range(period, today) else {
         return false;
     };
-    *from_date = from.format("%Y-%m-%d").to_string();
-    *to_date = to.format("%Y-%m-%d").to_string();
+    match range {
+        DatePeriodRange::Unbounded => {
+            from_date.clear();
+            to_date.clear();
+        }
+        DatePeriodRange::Bounded(from, to) => {
+            *from_date = from.format("%Y-%m-%d").to_string();
+            *to_date = to.format("%Y-%m-%d").to_string();
+        }
+    }
     true
 }
+
 pub(crate) fn comment_suggestions(history: &[String], query: &str) -> Vec<String> {
     let query = query.trim().to_lowercase();
     if query.is_empty() {
@@ -191,7 +205,10 @@ mod tests {
     fn year_period_uses_full_calendar_year() {
         assert_eq!(
             date_period_range(DatePeriod::Year, date(2024, 2, 29)),
-            Some((date(2024, 1, 1), date(2024, 12, 31)))
+            Some(DatePeriodRange::Bounded(
+                date(2024, 1, 1),
+                date(2024, 12, 31)
+            ))
         );
     }
 
@@ -199,7 +216,10 @@ mod tests {
     fn quarter_period_uses_current_calendar_quarter() {
         assert_eq!(
             date_period_range(DatePeriod::Quarter, date(2026, 11, 20)),
-            Some((date(2026, 10, 1), date(2026, 12, 31)))
+            Some(DatePeriodRange::Bounded(
+                date(2026, 10, 1),
+                date(2026, 12, 31)
+            ))
         );
     }
 
@@ -207,7 +227,10 @@ mod tests {
     fn month_period_includes_leap_day() {
         assert_eq!(
             date_period_range(DatePeriod::Month, date(2024, 2, 29)),
-            Some((date(2024, 2, 1), date(2024, 2, 29)))
+            Some(DatePeriodRange::Bounded(
+                date(2024, 2, 1),
+                date(2024, 2, 29)
+            ))
         );
     }
 
@@ -215,7 +238,10 @@ mod tests {
     fn week_period_starts_on_monday_across_year_boundary() {
         assert_eq!(
             date_period_range(DatePeriod::Week, date(2026, 1, 1)),
-            Some((date(2025, 12, 29), date(2026, 1, 4)))
+            Some(DatePeriodRange::Bounded(
+                date(2025, 12, 29),
+                date(2026, 1, 4)
+            ))
         );
     }
 
@@ -225,12 +251,33 @@ mod tests {
 
         assert_eq!(
             date_period_range(DatePeriod::Day, today),
-            Some((today, today))
+            Some(DatePeriodRange::Bounded(today, today))
         );
     }
 
     #[test]
-    fn selecting_period_replaces_both_dates_and_keeps_them_editable() {
+    fn all_period_is_the_default_period_option() {
+        assert_eq!(DatePeriod::ALL[0], (DatePeriod::All, "Весь период"));
+        assert_eq!(
+            date_period_range(DatePeriod::All, date(2024, 2, 29)),
+            Some(DatePeriodRange::Unbounded)
+        );
+    }
+
+    #[test]
+    fn selecting_all_period_clears_both_date_inputs() {
+        let today = date(2024, 2, 29);
+        let mut from = "не дата".to_owned();
+        let mut to = "2024-03-01".to_owned();
+
+        assert!(set_period_dates(DatePeriod::All, today, &mut from, &mut to));
+
+        assert!(from.is_empty());
+        assert!(to.is_empty());
+    }
+
+    #[test]
+    fn selecting_bounded_period_after_all_replaces_both_dates() {
         let today = date(2024, 2, 29);
         let mut from = String::new();
         let mut to = String::new();
@@ -252,6 +299,22 @@ mod tests {
         to = "2024-03-01".to_owned();
         assert_eq!(from, "2024-02-28");
         assert_eq!(to, "2024-03-01");
+    }
+
+    #[test]
+    fn failed_period_range_keeps_both_date_inputs_unchanged() {
+        let mut from = "начало".to_owned();
+        let mut to = "конец".to_owned();
+
+        assert!(!set_period_dates(
+            DatePeriod::Quarter,
+            NaiveDate::MAX,
+            &mut from,
+            &mut to
+        ));
+
+        assert_eq!(from, "начало");
+        assert_eq!(to, "конец");
     }
 
     fn category(id: i64, parent_id: Option<i64>, is_active: bool) -> Category {

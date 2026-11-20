@@ -415,16 +415,16 @@ impl AnalysisPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((from, to)) = super::support::date_period_range(period, Local::now().date_naive())
-        else {
+        let mut from = self.from.read(cx).value().to_string();
+        let mut to = self.to.read(cx).value().to_string();
+        if !super::support::set_period_dates(period, Local::now().date_naive(), &mut from, &mut to)
+        {
             return;
-        };
-        self.from.update(cx, |input, cx| {
-            input.set_value(from.format(DATE_FORMAT).to_string(), window, cx)
-        });
-        self.to.update(cx, |input, cx| {
-            input.set_value(to.format(DATE_FORMAT).to_string(), window, cx)
-        });
+        }
+        self.from
+            .update(cx, |input, cx| input.set_value(from, window, cx));
+        self.to
+            .update(cx, |input, cx| input.set_value(to, window, cx));
         cx.notify();
     }
 
@@ -482,6 +482,9 @@ impl AnalysisPage {
         for input in [&self.from, &self.to] {
             input.update(cx, |input, cx| input.set_value("", window, cx));
         }
+        self.period_select.update(cx, |state, cx| {
+            state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
+        });
         for picker in [&mut self.income, &mut self.expense] {
             picker.selected = None;
             picker.select.update(cx, |state, cx| {
@@ -542,7 +545,7 @@ impl AnalysisPage {
             .child(labeled("Период"))
             .child(
                 div()
-                    .w(px(110.0))
+                    .w(px(140.0))
                     .child(Select::new(&self.period_select).placeholder("Выбрать")),
             )
             .child(labeled("Период с"))

@@ -23,7 +23,7 @@ use rust_decimal::Decimal;
 
 use super::support::category_tree_labels;
 use super::support::{comment_suggestions, DIVISION_ROUNDING_WARNING};
-use super::support::{date_period_range, DatePeriod};
+use super::support::{set_period_dates, DatePeriod};
 
 const DATE_FORMAT: &str = "%Y-%m-%d";
 const ROW_HEIGHT: f32 = 40.0;
@@ -323,15 +323,15 @@ impl TransactionsPage {
     }
 
     fn apply_period(&mut self, period: DatePeriod, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((from, to)) = date_period_range(period, Local::now().date_naive()) else {
+        let mut from = self.from.read(cx).value().to_string();
+        let mut to = self.to.read(cx).value().to_string();
+        if !set_period_dates(period, Local::now().date_naive(), &mut from, &mut to) {
             return;
-        };
-        self.from.update(cx, |input, cx| {
-            input.set_value(from.format(DATE_FORMAT).to_string(), window, cx)
-        });
-        self.to.update(cx, |input, cx| {
-            input.set_value(to.format(DATE_FORMAT).to_string(), window, cx)
-        });
+        }
+        self.from
+            .update(cx, |input, cx| input.set_value(from, window, cx));
+        self.to
+            .update(cx, |input, cx| input.set_value(to, window, cx));
         self.refresh(cx);
     }
 
@@ -349,7 +349,11 @@ impl TransactionsPage {
         }
         self.category_filter = None;
         self.currency_filter = None;
-        for select in [&self.category_filter_select, &self.currency_filter_select] {
+        for select in [
+            &self.category_filter_select,
+            &self.currency_filter_select,
+            &self.period_select,
+        ] {
             select.update(cx, |state, cx| {
                 state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
             });
@@ -695,7 +699,7 @@ impl TransactionsPage {
             )
             .child(
                 div()
-                    .w(px(110.0))
+                    .w(px(140.0))
                     .child(Select::new(&self.period_select).placeholder("Период")),
             )
             .child(div().w(px(150.0)).child(Input::new(&self.from)))
