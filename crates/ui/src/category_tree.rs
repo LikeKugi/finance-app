@@ -51,7 +51,7 @@ pub(super) fn category_tree_labels(categories: &[Category]) -> Vec<(i64, String)
         .map(|(index, depth)| {
             path.truncate(depth);
             path.push(categories[index].name.as_str());
-            (categories[index].id, path.join(" → "))
+            (categories[index].id, path.join(" > "))
         })
         .collect()
 }

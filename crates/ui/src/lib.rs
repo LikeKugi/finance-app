@@ -1418,11 +1418,11 @@ mod tests {
             rows,
             vec![
                 (20, "Транспорт".to_owned()),
-                (6, "Транспорт → Разное".to_owned()),
+                (6, "Транспорт > Разное".to_owned()),
                 (2, "Расходы".to_owned()),
-                (3, "Расходы → Разное".to_owned()),
-                (4, "Расходы → Разное → История".to_owned()),
-                (5, "Расходы → Разное".to_owned()),
+                (3, "Расходы > Разное".to_owned()),
+                (4, "Расходы > Разное > История".to_owned()),
+                (5, "Расходы > Разное".to_owned()),
             ]
         );
     }
@@ -2159,6 +2159,12 @@ mod tests {
             .expect("child category should be inserted");
         app.database
             .execute(
+                "INSERT INTO income_categories (name, parent_id) VALUES ('Внучатая категория', 2)",
+                [],
+            )
+            .expect("grandchild category should be inserted");
+        app.database
+            .execute(
                 "INSERT INTO banks (name) VALUES ('Первый банк'), ('Второй банк')",
                 [],
             )
@@ -2171,8 +2177,11 @@ mod tests {
 
         for output in [&narrow_output, &wide_output] {
             let category_header_x = text_positions(output, "Категория")[0].x;
-            for text in ["Корневая категория", "　↳ Дочерняя категория"]
-            {
+            for text in [
+                "Корневая категория",
+                "  > Дочерняя категория",
+                "    > Внучатая категория",
+            ] {
                 let text_start_x = text_positions(output, text)[0].x;
                 assert!(
                     (text_start_x - category_header_x).abs() < 0.5,

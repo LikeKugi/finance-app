@@ -412,7 +412,7 @@ impl FinanceApp {
                     let prefix = if depth == 0 {
                         String::new()
                     } else {
-                        format!("{}↳ ", "　".repeat(depth))
+                        format!("{}> ", "  ".repeat(depth))
                     };
                     let active_suffix = if category.is_active {
                         ""
