@@ -7,6 +7,7 @@ use finance_core::{
 use finance_db::{self, Database};
 
 use super::common::TABLE_ROW_HEIGHT;
+use super::date_input::{date_input, DateInputState};
 
 const SAVINGS_PAGE_SIZE: usize = 100;
 const SAVINGS_COLUMN_MIN_WIDTHS: [f32; 12] = [
@@ -38,6 +39,9 @@ pub(super) struct SavingsPage {
     show_form: bool,
     show_discard_confirmation: bool,
     pending_delete: Option<(i64, String)>,
+    opened_date_input: DateInputState,
+    interest_accrual_date_input: DateInputState,
+    term_end_date_input: DateInputState,
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -83,6 +87,7 @@ impl SavingsPage {
     }
 
     pub(super) fn begin_new(&mut self, banks: &[Bank]) {
+        self.reset_date_inputs();
         self.form = SavingsForm {
             bank_id: banks.first().map(|bank| bank.id),
             amount: String::new(),
@@ -391,6 +396,7 @@ impl SavingsPage {
     }
 
     fn begin_edit(&mut self, id: i64) {
+        self.reset_date_inputs();
         let Some(account) = self.entries.iter().find(|account| account.id == id) else {
             return;
         };
@@ -424,6 +430,12 @@ impl SavingsPage {
         self.form_snapshot = Some(self.form.clone());
         self.show_form = true;
         self.show_discard_confirmation = false;
+    }
+
+    fn reset_date_inputs(&mut self) {
+        self.opened_date_input.reset();
+        self.interest_accrual_date_input.reset();
+        self.term_end_date_input.reset();
     }
 
     fn clear_search_filter(&mut self) {
@@ -591,20 +603,22 @@ impl SavingsPage {
         ui.label(egui::RichText::new("Даты и срок").strong());
         ui.columns(3, |columns| {
             let opened_date_width = columns[0].available_width();
-            render_savings_text_field(
+            render_savings_date_field(
                 &mut columns[0],
                 "Дата открытия (ГГГГ-ММ-ДД)",
+                "savings_form_opened_date",
                 &mut self.form.opened_date,
+                &mut self.opened_date_input,
                 opened_date_width,
-                Some("ГГГГ-ММ-ДД"),
             );
             let accrual_date_width = columns[1].available_width();
-            render_savings_text_field(
+            render_savings_date_field(
                 &mut columns[1],
                 "Дата начисления процентов (ГГГГ-ММ-ДД)",
+                "savings_form_interest_accrual_date",
                 &mut self.form.interest_accrual_date,
+                &mut self.interest_accrual_date_input,
                 accrual_date_width,
-                Some("ГГГГ-ММ-ДД"),
             );
             let term_width = columns[2].available_width();
             columns[2].vertical(|ui| {
@@ -633,12 +647,13 @@ impl SavingsPage {
                     });
                 if self.form.term_type == Some(SavingsTerm::Limited) {
                     ui.add_space(8.0);
-                    render_savings_text_field(
+                    render_savings_date_field(
                         ui,
                         "Дата закрытия (ГГГГ-ММ-ДД)",
+                        "savings_form_term_end_date",
                         &mut self.form.term_end_date,
+                        &mut self.term_end_date_input,
                         term_width,
-                        Some("ГГГГ-ММ-ДД"),
                     );
                 }
             });
@@ -815,6 +830,24 @@ fn render_savings_text_field(
             field = field.hint_text(hint);
         }
         ui.add(field);
+    });
+}
+
+fn render_savings_date_field(
+    ui: &mut egui::Ui,
+    label: &str,
+    id_source: &str,
+    value: &mut String,
+    state: &mut DateInputState,
+    width: f32,
+) {
+    ui.vertical(|ui| {
+        ui.set_min_width(width);
+        ui.set_max_width(width);
+        ui.label(label);
+        ui.add_space(4.0);
+        ui.spacing_mut().item_spacing.x = 8.0;
+        date_input(ui, id_source, value, state, (width - 40.0).max(0.0));
     });
 }
 
@@ -1033,6 +1066,10 @@ mod tests {
         page.begin_edit(1);
         page.form.title = "Изменённый вклад".to_owned();
         page.form.amount = "1250.50".to_owned();
+        page.form.opened_date = "2026-03-15".to_owned();
+        page.form.interest_accrual_date = "2026-03-16".to_owned();
+        page.form.term_type = Some(SavingsTerm::Limited);
+        page.form.term_end_date = "2027-03-01".to_owned();
 
         let result = page.save_form(&database);
 
@@ -1047,6 +1084,13 @@ mod tests {
             .expect("edit should preserve the existing record id");
         assert_eq!(updated.title, "Изменённый вклад");
         assert_eq!(updated.amount.to_string(), "1250.5");
+        assert_eq!(updated.opened_date, NaiveDate::from_ymd_opt(2026, 3, 15));
+        assert_eq!(
+            updated.interest_accrual_date,
+            NaiveDate::from_ymd_opt(2026, 3, 16)
+        );
+        assert_eq!(updated.term_type, SavingsTerm::Limited);
+        assert_eq!(updated.term_end_date, NaiveDate::from_ymd_opt(2027, 3, 1));
     }
 
     #[test]
@@ -1120,6 +1164,10 @@ mod tests {
         let output = render_savings_fields(&context, &mut page, &banks);
         assert!(page.show_form);
         let text_shapes = rendered_text_positions(&output);
+        assert_eq!(
+            text_shapes.iter().filter(|(text, _)| text == "📅").count(),
+            3
+        );
 
         let title = rendered_position(&text_shapes, "Название");
         let bank = rendered_position(&text_shapes, "Банк");
