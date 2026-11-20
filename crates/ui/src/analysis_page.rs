@@ -10,6 +10,7 @@ use finance_core::{
 };
 use rust_decimal::prelude::ToPrimitive;
 
+use super::category_tree::category_tree_labels;
 use super::date_input::{date_input, DateInputState};
 
 const ANALYSIS_COLUMN_MIN_WIDTHS: [f32; 4] = [170.0, 75.0, 120.0, 75.0];
@@ -374,7 +375,7 @@ impl AnalysisPage {
         selected_category: &mut Option<i64>,
         categories: &[Category],
     ) {
-        let category_labels = super::category_tree_labels(categories);
+        let category_labels = category_tree_labels(categories);
         let selected_name = selected_category.and_then(|id| {
             category_labels
                 .iter()
@@ -898,10 +899,11 @@ mod tests {
             income_category_id: None,
             expense_category_id: None,
         };
-        let mut page = AnalysisPage::default();
-        page.applied_filters = Some(filters.clone());
-        page.report = Some((filters, summary));
-        page
+        AnalysisPage {
+            applied_filters: Some(filters.clone()),
+            report: Some((filters, summary)),
+            ..AnalysisPage::default()
+        }
     }
 
     fn convex_polygon_count(output: &egui::FullOutput) -> usize {
@@ -1799,8 +1801,7 @@ mod tests {
                     let last_category = summary
                         .categories
                         .iter()
-                        .filter(|category| category.kind == kind && category.currency == currency)
-                        .last()
+                        .rfind(|category| category.kind == kind && category.currency == currency)
                         .expect("category group");
                     let last_category_position =
                         text_position(&output, &last_category.category_name)

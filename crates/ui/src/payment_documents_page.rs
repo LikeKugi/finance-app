@@ -1,4 +1,4 @@
-use crate::TABLE_ROW_HEIGHT;
+use crate::common::TABLE_ROW_HEIGHT;
 use chrono::NaiveDate;
 use eframe::egui;
 use finance_core::{
@@ -779,9 +779,9 @@ mod tests {
         bank_row_positions.sort_by(|left, right| left.y.total_cmp(&right.y));
         assert_eq!(bank_row_positions.len(), 2);
         assert!(
-            bank_row_positions[1].y - bank_row_positions[0].y >= crate::TABLE_ROW_HEIGHT,
+            bank_row_positions[1].y - bank_row_positions[0].y >= crate::common::TABLE_ROW_HEIGHT,
             "payment document rows should be at least {} points tall",
-            crate::TABLE_ROW_HEIGHT
+            crate::common::TABLE_ROW_HEIGHT
         );
     }
 
