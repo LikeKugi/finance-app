@@ -1007,14 +1007,15 @@ impl SavingsPage {
             .flex()
             .h(px(ROW_HEIGHT))
             .items_center()
-            .border_b_1()
+            .border_1()
             .border_color(border)
             .font_weight(FontWeight::BOLD)
             .children(
                 COLUMN_HEADINGS
                     .into_iter()
                     .zip(COLUMN_WIDTHS)
-                    .map(|(title, width)| cell(width, title.into())),
+                    .enumerate()
+                    .map(|(index, (title, width))| cell(width, title.into(), border, index > 0)),
             );
         let body = uniform_list(
             "savings-rows",
@@ -1033,8 +1034,15 @@ impl SavingsPage {
             .flex_col()
             .gap_1()
             .child(pager)
-            .child(header)
-            .child(body)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(header)
+                    .child(body),
+            )
             .into_any_element()
     }
 
@@ -1046,6 +1054,7 @@ impl SavingsPage {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let account = self.entries[entry_index].clone();
+        let border = cx.theme().border;
         let id = account.id;
         let term = match (account.term_type, account.term_end_date) {
             (SavingsTerm::Limited, Some(date)) => format!("до {}", format_date(date)),
@@ -1082,17 +1091,26 @@ impl SavingsPage {
             .flex()
             .h(px(ROW_HEIGHT))
             .items_center()
+            .border_l_1()
+            .border_r_1()
+            .border_b_1()
+            .border_color(border)
             .when(row_index % 2 == 1, |row| row.bg(stripe))
             .children(
                 values
                     .into_iter()
                     .zip(COLUMN_WIDTHS)
-                    .map(|(value, width)| cell(width, value)),
+                    .enumerate()
+                    .map(|(index, (value, width))| cell(width, value, border, index > 0)),
             )
             .child(
                 div()
                     .w(px(COLUMN_WIDTHS[12]))
+                    .h_full()
                     .flex()
+                    .items_center()
+                    .border_l_1()
+                    .border_color(border)
                     .gap_1()
                     .child(
                         Button::new(("edit", id as usize))
@@ -1114,8 +1132,16 @@ impl SavingsPage {
     }
 }
 
-fn cell(width: f32, text: String) -> Div {
-    div().w(px(width)).px_2().overflow_hidden().child(text)
+fn cell(width: f32, text: String, border: Hsla, separator: bool) -> Div {
+    div()
+        .w(px(width))
+        .h_full()
+        .flex()
+        .items_center()
+        .when(separator, |cell| cell.border_l_1().border_color(border))
+        .px_2()
+        .overflow_hidden()
+        .child(text)
 }
 
 impl Render for SavingsPage {

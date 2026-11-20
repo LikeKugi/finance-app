@@ -623,6 +623,7 @@ impl AnalysisPage {
     fn summary_row(
         values: [String; 4],
         strong: bool,
+        header: bool,
         stripe: Option<Hsla>,
         border: Hsla,
     ) -> impl IntoElement {
@@ -630,22 +631,27 @@ impl AnalysisPage {
             .flex()
             .items_center()
             .h(px(ROW_HEIGHT))
-            .gap_2()
-            .when(strong, |row| {
-                row.font_weight(FontWeight::BOLD)
-                    .border_b_1()
-                    .border_color(border)
-            })
+            .border_l_1()
+            .border_r_1()
+            .border_b_1()
+            .when(header, |row| row.border_t_1())
+            .border_color(border)
+            .when(strong, |row| row.font_weight(FontWeight::BOLD))
             .when_some(stripe, |row, color| row.bg(color))
             .children(values.into_iter().enumerate().map(|(index, value)| {
                 let total: f32 = COLUMN_WEIGHTS.iter().sum();
                 div()
                     .w(relative(COLUMN_WEIGHTS[index] / total))
+                    .h_full()
                     .flex_none()
+                    .flex()
+                    .items_center()
+                    .when(index > 0, |cell| cell.border_l_1().border_color(border))
+                    .px_2()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .when(index > 0, |cell| cell.text_right())
+                    .when(index > 0, |cell| cell.justify_end().text_right())
                     .child(value)
             }))
     }
@@ -667,25 +673,25 @@ impl AnalysisPage {
                 continue;
             };
             has_totals = true;
-            column = column
-                .child(div().text_lg().font_weight(FontWeight::BOLD).child(format!(
-                    "{} — {}",
-                    kind.title(),
-                    currency.code()
-                )))
-                .child(Self::summary_row(
-                    COLUMN_HEADERS.map(str::to_owned),
-                    true,
-                    None,
-                    border,
-                ));
+            column = column.child(div().text_lg().font_weight(FontWeight::BOLD).child(format!(
+                "{} — {}",
+                kind.title(),
+                currency.code()
+            )));
+            let mut table = div().flex().flex_col().w_full().child(Self::summary_row(
+                COLUMN_HEADERS.map(str::to_owned),
+                true,
+                true,
+                None,
+                border,
+            ));
             for (row_index, category) in summary
                 .categories
                 .iter()
                 .filter(|category| category.kind == kind && category.currency == currency)
                 .enumerate()
             {
-                column = column.child(Self::summary_row(
+                table = table.child(Self::summary_row(
                     [
                         category.category_name.clone(),
                         category.transaction_count.to_string(),
@@ -693,23 +699,24 @@ impl AnalysisPage {
                         format!("{}%", category.share_percent.round_dp(2)),
                     ],
                     false,
+                    false,
                     (row_index % 2 == 1).then_some(stripe),
                     border,
                 ));
             }
-            column = column
-                .child(Self::summary_row(
-                    [
-                        "Итого".to_owned(),
-                        total.transaction_count.to_string(),
-                        total.amount.to_string(),
-                        "100%".to_owned(),
-                    ],
-                    true,
-                    None,
-                    border,
-                ))
-                .child(div().h(px(12.0)));
+            table = table.child(Self::summary_row(
+                [
+                    "Итого".to_owned(),
+                    total.transaction_count.to_string(),
+                    total.amount.to_string(),
+                    "100%".to_owned(),
+                ],
+                true,
+                false,
+                None,
+                border,
+            ));
+            column = column.child(table).child(div().h(px(12.0)));
         }
         if !has_totals {
             column = column.child(format!(

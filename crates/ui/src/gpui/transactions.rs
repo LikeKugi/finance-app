@@ -1079,14 +1079,14 @@ impl TransactionsPage {
             .when(is_income, |header| header.w_full())
             .h(px(ROW_HEIGHT))
             .items_center()
-            .border_b_1()
+            .border_1()
             .border_color(border)
             .font_weight(FontWeight::BOLD)
             .children(headers.into_iter().enumerate().map(|(index, title)| {
                 if is_income {
-                    income_cell(index, title.into())
+                    income_cell(index, title.into(), border)
                 } else {
-                    cell(COLUMN_WIDTHS[index], title.into())
+                    cell(COLUMN_WIDTHS[index], title.into(), border, index > 0)
                 }
             }));
         let body = if count == 0 {
@@ -1126,6 +1126,7 @@ impl TransactionsPage {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let transaction = self.transactions[index].clone();
+        let border = cx.theme().border;
         let id = transaction.id;
         let is_income = self.kind == TransactionKind::Income;
         let date = transaction.date.format("%d.%m.%Y").to_string();
@@ -1156,22 +1157,30 @@ impl TransactionsPage {
             .when(is_income, |row| row.w_full())
             .h(px(ROW_HEIGHT))
             .items_center()
+            .border_l_1()
+            .border_r_1()
+            .border_b_1()
+            .border_color(border)
             .when(index % 2 == 1, |row| row.bg(stripe))
             .children(values.into_iter().enumerate().map(|(column, value)| {
                 if is_income {
                     if column == 4 && !value.is_empty() {
                         income_comment_cell(id, value, cx).into_any_element()
                     } else {
-                        income_cell(column, value).into_any_element()
+                        income_cell(column, value, border).into_any_element()
                     }
                 } else {
-                    cell(COLUMN_WIDTHS[column], value).into_any_element()
+                    cell(COLUMN_WIDTHS[column], value, border, column > 0).into_any_element()
                 }
             }))
             .child(
                 div()
                     .w(px(COLUMN_WIDTHS[5]))
+                    .h_full()
                     .flex()
+                    .items_center()
+                    .border_l_1()
+                    .border_color(border)
                     .gap_1()
                     .when(is_income, |actions| actions.justify_end())
                     .child(
@@ -1268,16 +1277,29 @@ const COLUMN_WIDTHS: [f32; 6] = [115.0, 135.0, 90.0, 220.0, 320.0, 180.0];
 const INCOME_FIXED_COLUMN_WIDTHS: [f32; 4] = [115.0, 220.0, 135.0, 90.0];
 const ACTIONS_COLUMN_WIDTH: f32 = 180.0;
 
-fn cell(width: f32, text: String) -> Div {
-    div().w(px(width)).px_2().overflow_hidden().child(text)
+fn cell(width: f32, text: String, border: Hsla, separator: bool) -> Div {
+    div()
+        .w(px(width))
+        .h_full()
+        .flex()
+        .items_center()
+        .when(separator, |cell| cell.border_l_1().border_color(border))
+        .px_2()
+        .overflow_hidden()
+        .child(text)
 }
 
-fn income_cell(index: usize, text: String) -> Div {
+fn income_cell(index: usize, text: String, border: Hsla) -> Div {
     match index {
-        0..=3 => cell(INCOME_FIXED_COLUMN_WIDTHS[index], text),
+        0..=3 => cell(INCOME_FIXED_COLUMN_WIDTHS[index], text, border, index > 0),
         4 => div()
             .flex_1()
             .min_w_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .border_l_1()
+            .border_color(border)
             .px_2()
             .overflow_hidden()
             .whitespace_nowrap()
@@ -1285,8 +1307,12 @@ fn income_cell(index: usize, text: String) -> Div {
             .child(text),
         _ => div()
             .w(px(ACTIONS_COLUMN_WIDTH))
+            .h_full()
             .px_2()
             .flex()
+            .items_center()
+            .border_l_1()
+            .border_color(border)
             .justify_end()
             .overflow_hidden()
             .whitespace_nowrap()
@@ -1300,6 +1326,11 @@ fn income_comment_cell(id: i64, text: String, cx: &mut Context<TransactionsPage>
         .id(("income-comment", id as usize))
         .flex_1()
         .min_w_0()
+        .h_full()
+        .flex()
+        .items_center()
+        .border_l_1()
+        .border_color(cx.theme().border)
         .px_2()
         .overflow_hidden()
         .whitespace_nowrap()

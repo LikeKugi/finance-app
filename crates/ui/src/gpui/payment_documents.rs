@@ -872,7 +872,7 @@ impl PaymentDocumentsPage {
             .flex()
             .h(px(ROW_HEIGHT))
             .items_center()
-            .border_b_1()
+            .border_1()
             .border_color(border)
             .font_weight(FontWeight::BOLD)
             .children(
@@ -891,7 +891,8 @@ impl PaymentDocumentsPage {
                 ]
                 .into_iter()
                 .zip(COLUMN_WIDTHS)
-                .map(|(title, width)| cell(width, title.to_owned())),
+                .enumerate()
+                .map(|(index, (title, width))| cell(width, title.to_owned(), border, index > 0)),
             );
         let mut table = div().flex().flex_col().child(header);
         for (index, document) in entries.into_iter().enumerate() {
@@ -941,17 +942,26 @@ impl PaymentDocumentsPage {
                     .flex()
                     .min_h(px(ROW_HEIGHT))
                     .items_center()
+                    .border_l_1()
+                    .border_r_1()
+                    .border_b_1()
+                    .border_color(border)
                     .when(index % 2 == 1, |row| row.bg(stripe))
                     .children(
                         values
                             .into_iter()
                             .zip(COLUMN_WIDTHS)
-                            .map(|(v, w)| cell(w, v)),
+                            .enumerate()
+                            .map(|(index, (v, w))| cell(w, v, border, index > 0)),
                     )
                     .child(
                         div()
                             .w(px(COLUMN_WIDTHS[10]))
+                            .self_stretch()
                             .flex()
+                            .items_center()
+                            .border_l_1()
+                            .border_color(border)
                             .gap_1()
                             .child(
                                 Button::new(("card-edit", id as usize))
@@ -985,8 +995,16 @@ impl PaymentDocumentsPage {
     }
 }
 
-fn cell(width: f32, text: String) -> Div {
-    div().w(px(width)).px_2().overflow_hidden().child(text)
+fn cell(width: f32, text: String, border: Hsla, separator: bool) -> Div {
+    div()
+        .w(px(width))
+        .self_stretch()
+        .flex()
+        .items_center()
+        .when(separator, |cell| cell.border_l_1().border_color(border))
+        .px_2()
+        .overflow_hidden()
+        .child(text)
 }
 
 impl Render for PaymentDocumentsPage {

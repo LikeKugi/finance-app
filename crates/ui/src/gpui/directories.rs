@@ -412,15 +412,33 @@ impl DirectoriesPage {
 
     // ---- отрисовка ----
 
+    fn list(&self, has_rows: bool, cx: &App) -> Div {
+        div().flex().flex_col().when(has_rows, |list| {
+            list.border_1().border_color(cx.theme().border)
+        })
+    }
+
     fn row(&self, id: impl Into<ElementId>, index: usize, cx: &App) -> Stateful<Div> {
         div()
             .id(id)
             .flex()
             .h(px(ROW_HEIGHT))
             .items_center()
-            .gap_2()
-            .px_2()
+            .when(index > 0, |row| {
+                row.border_t_1().border_color(cx.theme().border)
+            })
             .when(index % 2 == 1, |row| row.bg(cx.theme().muted))
+    }
+
+    fn action_cell(&self, cx: &App) -> Div {
+        div()
+            .flex()
+            .flex_none()
+            .h_full()
+            .items_center()
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .px_1()
     }
 
     fn panel(&self, title: &str, cx: &App) -> Div {
@@ -437,7 +455,7 @@ impl DirectoriesPage {
 
     fn render_categories(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let rows = category_tree_rows(&self.categories);
-        let mut list = div().flex().flex_col();
+        let mut list = self.list(!rows.is_empty(), cx);
         for (position, (index, depth)) in rows.into_iter().enumerate() {
             let category = self.categories[index].clone();
             let id = category.id;
@@ -456,27 +474,31 @@ impl DirectoriesPage {
             let edit = category.clone();
             list = list.child(
                 self.row(("category", id as usize), position, cx)
-                    .child(div().flex_1().child(label))
+                    .child(div().flex_1().px_2().child(label))
                     .child(
-                        Button::new(("category-edit", id as usize))
-                            .compact()
-                            .label("Изменить")
-                            .on_click(cx.listener(move |page, _, window, cx| {
-                                page.open_category_form(Some(&edit), window, cx)
-                            })),
+                        self.action_cell(cx).child(
+                            Button::new(("category-edit", id as usize))
+                                .compact()
+                                .label("Изменить")
+                                .on_click(cx.listener(move |page, _, window, cx| {
+                                    page.open_category_form(Some(&edit), window, cx)
+                                })),
+                        ),
                     )
                     .child(
-                        Button::new(("category-delete", id as usize))
-                            .compact()
-                            .label("Удалить")
-                            .on_click(cx.listener(move |page, _, window, cx| {
-                                page.confirm_delete(
-                                    Delete::Category(id),
-                                    subject.clone(),
-                                    window,
-                                    cx,
-                                )
-                            })),
+                        self.action_cell(cx).child(
+                            Button::new(("category-delete", id as usize))
+                                .compact()
+                                .label("Удалить")
+                                .on_click(cx.listener(move |page, _, window, cx| {
+                                    page.confirm_delete(
+                                        Delete::Category(id),
+                                        subject.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                })),
+                        ),
                     ),
             );
         }
@@ -555,29 +577,38 @@ impl DirectoriesPage {
     }
 
     fn render_banks(&mut self, cx: &mut Context<Self>) -> Div {
-        let mut list = div().flex().flex_col();
+        let mut list = self.list(!self.banks.is_empty(), cx);
         for (position, bank) in self.banks.iter().cloned().enumerate() {
             let id = bank.id;
             let subject = format!("банк «{}»", bank.name);
             let edit = bank.clone();
             list = list.child(
                 self.row(("bank", id as usize), position, cx)
-                    .child(div().flex_1().child(bank.name.clone()))
+                    .child(div().flex_1().px_2().child(bank.name.clone()))
                     .child(
-                        Button::new(("bank-edit", id as usize))
-                            .compact()
-                            .label("Изменить")
-                            .on_click(cx.listener(move |page, _, window, cx| {
-                                page.open_bank_form(Some(&edit), window, cx)
-                            })),
+                        self.action_cell(cx).child(
+                            Button::new(("bank-edit", id as usize))
+                                .compact()
+                                .label("Изменить")
+                                .on_click(cx.listener(move |page, _, window, cx| {
+                                    page.open_bank_form(Some(&edit), window, cx)
+                                })),
+                        ),
                     )
                     .child(
-                        Button::new(("bank-delete", id as usize))
-                            .compact()
-                            .label("Удалить")
-                            .on_click(cx.listener(move |page, _, window, cx| {
-                                page.confirm_delete(Delete::Bank(id), subject.clone(), window, cx)
-                            })),
+                        self.action_cell(cx).child(
+                            Button::new(("bank-delete", id as usize))
+                                .compact()
+                                .label("Удалить")
+                                .on_click(cx.listener(move |page, _, window, cx| {
+                                    page.confirm_delete(
+                                        Delete::Bank(id),
+                                        subject.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                })),
+                        ),
                     ),
             );
         }
@@ -625,7 +656,7 @@ impl DirectoriesPage {
             .find(|c| c.is_primary)
             .map_or("—".to_owned(), |c| c.code.clone());
         let muted = cx.theme().muted_foreground;
-        let mut list = div().flex().flex_col();
+        let mut list = self.list(!self.currencies.is_empty(), cx);
         for (position, currency) in self.currencies.iter().cloned().enumerate() {
             let code = currency.code.clone();
             let used = self.used_currencies.contains(&code);
@@ -639,34 +670,40 @@ impl DirectoriesPage {
                     .child(
                         div()
                             .flex_1()
+                            .px_2()
                             .child(div().child(format!("{} {}", currency.code, currency.name)))
                             .child(div().text_color(muted).child(rate_label)),
                     )
                     .child(
-                        Button::new(("currency-rate", position))
+                        self.action_cell(cx).child(Button::new(("currency-rate", position))
                             .compact()
                             .label("Изменить курс")
                             .disabled(currency.is_primary)
                             .on_click(cx.listener(move |page, _, window, cx| {
                                 page.open_currency_form(Some(&edit), window, cx)
-                            })),
+                            }))),
                     )
-                    .child(if currency.is_primary {
-                        div().text_color(muted).child("Основная")
-                    } else {
-                        div().child(
-                            Button::new(("currency-primary", position))
-                                .compact()
-                                .label("Сделать основной")
-                                .tooltip("Сначала задайте курс этой валюты")
-                                .disabled(currency.rate_to_primary.is_none())
-                                .on_click(
-                                    cx.listener(move |page, _, _, cx| page.make_primary(&c1, cx)),
-                                ),
-                        )
-                    })
                     .child(
-                        Button::new(("currency-delete", position))
+                        self.action_cell(cx)
+                            .w(px(152.0))
+                            .justify_center()
+                            .child(if currency.is_primary {
+                                div().text_color(muted).child("Основная")
+                            } else {
+                                div().child(
+                                    Button::new(("currency-primary", position))
+                                        .compact()
+                                        .label("Сделать основной")
+                                        .tooltip("Сначала задайте курс этой валюты")
+                                        .disabled(currency.rate_to_primary.is_none())
+                                        .on_click(cx.listener(move |page, _, _, cx| {
+                                            page.make_primary(&c1, cx)
+                                        })),
+                                )
+                            }),
+                    )
+                    .child(
+                        self.action_cell(cx).child(Button::new(("currency-delete", position))
                             .compact()
                             .label("Удалить")
                             .disabled(currency.is_primary || used)
@@ -682,7 +719,7 @@ impl DirectoriesPage {
                                     window,
                                     cx,
                                 )
-                            })),
+                            }))),
                     ),
             );
             let _ = &c3;
