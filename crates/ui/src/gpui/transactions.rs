@@ -86,7 +86,7 @@ fn eligible_cards(cards: &[PaymentDocument], currency: Option<Currency>) -> Vec<
 
 struct Form {
     id: Option<i64>,
-    date: Entity<InputState>,
+    date: FormDate,
     amount: Entity<InputState>,
     comment: Entity<TextareaState>,
     currency: Option<Currency>,
@@ -100,6 +100,29 @@ struct Form {
     affects_deposit_rate: bool,
     balance_applied: bool,
     suggestions: Vec<String>,
+    initial_values: FormValues,
+}
+
+enum FormDate {
+    Input(Entity<InputState>),
+    Picker(Entity<DatePickerState>),
+}
+
+#[derive(Debug, PartialEq)]
+struct FormValues {
+    date: Option<NaiveDate>,
+    amount: String,
+    comment: String,
+    currency: Option<Currency>,
+    category_id: Option<i64>,
+    card_id: Option<i64>,
+    affects_deposit_rate: bool,
+}
+
+impl FormValues {
+    fn changed_from(&self, initial: &Self) -> bool {
+        self != initial
+    }
 }
 
 pub(crate) struct TransactionsPage {
@@ -123,6 +146,7 @@ pub(crate) struct TransactionsPage {
     currency_filter_select: Choice,
     period_select: Choice,
     form: Option<Form>,
+    confirm_discard: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -224,6 +248,7 @@ impl TransactionsPage {
             currency_filter_select,
             period_select,
             form: None,
+            confirm_discard: false,
             _subscriptions: subscriptions,
         };
         page.reload_categories(window, cx);
@@ -415,6 +440,8 @@ impl TransactionsPage {
         if !self.load_form_sources(cx) {
             return;
         }
+        self.message = None;
+        self.confirm_discard = false;
         self.reload_categories(window, cx);
         let currency = existing.map_or(Some(Currency::Rub), |t| Some(t.currency));
         let category_id = existing.map(|t| t.category_id).or_else(|| {
@@ -426,12 +453,35 @@ impl TransactionsPage {
         let card_id = existing.and_then(|t| t.payment_document_id);
         let date =
             existing.map_or_else(|| Local::now().date_naive(), |transaction| transaction.date);
+        let initial_values = FormValues {
+            date: Some(date),
+            amount: existing.map_or_else(String::new, |transaction| transaction.amount.to_string()),
+            comment: existing.map_or_else(String::new, |transaction| transaction.comment.clone()),
+            currency,
+            category_id,
+            card_id,
+            affects_deposit_rate: existing.is_some_and(|t| t.affects_deposit_rate),
+        };
 
-        let date_input = cx.new(|cx| {
-            let mut state = InputState::new(window, cx).placeholder("ГГГГ-ММ-ДД");
-            state.set_value(date.format(DATE_FORMAT).to_string(), window, cx);
-            state
-        });
+        let form_date = if self.kind == TransactionKind::Income {
+            let picker = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
+            picker.update(cx, |state, cx| {
+                state.set_date(Date::Single(Some(date)), window, cx)
+            });
+            self._subscriptions.push(cx.subscribe_in(
+                &picker,
+                window,
+                |_, _, _: &DatePickerEvent, _, cx| cx.notify(),
+            ));
+            FormDate::Picker(picker)
+        } else {
+            let input = cx.new(|cx| {
+                let mut state = InputState::new(window, cx).placeholder("ГГГГ-ММ-ДД");
+                state.set_value(date.format(DATE_FORMAT).to_string(), window, cx);
+                state
+            });
+            FormDate::Input(input)
+        };
         let amount_input = cx.new(|cx| {
             let mut state =
                 InputState::new(window, cx).placeholder("например: 100 + 20 - 5 * 2 / 4");
@@ -537,7 +587,7 @@ impl TransactionsPage {
 
         self.form = Some(Form {
             id: existing.map(|t| t.id),
-            date: date_input,
+            date: form_date,
             amount: amount_input,
             comment: comment_input,
             currency,
@@ -551,10 +601,115 @@ impl TransactionsPage {
             affects_deposit_rate: existing.is_some_and(|t| t.affects_deposit_rate),
             balance_applied: existing.is_some_and(|t| t.payment_document_balance_applied),
             suggestions: Vec::new(),
+            initial_values,
         });
         self.rebuild_category_select(window, cx);
         self.rebuild_card_select(window, cx);
         cx.notify();
+        if self.kind == TransactionKind::Income {
+            self.open_income_dialog(window, cx);
+        }
+    }
+
+    fn open_income_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity();
+        window.open_dialog(cx, move |dialog: Dialog, _, cx| {
+            let (title, body) = this.update(cx, |page, cx| {
+                let title = page.form.as_ref().map_or_else(
+                    || "Доход".to_owned(),
+                    |form| {
+                        if form.id.is_some() {
+                            "Изменить доход".to_owned()
+                        } else {
+                            "Новый доход".to_owned()
+                        }
+                    },
+                );
+                (title, page.render_income_dialog(cx))
+            });
+            dialog
+                .title(title)
+                .centered()
+                .w(px(680.0))
+                .max_w(px(900.0))
+                .close_button(false)
+                .overlay_closable(false)
+                .keyboard(false)
+                .child(body)
+        });
+    }
+
+    fn render_income_dialog(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.confirm_discard {
+            return self.render_discard_confirmation(cx);
+        }
+
+        self.render_form(cx)
+            .unwrap_or_else(|| div().into_any_element())
+    }
+
+    fn render_discard_confirmation(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_4()
+            .child("Несохранённые изменения будут потеряны.")
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("income-continue-editing")
+                            .label("Вернуться к форме")
+                            .on_click(cx.listener(|page, _, _, cx| {
+                                page.confirm_discard = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("income-discard-changes")
+                            .primary()
+                            .label("Не сохранять")
+                            .on_click(cx.listener(|page, _, window, cx| {
+                                page.form = None;
+                                page.confirm_discard = false;
+                                window.close_dialog(cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn request_income_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let has_changes = self.form.as_ref().is_some_and(|form| {
+            let current = FormValues {
+                date: match &form.date {
+                    FormDate::Input(input) => {
+                        NaiveDate::parse_from_str(input.read(cx).value().trim(), DATE_FORMAT).ok()
+                    }
+                    FormDate::Picker(picker) => selected_date(&picker.read(cx)),
+                },
+                amount: form.amount.read(cx).value().to_string(),
+                comment: form.comment.read(cx).value().to_string(),
+                currency: form.currency,
+                category_id: form.category_id,
+                card_id: form.card_id,
+                affects_deposit_rate: form.affects_deposit_rate,
+            };
+            current.changed_from(&form.initial_values)
+        });
+        if has_changes {
+            self.confirm_discard = true;
+            cx.notify();
+        } else {
+            self.form = None;
+            self.confirm_discard = false;
+            window.close_dialog(cx);
+            cx.notify();
+        }
     }
 
     /// Активные категории плюс историческая категория редактируемой записи.
@@ -611,31 +766,40 @@ impl TransactionsPage {
         cx.notify();
     }
 
-    fn save(&mut self, cx: &mut Context<Self>) {
+    fn save(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(form) = self.form.as_ref() else {
-            return;
+            return false;
         };
-        let date_text = form.date.read(cx).value().to_string();
+        let parsed_date = match &form.date {
+            FormDate::Input(input) => {
+                NaiveDate::parse_from_str(input.read(cx).value().trim(), DATE_FORMAT)
+                    .map_err(|_| "Введите дату в формате ГГГГ-ММ-ДД")
+            }
+            FormDate::Picker(picker) => selected_date(&picker.read(cx)).ok_or("Выберите дату"),
+        };
         let amount_text = form.amount.read(cx).value().to_string();
         let comment = form.comment.read(cx).value().to_string();
-        let Ok(date) = NaiveDate::parse_from_str(date_text.trim(), DATE_FORMAT) else {
-            self.error("Введите дату в формате ГГГГ-ММ-ДД", cx);
-            return;
+        let date = match parsed_date {
+            Ok(date) => date,
+            Err(message) => {
+                self.error(message, cx);
+                return false;
+            }
         };
         let amount = match parse_amount_expression(&amount_text) {
             Ok(amount) => amount,
             Err(error) => {
                 self.error(error.to_string(), cx);
-                return;
+                return false;
             }
         };
         let Some(category_id) = form.category_id else {
             self.error("Выберите категорию", cx);
-            return;
+            return false;
         };
         let Some(currency) = form.currency else {
             self.error("Выберите валюту", cx);
-            return;
+            return false;
         };
         let result = finance_db::save_transaction_with_card_and_rate_effect(
             &self.database,
@@ -654,8 +818,12 @@ impl TransactionsPage {
                 self.form = None;
                 self.refresh(cx);
                 cx.notify();
+                true
             }
-            Err(error) => self.error(error.to_string(), cx),
+            Err(error) => {
+                self.error(error.to_string(), cx);
+                false
+            }
         }
     }
 
@@ -859,7 +1027,145 @@ impl TransactionsPage {
             )
     }
 
-    fn render_form(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    fn render_income_form(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(form) = self.form.as_ref() else {
+            return div().into_any_element();
+        };
+        let danger = cx.theme().danger;
+        let muted = cx.theme().muted_foreground;
+        let amount_text = form.amount.read(cx).value().to_string();
+        let total = (!amount_text.trim().is_empty())
+            .then(|| parse_amount_expression(&amount_text).map_err(|error| error.to_string()));
+        let card_missing_currency = form.card_id.is_some()
+            && !eligible_cards(&self.cards, form.currency)
+                .iter()
+                .any(|card| Some(card.id) == form.card_id);
+        let field = |label: &'static str, control: AnyElement| {
+            div().flex().flex_col().gap_1().child(label).child(control)
+        };
+
+        let mut fields = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(field(
+                "Дата",
+                match &form.date {
+                    FormDate::Picker(picker) => DatePicker::new(picker)
+                        .placeholder("Выбрать дату")
+                        .into_any_element(),
+                    FormDate::Input(input) => Input::new(input).into_any_element(),
+                },
+            ))
+            .child(field("Сумма", Input::new(&form.amount).into_any_element()))
+            .child(field(
+                "Валюта",
+                Select::new(&form.currency_select)
+                    .placeholder("Выберите валюту")
+                    .into_any_element(),
+            ))
+            .child(field(
+                "Категория",
+                Select::new(&form.category_select)
+                    .placeholder("Выберите категорию")
+                    .into_any_element(),
+            ));
+
+        let mut card_field = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child("Зачислить на карту")
+            .child(Select::new(&form.card_select));
+        if card_missing_currency {
+            card_field = card_field.child(
+                div()
+                    .text_color(danger)
+                    .child("Выберите карту в валюте дохода или отмените выбор карты"),
+            );
+        }
+        fields = fields
+            .child(card_field)
+            .child(div().text_color(muted).child(
+                "Доступны дебетовые карты с указанной валютой. Для ранее созданных карт сначала укажите валюту в разделе «Платёжные карты».",
+            ))
+            .child(field(
+                "Комментарий",
+                Textarea::new(&form.comment).into_any_element(),
+            ));
+
+        if !form.suggestions.is_empty() {
+            let buttons = form.suggestions.iter().enumerate().map(|(index, text)| {
+                let text = text.clone();
+                Button::new(("suggestion", index))
+                    .compact()
+                    .label(text.clone())
+                    .on_click(cx.listener(move |page, _, window, cx| {
+                        if let Some(form) = page.form.as_mut() {
+                            form.suggestions.clear();
+                            let comment = form.comment.clone();
+                            comment
+                                .update(cx, |state, cx| state.set_value(text.clone(), window, cx));
+                        }
+                        cx.notify();
+                    }))
+            });
+            fields = fields.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child("Ранее использованные комментарии:")
+                    .children(buttons),
+            );
+        }
+        if amount_text.contains('/') {
+            fields = fields.child(div().text_color(muted).child(DIVISION_ROUNDING_WARNING));
+        }
+
+        let mut panel = div().flex().flex_col().gap_3().p_4().child(
+            fields
+                .id("income-form-fields")
+                .max_h(px(440.0))
+                .overflow_y_scroll(),
+        );
+        if let Some((message, true)) = &self.message {
+            panel = panel.child(div().text_color(danger).child(message.clone()));
+        }
+        panel = panel
+            .child(match total {
+                Some(Ok(total)) => div().child(format!("Итого: {total}")),
+                Some(Err(error)) => div().text_color(danger).child(error),
+                None => div(),
+            })
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("income-form-save")
+                            .primary()
+                            .label("Сохранить")
+                            .on_click(cx.listener(|page, _, window, cx| {
+                                if page.save(cx) {
+                                    page.confirm_discard = false;
+                                    window.close_dialog(cx);
+                                }
+                            })),
+                    )
+                    .child(Button::new("income-form-cancel").label("Отмена").on_click(
+                        cx.listener(|page, _, window, cx| page.request_income_cancel(window, cx)),
+                    )),
+            );
+        panel.into_any_element()
+    }
+
+    fn render_form(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.kind == TransactionKind::Income {
+            return Some(self.render_income_form(cx));
+        }
         let form = self.form.as_ref()?;
         let kind = self.kind;
         let amount_text = form.amount.read(cx).value().to_string();
@@ -911,7 +1217,14 @@ impl TransactionsPage {
                     .items_center()
                     .gap_3()
                     .child("Дата")
-                    .child(div().w(px(140.0)).child(Input::new(&form.date)))
+                    .child(
+                        div().w(px(140.0)).child(match &form.date {
+                            FormDate::Input(input) => Input::new(input).into_any_element(),
+                            FormDate::Picker(picker) => DatePicker::new(picker)
+                                .placeholder("Выбрать дату")
+                                .into_any_element(),
+                        }),
+                    )
                     .child("Сумма")
                     .child(div().w(px(260.0)).child(Input::new(&form.amount)))
                     .child("Валюта")
@@ -1022,31 +1335,35 @@ impl TransactionsPage {
         let _ = comment_text;
 
         Some(
-            panel.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(div().flex_1().child(match total {
-                        Some(Ok(total)) => div().child(format!("Итого: {total}")),
-                        Some(Err(error)) => div().text_color(danger).child(error),
-                        None => div(),
-                    }))
-                    .child(
-                        Button::new("form-cancel")
-                            .label("Отмена")
-                            .on_click(cx.listener(|page, _, _, cx| {
-                                page.form = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("form-save")
-                            .primary()
-                            .label("Сохранить")
-                            .on_click(cx.listener(|page, _, _, cx| page.save(cx))),
-                    ),
-            ),
+            panel
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(div().flex_1().child(match total {
+                            Some(Ok(total)) => div().child(format!("Итого: {total}")),
+                            Some(Err(error)) => div().text_color(danger).child(error),
+                            None => div(),
+                        }))
+                        .child(
+                            Button::new("form-cancel")
+                                .label("Отмена")
+                                .on_click(cx.listener(|page, _, _, cx| {
+                                    page.form = None;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("form-save")
+                                .primary()
+                                .label("Сохранить")
+                                .on_click(cx.listener(|page, _, _, cx| {
+                                    page.save(cx);
+                                })),
+                        ),
+                )
+                .into_any_element(),
         )
     }
 
@@ -1421,14 +1738,18 @@ impl Render for TransactionsPage {
         };
         root = root.child(header);
         root = root.child(self.render_filters(cx));
-        if let Some((message, true)) = &self.message {
-            root = root.child(div().text_color(danger).child(message.clone()));
+        if !(self.kind == TransactionKind::Income && self.form.is_some()) {
+            if let Some((message, true)) = &self.message {
+                root = root.child(div().text_color(danger).child(message.clone()));
+            }
         }
         if !has_active_category {
             root = root.child("Сначала добавьте категорию в разделе «Справочники».");
         }
-        if let Some(form) = self.render_form(cx) {
-            root = root.child(form);
+        if self.kind == TransactionKind::Expense {
+            if let Some(form) = self.render_form(cx) {
+                root = root.child(form);
+            }
         }
         root.child(self.render_table(cx))
             .child(self.render_footer(cx))
@@ -1437,7 +1758,95 @@ impl Render for TransactionsPage {
 
 #[cfg(test)]
 mod tests {
-    use super::comment_preview;
+    use super::{comment_preview, FormValues};
+    use chrono::NaiveDate;
+
+    #[test]
+    fn form_values_are_unchanged_when_they_match_the_initial_state() {
+        let initial = FormValues {
+            date: Some(NaiveDate::from_ymd_opt(2026, 11, 20).expect("valid test date")),
+            amount: "100".to_owned(),
+            comment: "Зарплата".to_owned(),
+            currency: None,
+            category_id: Some(1),
+            card_id: None,
+            affects_deposit_rate: false,
+        };
+
+        assert!(!initial.changed_from(&initial));
+    }
+
+    #[test]
+    fn form_values_detect_a_changed_amount() {
+        let initial = FormValues {
+            date: Some(NaiveDate::from_ymd_opt(2026, 11, 20).expect("valid test date")),
+            amount: "100".to_owned(),
+            comment: "Зарплата".to_owned(),
+            currency: None,
+            category_id: Some(1),
+            card_id: None,
+            affects_deposit_rate: false,
+        };
+        let edited = FormValues {
+            date: Some(NaiveDate::from_ymd_opt(2026, 11, 20).expect("valid test date")),
+            amount: "200".to_owned(),
+            comment: "Зарплата".to_owned(),
+            currency: None,
+            category_id: Some(1),
+            card_id: None,
+            affects_deposit_rate: false,
+        };
+
+        assert!(edited.changed_from(&initial));
+    }
+
+    #[test]
+    fn form_values_detect_a_changed_date() {
+        let initial = FormValues {
+            date: Some(NaiveDate::from_ymd_opt(2026, 11, 20).expect("valid test date")),
+            amount: "100".to_owned(),
+            comment: "Зарплата".to_owned(),
+            currency: None,
+            category_id: Some(1),
+            card_id: None,
+            affects_deposit_rate: false,
+        };
+        let edited = FormValues {
+            date: Some(NaiveDate::from_ymd_opt(2026, 11, 21).expect("valid test date")),
+            amount: "100".to_owned(),
+            comment: "Зарплата".to_owned(),
+            currency: None,
+            category_id: Some(1),
+            card_id: None,
+            affects_deposit_rate: false,
+        };
+
+        assert!(edited.changed_from(&initial));
+    }
+
+    #[test]
+    fn form_values_detect_a_cleared_date() {
+        let initial = FormValues {
+            date: Some(NaiveDate::from_ymd_opt(2026, 11, 20).expect("valid test date")),
+            amount: "100".to_owned(),
+            comment: "Зарплата".to_owned(),
+            currency: None,
+            category_id: Some(1),
+            card_id: None,
+            affects_deposit_rate: false,
+        };
+        let edited = FormValues {
+            date: None,
+            amount: "100".to_owned(),
+            comment: "Зарплата".to_owned(),
+            currency: None,
+            category_id: Some(1),
+            card_id: None,
+            affects_deposit_rate: false,
+        };
+
+        assert!(edited.changed_from(&initial));
+    }
 
     #[test]
     fn comment_preview_keeps_short_single_line_text_unchanged() {

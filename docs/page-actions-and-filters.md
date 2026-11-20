@@ -35,6 +35,8 @@ Shared compact DatePicker controls retain previous/next-month arrow navigation a
 - `Сбросить фильтры` clears all filters, returns the period selector to `Весь период`, and reloads the list. It is disabled when no filters are active.
 - Date boundaries are inclusive. A start date later than the end date is reported as an error; the existing results are not replaced with an empty list. Dates are selected through the calendar rather than entered as free-form text.
 - Applying filters updates the table and its totals. When no transactions match, the current page shows no data rows but has no dedicated filtered-empty-state message; future pages should provide one.
+- Creating and editing an income opens a modal dialog over the page. The dialog keeps its fields and validation errors while open; clicking `Отмена` asks for confirmation if values have changed, and the dialog cannot be dismissed by clicking the overlay, pressing Escape, or using a close button.
+- The income form date is selected with a DatePicker rather than entered as free-form text.
 
 ### Income and Expenses Comment Suggestions
 
