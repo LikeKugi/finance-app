@@ -1185,7 +1185,7 @@ impl TransactionsPage {
                     .when(is_income, |actions| actions.justify_end())
                     .child(
                         Button::new(("edit", id as usize))
-                            .compact()
+                            .xsmall()
                             .label("Изменить")
                             .on_click(cx.listener(move |page, _, window, cx| {
                                 page.open_form(Some(&edit_target), window, cx)
@@ -1193,7 +1193,8 @@ impl TransactionsPage {
                     )
                     .child(
                         Button::new(("delete", id as usize))
-                            .compact()
+                            .danger()
+                            .xsmall()
                             .label("Удалить")
                             .on_click(cx.listener(move |page, _, window, cx| {
                                 page.confirm_delete(&delete_target, window, cx)

@@ -16,7 +16,7 @@ use gpui_kit::component::dialog::AlertDialog;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IconName, IndexPath, WindowExt as _,
+    ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _, WindowExt as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -1114,7 +1114,7 @@ impl SavingsPage {
                     .gap_1()
                     .child(
                         Button::new(("edit", id as usize))
-                            .compact()
+                            .xsmall()
                             .label("Изменить")
                             .on_click(cx.listener(move |page, _, window, cx| {
                                 page.begin_edit(id, window, cx)
@@ -1122,7 +1122,8 @@ impl SavingsPage {
                     )
                     .child(
                         Button::new(("delete", id as usize))
-                            .compact()
+                            .danger()
+                            .xsmall()
                             .label("Удалить")
                             .on_click(cx.listener(move |page, _, window, cx| {
                                 page.confirm_delete(id, title.clone(), window, cx)
