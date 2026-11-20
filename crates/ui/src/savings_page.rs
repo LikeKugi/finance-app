@@ -457,11 +457,12 @@ impl SavingsPage {
         } else {
             "Новое накопление"
         };
+        let form_width = (context.screen_rect().width() - 64.0).clamp(480.0, 840.0);
         egui::Modal::new(egui::Id::new("savings_form_modal"))
             .frame(egui::Frame::popup(&context.style()).inner_margin(egui::Margin::same(16)))
             .show(context, |ui| {
-                ui.set_min_width(680.0);
-                ui.set_max_width(840.0);
+                ui.set_min_width(form_width);
+                ui.set_max_width(form_width);
                 ui.spacing_mut().item_spacing = egui::vec2(16.0, 12.0);
                 ui.heading(title);
                 ui.add_space(4.0);
@@ -505,11 +506,20 @@ impl SavingsPage {
 
     fn render_form_fields(&mut self, ui: &mut egui::Ui, banks: &[Bank]) {
         ui.label(egui::RichText::new("Основное").strong());
-        ui.horizontal_wrapped(|ui| {
-            render_savings_text_field(ui, "Название", &mut self.form.title, 280.0, None);
-            ui.vertical(|ui| {
-                ui.set_min_width(280.0);
-                ui.set_max_width(280.0);
+        ui.columns(3, |columns| {
+            let title_width = columns[0].available_width();
+            render_savings_text_field(
+                &mut columns[0],
+                "Название",
+                &mut self.form.title,
+                title_width,
+                None,
+            );
+
+            let bank_width = columns[1].available_width();
+            columns[1].vertical(|ui| {
+                ui.set_min_width(bank_width);
+                ui.set_max_width(bank_width);
                 ui.label("Банк");
                 ui.add_space(4.0);
                 let selected_bank = self
@@ -518,7 +528,7 @@ impl SavingsPage {
                     .and_then(|id| banks.iter().find(|bank| bank.id == id))
                     .map_or("Выберите банк", |bank| bank.name.as_str());
                 egui::ComboBox::from_id_salt("savings_form_bank")
-                    .width(280.0)
+                    .width(bank_width)
                     .selected_text(selected_bank)
                     .show_ui(ui, |ui| {
                         for bank in banks {
@@ -526,84 +536,89 @@ impl SavingsPage {
                         }
                     });
             });
+
+            render_savings_checkbox_field(&mut columns[2], &mut self.form.is_active, "Активно");
         });
-        ui.checkbox(&mut self.form.is_active, "Активно");
 
         ui.add_space(20.0);
         ui.label(egui::RichText::new("Сумма и ставки").strong());
-        ui.horizontal_wrapped(|ui| {
+        ui.columns(3, |columns| {
+            let amount_width = columns[0].available_width();
             render_savings_text_field(
-                ui,
+                &mut columns[0],
                 "Сумма",
                 &mut self.form.amount,
-                240.0,
+                amount_width,
                 Some("Например, 100000"),
             );
+            let base_rate_width = columns[1].available_width();
             render_savings_text_field(
-                ui,
+                &mut columns[1],
                 "Базовая ставка, %",
                 &mut self.form.base_rate,
-                240.0,
+                base_rate_width,
                 Some("Например, 5,5"),
             );
+            render_savings_checkbox_field(
+                &mut columns[2],
+                &mut self.form.use_threshold,
+                "Есть повышение ставки при выполнении условий",
+            );
         });
-        ui.checkbox(
-            &mut self.form.use_threshold,
-            "Есть ставка при выполнении условий",
-        );
         if self.form.use_threshold {
-            ui.horizontal_wrapped(|ui| {
+            ui.add_space(12.0);
+            ui.columns(2, |columns| {
+                let threshold_width = columns[0].available_width();
                 render_savings_text_field(
-                    ui,
-                    "Ставка при условии, %",
-                    &mut self.form.rate_after_threshold,
-                    240.0,
-                    None,
-                );
-                render_savings_text_field(
-                    ui,
+                    &mut columns[0],
                     "Пороговая сумма трат",
                     &mut self.form.threshold_amount,
-                    240.0,
+                    threshold_width,
+                    None,
+                );
+                let threshold_rate_width = columns[1].available_width();
+                render_savings_text_field(
+                    &mut columns[1],
+                    "Ставка при выполнении условий, %",
+                    &mut self.form.rate_after_threshold,
+                    threshold_rate_width,
                     None,
                 );
             });
         }
 
         ui.add_space(20.0);
-        ui.label(egui::RichText::new("Даты").strong());
-        ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new("Даты и срок").strong());
+        ui.columns(3, |columns| {
+            let opened_date_width = columns[0].available_width();
             render_savings_text_field(
-                ui,
+                &mut columns[0],
                 "Дата открытия (ГГГГ-ММ-ДД)",
                 &mut self.form.opened_date,
-                280.0,
+                opened_date_width,
                 Some("ГГГГ-ММ-ДД"),
             );
+            let accrual_date_width = columns[1].available_width();
             render_savings_text_field(
-                ui,
+                &mut columns[1],
                 "Дата начисления процентов (ГГГГ-ММ-ДД)",
                 &mut self.form.interest_accrual_date,
-                280.0,
+                accrual_date_width,
                 Some("ГГГГ-ММ-ДД"),
             );
-        });
-
-        ui.add_space(20.0);
-        ui.label(egui::RichText::new("Условия").strong());
-        ui.horizontal_wrapped(|ui| {
-            ui.vertical(|ui| {
-                ui.set_min_width(240.0);
-                ui.set_max_width(240.0);
+            let term_width = columns[2].available_width();
+            columns[2].vertical(|ui| {
+                ui.set_min_width(term_width);
+                ui.set_max_width(term_width);
                 ui.label("Срок");
                 ui.add_space(4.0);
                 egui::ComboBox::from_id_salt("savings_form_term")
-                    .width(240.0)
                     .selected_text(
                         self.form
                             .term_type
                             .map_or("Выберите срок", SavingsTerm::title),
                     )
+                    .width(term_width)
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
                             &mut self.form.term_type,
@@ -616,40 +631,42 @@ impl SavingsPage {
                             SavingsTerm::Unlimited.title(),
                         );
                     });
+                if self.form.term_type == Some(SavingsTerm::Limited) {
+                    ui.add_space(8.0);
+                    render_savings_text_field(
+                        ui,
+                        "Дата закрытия (ГГГГ-ММ-ДД)",
+                        &mut self.form.term_end_date,
+                        term_width,
+                        Some("ГГГГ-ММ-ДД"),
+                    );
+                }
             });
-            if self.form.term_type == Some(SavingsTerm::Limited) {
-                render_savings_text_field(
-                    ui,
-                    "Дата окончания (ГГГГ-ММ-ДД)",
-                    &mut self.form.term_end_date,
-                    240.0,
-                    Some("ГГГГ-ММ-ДД"),
-                );
-            }
         });
-        ui.horizontal_wrapped(|ui| {
-            ui.vertical(|ui| {
-                ui.set_min_width(280.0);
-                ui.set_max_width(280.0);
-                ui.label("Назначение процентов");
-                ui.add_space(4.0);
-                egui::ComboBox::from_id_salt("savings_interest_destination")
-                    .width(280.0)
-                    .selected_text(
-                        self.form
-                            .interest_destination
-                            .map_or("Выберите назначение", InterestDestination::title),
-                    )
-                    .show_ui(ui, |ui| {
-                        for destination in InterestDestination::ALL {
-                            ui.selectable_value(
-                                &mut self.form.interest_destination,
-                                Some(destination),
-                                destination.title(),
-                            );
-                        }
-                    });
-            });
+
+        ui.add_space(20.0);
+        let destination_width = ui.available_width();
+        ui.vertical(|ui| {
+            ui.set_min_width(destination_width);
+            ui.set_max_width(destination_width);
+            ui.label("Выплата процентов");
+            ui.add_space(4.0);
+            egui::ComboBox::from_id_salt("savings_interest_destination")
+                .width(destination_width)
+                .selected_text(
+                    self.form
+                        .interest_destination
+                        .map_or("Выберите назначение", InterestDestination::title),
+                )
+                .show_ui(ui, |ui| {
+                    for destination in InterestDestination::ALL {
+                        ui.selectable_value(
+                            &mut self.form.interest_destination,
+                            Some(destination),
+                            destination.title(),
+                        );
+                    }
+                });
         });
     }
 
@@ -798,6 +815,13 @@ fn render_savings_text_field(
             field = field.hint_text(hint);
         }
         ui.add(field);
+    });
+}
+
+fn render_savings_checkbox_field(ui: &mut egui::Ui, value: &mut bool, label: &str) {
+    ui.vertical(|ui| {
+        ui.add_space(ui.text_style_height(&egui::TextStyle::Body) + 4.0);
+        ui.checkbox(value, label);
     });
 }
 
@@ -1084,66 +1108,153 @@ mod tests {
     fn savings_edit_form_renders_with_available_actions_at_minimum_window_size() {
         let (database, mut page) = filtered_savings_page();
         page.begin_edit(1);
+        page.form.use_threshold = true;
+        page.form.term_type = Some(SavingsTerm::Limited);
+        page.form.term_end_date = "2027-03-01".to_owned();
         let banks = [Bank {
             id: 1,
             name: "Банк Альфа".to_owned(),
             comment: String::new(),
         }];
         let context = egui::Context::default();
-        let mut output = None;
-        for _ in 0..2 {
-            output = Some(context.run(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(1_280.0, 720.0),
-                    )),
-                    ..Default::default()
-                },
-                |context| {
-                    egui::CentralPanel::default().show(context, |ui| {
-                        page.render(context, ui, &database, &banks);
-                    });
-                },
-            ));
-        }
+        let output = render_savings_fields(&context, &mut page, &banks);
         assert!(page.show_form);
-        let output = output.expect("edit form should render twice");
-        let text_shapes = output
-            .shapes
-            .iter()
-            .filter_map(|clipped_shape| match &clipped_shape.shape {
-                egui::epaint::Shape::Text(text_shape) => {
-                    Some((text_shape.galley.job.text.as_str(), text_shape.pos))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let save = text_shapes
-            .iter()
-            .find_map(|(text, position)| (*text == "Сохранить").then_some(*position))
-            .unwrap_or_else(|| {
-                panic!(
-                    "save action should be visible, rendered text: {:?}",
-                    text_shapes.iter().map(|(text, _)| text).collect::<Vec<_>>()
-                )
-            });
-        let cancel = text_shapes
-            .iter()
-            .find_map(|(text, position)| (*text == "Отмена").then_some(*position))
-            .expect("cancel action should be visible");
+        let text_shapes = rendered_text_positions(&output);
 
-        assert!(text_shapes
-            .iter()
-            .any(|(text, _)| *text == "Изменить накопление"));
-        assert!(text_shapes.iter().any(|(text, _)| *text == "Название"));
-        assert!(text_shapes
-            .iter()
-            .any(|(text, _)| *text == "Назначение процентов"));
+        let title = rendered_position(&text_shapes, "Название");
+        let bank = rendered_position(&text_shapes, "Банк");
+        let active = rendered_position(&text_shapes, "Активно");
+        assert!(title.x < bank.x && bank.x < active.x);
+        assert!((title.y - bank.y).abs() < 1.0);
+
+        let amount = rendered_position(&text_shapes, "Сумма");
+        let base_rate = rendered_position(&text_shapes, "Базовая ставка, %");
+        let threshold_enabled =
+            rendered_position(&text_shapes, "Есть повышение ставки при выполнении условий");
+        assert!(amount.x < base_rate.x && base_rate.x < threshold_enabled.x);
+        assert!((amount.y - base_rate.y).abs() < 1.0);
+        assert!(base_rate.x - amount.x > 150.0);
+        assert!(threshold_enabled.x - base_rate.x > 150.0);
+
+        let threshold_amount = rendered_position(&text_shapes, "Пороговая сумма трат");
+        let threshold_rate = rendered_position(&text_shapes, "Ставка при выполнении условий, %");
+        assert!(threshold_amount.x < threshold_rate.x);
+        assert!((threshold_amount.y - threshold_rate.y).abs() < 1.0);
+
+        let opened_date = rendered_position(&text_shapes, "Дата открытия (ГГГГ-ММ-ДД)");
+        let accrual_date =
+            rendered_position(&text_shapes, "Дата начисления процентов (ГГГГ-ММ-ДД)");
+        let term = rendered_position(&text_shapes, "Срок");
+        let close_date = rendered_position(&text_shapes, "Дата закрытия (ГГГГ-ММ-ДД)");
+        let payout = rendered_position(&text_shapes, "Выплата процентов");
+        assert!(opened_date.x < accrual_date.x && accrual_date.x < term.x);
+        assert!((opened_date.y - accrual_date.y).abs() < 1.0);
+        assert!(threshold_rate.y < opened_date.y);
+        assert!(term.y < close_date.y && close_date.y < payout.y);
+
+        let modal_context = egui::Context::default();
+        render_form_at_size(
+            &modal_context,
+            &mut page,
+            &database,
+            &banks,
+            egui::vec2(1_280.0, 720.0),
+        );
+        let minimum_output = render_form_at_size(
+            &modal_context,
+            &mut page,
+            &database,
+            &banks,
+            egui::vec2(1_280.0, 720.0),
+        );
+        let minimum_text_shapes = rendered_text_positions(&minimum_output);
+        let save = rendered_position(&minimum_text_shapes, "Сохранить");
+        let cancel = rendered_position(&minimum_text_shapes, "Отмена");
         assert!(save.x < cancel.x);
         assert!((save.y - cancel.y).abs() < 1.0);
         assert!(save.x >= 0.0 && cancel.x < 1_280.0);
         assert!(save.y >= 0.0 && cancel.y < 720.0);
+
+        page.form.use_threshold = false;
+        page.form.term_type = Some(SavingsTerm::Unlimited);
+        let output = render_savings_fields(&context, &mut page, &banks);
+        let text_shapes = rendered_text_positions(&output);
+        assert!(!text_shapes.iter().any(|(text, _)| {
+            text == "Пороговая сумма трат" || text == "Ставка при выполнении условий, %"
+        }));
+        assert!(!text_shapes
+            .iter()
+            .any(|(text, _)| text == "Дата закрытия (ГГГГ-ММ-ДД)"));
+        assert!(text_shapes
+            .iter()
+            .any(|(text, _)| text == "Выплата процентов"));
+    }
+
+    fn render_form_at_size(
+        context: &egui::Context,
+        page: &mut SavingsPage,
+        database: &finance_db::Database,
+        banks: &[Bank],
+        screen_size: egui::Vec2,
+    ) -> egui::FullOutput {
+        context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size)),
+                ..Default::default()
+            },
+            |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    page.render(context, ui, database, banks);
+                });
+            },
+        )
+    }
+
+    fn render_savings_fields(
+        context: &egui::Context,
+        page: &mut SavingsPage,
+        banks: &[Bank],
+    ) -> egui::FullOutput {
+        context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(840.0, 1_200.0),
+                )),
+                ..Default::default()
+            },
+            |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    page.render_form_fields(ui, banks);
+                });
+            },
+        )
+    }
+
+    fn rendered_text_positions(output: &egui::FullOutput) -> Vec<(String, egui::Pos2)> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped_shape| match &clipped_shape.shape {
+                egui::epaint::Shape::Text(text_shape) => {
+                    Some((text_shape.galley.job.text.clone(), text_shape.pos))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn rendered_position(shapes: &[(String, egui::Pos2)], text: &str) -> egui::Pos2 {
+        shapes
+            .iter()
+            .rev()
+            .find_map(|(rendered_text, position)| (rendered_text == text).then_some(*position))
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected text {text:?} to be rendered, got: {:?}",
+                    shapes.iter().map(|(text, _)| text).collect::<Vec<_>>()
+                )
+            })
     }
 
     fn valid_savings_form() -> SavingsForm {
