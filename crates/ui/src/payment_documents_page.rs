@@ -244,14 +244,7 @@ impl PaymentDocumentsPage {
                             ui.label(&document.bank_name);
                             ui.label(document.payment_system.code());
                             ui.label(document.card_type.title());
-                            let amount_label = match document.card_type {
-                                PaymentCardType::Debit => "Текущий баланс",
-                                PaymentCardType::Credit => "Кредитный лимит",
-                            };
-                            ui.label(format!(
-                                "{amount_label}: {}",
-                                canonical_amount(document.amount)
-                            ));
+                            ui.label(canonical_amount(document.amount));
                             ui.label(
                                 document
                                     .currency
@@ -792,7 +785,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(rendered_text.contains(&"Банк Альфа"));
-        assert!(rendered_text.contains(&"Кредитный лимит: 50000"));
+        assert!(rendered_text.contains(&"50000"));
+        assert!(rendered_text.contains(&"10"));
+        assert!(!rendered_text.contains(&"Текущий баланс"));
+        assert!(!rendered_text.contains(&"Кредитный лимит"));
         assert!(rendered_text.contains(&"валюта не указана"));
         assert!(rendered_text.contains(&"USD"));
         assert!(rendered_text.contains(&"Платёжная система"));
