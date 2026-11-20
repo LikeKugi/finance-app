@@ -881,7 +881,7 @@ impl TransactionsPage {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(label)
+                .child(div().text_size(px(12.0)).child(label))
                 .child(control)
         };
 
@@ -1041,7 +1041,12 @@ impl TransactionsPage {
                 .iter()
                 .any(|card| Some(card.id) == form.card_id);
         let field = |label: &'static str, control: AnyElement| {
-            div().flex().flex_col().gap_1().child(label).child(control)
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_size(px(12.0)).child(label))
+                .child(control)
         };
 
         let mut fields = div()
@@ -1075,7 +1080,7 @@ impl TransactionsPage {
             .flex()
             .flex_col()
             .gap_1()
-            .child("Зачислить на карту")
+            .child(div().text_size(px(12.0)).child("Зачислить на карту"))
             .child(Select::new(&form.card_select));
         if card_missing_currency {
             card_field = card_field.child(
