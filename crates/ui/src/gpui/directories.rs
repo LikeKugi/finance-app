@@ -13,7 +13,9 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::AlertDialog;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, IndexPath, WindowExt as _};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, IconName, IndexPath, WindowExt as _,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_decimal::Decimal;
@@ -541,7 +543,8 @@ impl DirectoriesPage {
                     .child(
                         Button::new("category-add")
                             .primary()
-                            .label("+ Добавить категорию")
+                            .label("Добавить категорию")
+                            .icon(IconName::Plus)
                             .on_click(cx.listener(|page, _, window, cx| {
                                 page.open_category_form(None, window, cx)
                             })),
@@ -758,11 +761,13 @@ impl Render for DirectoriesPage {
         let add_right = match tab {
             RightTab::Banks => Button::new("bank-add")
                 .primary()
-                .label("+ Добавить банк")
+                .label("Добавить банк")
+                .icon(IconName::Plus)
                 .on_click(cx.listener(|page, _, window, cx| page.open_bank_form(None, window, cx))),
             RightTab::Currencies => Button::new("currency-add")
                 .primary()
-                .label("+ Добавить валюту")
+                .label("Добавить валюту")
+                .icon(IconName::Plus)
                 .on_click(
                     cx.listener(|page, _, window, cx| page.open_currency_form(None, window, cx)),
                 ),

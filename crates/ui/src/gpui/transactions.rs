@@ -1249,8 +1249,9 @@ impl Render for TransactionsPage {
                 TransactionKind::Income => "Добавить доход",
                 TransactionKind::Expense => "Добавить расход",
             })
+            .icon(IconName::Plus)
             .when(matches!(self.kind, TransactionKind::Income), |button| {
-                button.large().icon(IconName::Plus)
+                button.large()
             })
             .disabled(self.form.is_some())
             .on_click(cx.listener(|page, _, window, cx| page.open_form(None, window, cx)));

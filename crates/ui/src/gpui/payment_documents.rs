@@ -15,7 +15,9 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::AlertDialog;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, IndexPath, WindowExt as _};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, IconName, IndexPath, WindowExt as _,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -1003,7 +1005,8 @@ impl Render for PaymentDocumentsPage {
             div().flex().items_center().gap_2().child(
                 Button::new("new-card")
                     .primary()
-                    .label("+ Добавить карту")
+                    .label("Добавить карту")
+                    .icon(IconName::Plus)
                     .disabled(self.form.is_some() || self.banks.is_empty())
                     .on_click(cx.listener(|page, _, window, cx| page.open_form(None, window, cx))),
             ),
