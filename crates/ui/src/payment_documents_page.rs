@@ -78,6 +78,14 @@ impl PaymentDocumentsPage {
                 "Сначала добавьте банк в разделе «Справочники», чтобы создать платёжный документ.",
             );
         }
+        if self.show_form {
+            if let Some(message) = self.render_form(ui, database, banks) {
+                return Some(message);
+            }
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(12.0);
+        }
 
         let mut should_refresh = false;
         egui::ScrollArea::horizontal()
@@ -173,12 +181,6 @@ impl PaymentDocumentsPage {
             ui.label("Платёжных документов по выбранным условиям нет.");
         } else {
             self.render_table(ui, database);
-        }
-
-        if self.show_form {
-            if let Some(message) = self.render_form(ui, database, banks) {
-                return Some(message);
-            }
         }
 
         self.render_delete_confirmation(context, database)
@@ -365,10 +367,12 @@ impl PaymentDocumentsPage {
         } else {
             "Новый платёжный документ"
         });
+        ui.add_space(8.0);
 
         let previous_bank_id = self.form.bank_id;
         ui.horizontal_wrapped(|ui| {
             ui.label("Банк");
+            ui.add_space(6.0);
             let selected_bank = self
                 .form
                 .bank_id
@@ -382,7 +386,9 @@ impl PaymentDocumentsPage {
                     }
                 });
 
+            ui.add_space(16.0);
             ui.label("Платёжная система");
+            ui.add_space(6.0);
             egui::ComboBox::from_id_salt("payment_documents_form_system")
                 .selected_text(
                     self.form
@@ -399,7 +405,9 @@ impl PaymentDocumentsPage {
                     }
                 });
 
+            ui.add_space(16.0);
             ui.label("Тип карты");
+            ui.add_space(6.0);
             egui::ComboBox::from_id_salt("payment_documents_form_type")
                 .selected_text(
                     self.form
@@ -416,6 +424,7 @@ impl PaymentDocumentsPage {
                     }
                 });
         });
+        ui.add_space(12.0);
         if previous_bank_id != self.form.bank_id {
             self.form.savings_ids.clear();
             if let Err(error) = self.load_savings(database, self.form.bank_id) {
@@ -435,7 +444,9 @@ impl PaymentDocumentsPage {
                     .desired_width(140.0)
                     .hint_text("Например, 100000"),
             );
+            ui.add_space(16.0);
             ui.label("Валюта карты");
+            ui.add_space(6.0);
             egui::ComboBox::from_id_salt("payment_documents_form_currency")
                 .selected_text(
                     self.form
@@ -453,19 +464,24 @@ impl PaymentDocumentsPage {
                     }
                 });
             if card_type == Some(PaymentCardType::Credit) {
+                ui.add_space(16.0);
                 ui.label("Дата платежа (ГГГГ-ММ-ДД)");
+                ui.add_space(6.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.form.due_date)
                         .desired_width(120.0)
                         .hint_text("2026-12-01"),
                 );
+                ui.add_space(16.0);
                 ui.label("Льготный период, дней");
+                ui.add_space(6.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.form.grace_period_days)
                         .desired_width(70.0),
                 );
             }
         });
+        ui.add_space(12.0);
         if card_type == Some(PaymentCardType::Debit) {
             self.form.due_date.clear();
             self.form.grace_period_days.clear();
@@ -482,19 +498,19 @@ impl PaymentDocumentsPage {
             self.form.savings_ids.clear();
         }
         if self.form.affects_deposit_rate {
-            ui.colored_label(
-                egui::Color32::from_rgb(160, 105, 0),
-                "Условие сохраняется как возможность; приложение не подтверждает выполнение порога трат.",
-            );
+            ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {
                 ui.label("Минимум трат в месяц");
+                ui.add_space(6.0);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.form.min_monthly_spend)
                         .desired_width(140.0)
                         .hint_text("Например, 10000"),
                 );
             });
+            ui.add_space(8.0);
             ui.label("Выберите связанные накопления этого же банка:");
+            ui.add_space(4.0);
             if self.available_savings.is_empty() {
                 ui.label("Нет накоплений этого банка. Добавьте накопление, чтобы задать условие.");
             } else {
@@ -522,29 +538,43 @@ impl PaymentDocumentsPage {
         }
 
         if let Some(error) = &self.form.error {
+            ui.add_space(8.0);
             ui.colored_label(egui::Color32::RED, error);
         }
+        ui.add_space(12.0);
         let mut result = None;
         ui.horizontal(|ui| {
-            if ui.button("Сохранить").clicked() {
-                match self.save(database) {
-                    Ok(()) => {
-                        self.show_form = false;
-                        self.form.error = None;
-                        match self.refresh(database) {
-                            Ok(()) => {
-                                result = Some(("Платёжный документ сохранён".to_owned(), false));
-                            }
-                            Err(error) => result = Some((error.to_string(), true)),
-                        }
-                    }
-                    Err(error) => self.form.error = Some(error),
+            ui.spacing_mut().item_spacing.x = 16.0;
+            if self.form.affects_deposit_rate {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(
+                        "Условие сохраняется как возможность; приложение не подтверждает выполнение порога трат.",
+                    ).color(egui::Color32::from_rgb(160, 105, 0)))
+                    .wrap(),
+                );
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Отмена").clicked() {
+                    self.show_form = false;
+                    self.form.error = None;
                 }
-            }
-            if ui.button("Отмена").clicked() {
-                self.show_form = false;
-                self.form.error = None;
-            }
+                if ui.button("Сохранить").clicked() {
+                    match self.save(database) {
+                        Ok(()) => {
+                            self.show_form = false;
+                            self.form.error = None;
+                            match self.refresh(database) {
+                                Ok(()) => {
+                                    result =
+                                        Some(("Платёжный документ сохранён".to_owned(), false));
+                                }
+                                Err(error) => result = Some((error.to_string(), true)),
+                            }
+                        }
+                        Err(error) => self.form.error = Some(error),
+                    }
+                }
+            });
         });
         result
     }
@@ -783,6 +813,53 @@ mod tests {
             "payment document rows should be at least {} points tall",
             crate::common::TABLE_ROW_HEIGHT
         );
+    }
+
+    #[test]
+    fn payment_document_form_renders_above_filters_with_warning_and_actions_in_footer() {
+        let database = database_with_bank();
+        let banks = finance_db::list_banks(&database).unwrap();
+
+        for affects_deposit_rate in [false, true] {
+            let mut page = PaymentDocumentsPage::default();
+            page.begin_new(&database, Some(1)).unwrap();
+            page.form.affects_deposit_rate = affects_deposit_rate;
+            let context = egui::Context::default();
+            let output = context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_280.0, 720.0),
+                    )),
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default().show(context, |ui| {
+                        page.render(context, ui, &database, &banks);
+                    });
+                },
+            );
+
+            let form_title = text_positions(&output, "Новый платёжный документ")[0];
+            let filters = text_positions(&output, "Применить")[0];
+            let empty_list =
+                text_positions(&output, "Платёжных документов по выбранным условиям нет.")[0];
+            let warning_text = "Условие сохраняется как возможность; приложение не подтверждает выполнение порога трат.";
+            let warnings = text_positions(&output, warning_text);
+            let save = text_positions(&output, "Сохранить")[0];
+            let cancel = text_positions(&output, "Отмена")[0];
+
+            assert!(form_title.y < filters.y);
+            assert!(filters.y < empty_list.y);
+            assert_eq!(warnings.len(), usize::from(affects_deposit_rate));
+            if let Some(warning) = warnings.first() {
+                assert!((warning.y - save.y).abs() < 1.0);
+                assert!(warning.x < save.x);
+            }
+            assert!((save.y - cancel.y).abs() < 1.0);
+            assert!(save.x < cancel.x);
+            assert!(cancel.x > 960.0, "action buttons should be on the right");
+        }
     }
 
     #[test]
