@@ -6,7 +6,7 @@ This document records the action-button and filter patterns on the existing Inco
 
 On Income, Expenses, and Savings, the page title is on the left side of the header row. The actions are aligned to the right in this order:
 
-1. `＋ Добавить`
+1. `+ Добавить`
 2. `↻ Обновить`
 
 Both buttons are 140 × 40 logical pixels. Add opens a form for a new record; fields may be prefilled with page defaults. Refresh reloads the list using the filter values currently in the controls and does not clear them.
@@ -74,7 +74,7 @@ On Savings, refresh also reloads the bank list and returns the results table to 
 
 Use the following pattern unless a page has a documented reason to differ:
 
-1. Keep the title at the left of the header row and place `＋ Добавить` followed by `↻ Обновить` at the right. Match the existing 140 × 40 logical-pixel button size.
+1. Keep the title at the left of the header row and place `+ Добавить` followed by `↻ Обновить` at the right. Match the existing 140 × 40 logical-pixel button size.
 2. Place filters above the table in a wrapping layout with a small, consistent gap between groups and rows. Keep each label and its control together, and align apply/reset actions to the right of the last row (bottom-right when the filters wrap).
 3. Editing filter controls should only change their pending values; apply the full set of conditions with `Применить`.
 4. Put an `×` next to each populated filter. It clears only that filter and immediately applies the remaining values. Disable it when its filter is empty.

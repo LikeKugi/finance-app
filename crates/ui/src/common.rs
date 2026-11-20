@@ -9,6 +9,31 @@ pub(super) const TABLE_ROW_HEIGHT: f32 = 48.0;
 const FILTER_ACTIONS_MIN_WIDTH: f32 = 250.0;
 const FILTER_ITEM_SPACING: f32 = 8.0;
 
+pub(super) fn add_button_text(ui: &egui::Ui, label: &str) -> egui::WidgetText {
+    let button_font = ui.style().text_styles[&egui::TextStyle::Button].clone();
+    let mut symbol_font = button_font.clone();
+    symbol_font.size *= 1.4;
+
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        "+",
+        0.0,
+        egui::TextFormat {
+            font_id: symbol_font,
+            ..Default::default()
+        },
+    );
+    job.append(
+        &format!(" {label}"),
+        0.0,
+        egui::TextFormat {
+            font_id: button_font,
+            ..Default::default()
+        },
+    );
+    job.into()
+}
+
 pub(super) fn filter_layout(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(FILTER_ITEM_SPACING, FILTER_ITEM_SPACING);

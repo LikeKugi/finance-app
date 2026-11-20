@@ -23,7 +23,8 @@ mod transactions_page;
 
 use analysis_page::AnalysisPage;
 use common::{
-    render_analysis_footer, render_transaction_balance_footer, render_transaction_list_total,
+    add_button_text, render_analysis_footer, render_transaction_balance_footer,
+    render_transaction_list_total,
 };
 use date_input::DateInputState;
 use payment_documents_page::PaymentDocumentsPage;
@@ -442,7 +443,10 @@ impl eframe::App for FinanceApp {
                     let actions_width = 140.0 * 2.0 + ui.spacing().item_spacing.x;
                     ui.add_space((ui.available_width() - actions_width).max(0.0));
                     if ui
-                        .add_sized(egui::vec2(140.0, 40.0), egui::Button::new("＋ Добавить"))
+                        .add_sized(
+                            egui::vec2(140.0, 40.0),
+                            egui::Button::new(add_button_text(ui, "Добавить")),
+                        )
                         .clicked()
                     {
                         self.refresh_categories(kind, true);
@@ -475,7 +479,10 @@ impl eframe::App for FinanceApp {
                     ui.add_space((ui.available_width() - actions_width).max(0.0));
                     if ui
                         .add_enabled_ui(!self.banks.is_empty(), |ui| {
-                            ui.add_sized(egui::vec2(140.0, 40.0), egui::Button::new("＋ Добавить"))
+                            ui.add_sized(
+                                egui::vec2(140.0, 40.0),
+                                egui::Button::new(add_button_text(ui, "Добавить")),
+                            )
                         })
                         .inner
                         .clicked()
@@ -493,7 +500,10 @@ impl eframe::App for FinanceApp {
                     ui.add_space((ui.available_width() - actions_width).max(0.0));
                     if ui
                         .add_enabled_ui(!self.banks.is_empty(), |ui| {
-                            ui.add_sized(egui::vec2(140.0, 40.0), egui::Button::new("＋ Добавить"))
+                            ui.add_sized(
+                                egui::vec2(140.0, 40.0),
+                                egui::Button::new(add_button_text(ui, "Добавить")),
+                            )
                         })
                         .inner
                         .clicked()

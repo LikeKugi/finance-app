@@ -6,6 +6,7 @@ use finance_core::{CurrencyDefinition, TransactionKind};
 use rust_decimal::Decimal;
 
 use super::category_tree::category_tree_rows;
+use super::common::add_button_text;
 use super::{
     BankForm, CategoryForm, CurrencyForm, DeleteTarget, DirectoryRightTab, FinanceApp,
     DIRECTORY_BANKS_SCROLL_AREA_ID, DIRECTORY_CATEGORIES_SCROLL_AREA_ID,
@@ -367,7 +368,10 @@ impl FinanceApp {
             columns[0].horizontal(|ui| {
                 ui.heading("Категории");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("＋ Добавить категорию").clicked() {
+                    if ui
+                        .button(add_button_text(ui, "Добавить категорию"))
+                        .clicked()
+                    {
                         self.category_form = CategoryForm {
                             is_active: true,
                             ..CategoryForm::default()
@@ -479,13 +483,15 @@ impl FinanceApp {
                     egui::Layout::right_to_left(egui::Align::Center),
                     |ui| match self.directory_right_tab {
                         DirectoryRightTab::Banks => {
-                            if ui.button("＋ Добавить банк").clicked() {
+                            if ui.button(add_button_text(ui, "Добавить банк")).clicked()
+                            {
                                 self.bank_form = BankForm::default();
                                 self.show_bank_form = true;
                             }
                         }
                         DirectoryRightTab::Currencies => {
-                            if ui.button("＋ Добавить валюту").clicked() {
+                            if ui.button(add_button_text(ui, "Добавить валюту")).clicked()
+                            {
                                 self.currency_form = CurrencyForm::default();
                                 self.show_currency_form = true;
                             }
