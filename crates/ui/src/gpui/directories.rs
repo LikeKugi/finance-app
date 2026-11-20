@@ -10,7 +10,7 @@ use finance_core::{Bank, Category, CurrencyDefinition, TransactionKind};
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::dialog::AlertDialog;
+use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::{
@@ -54,6 +54,13 @@ struct CurrencyForm {
     name: Entity<InputState>,
     rate: Entity<InputState>,
     rate_date: Entity<InputState>,
+}
+
+#[derive(Clone, Copy)]
+enum FormKind {
+    Category,
+    Bank,
+    Currency,
 }
 
 enum Delete {
@@ -227,10 +234,12 @@ impl DirectoriesPage {
             parent_select,
             is_active: existing.is_none_or(|c| c.is_active),
         });
+        self.message = None;
         cx.notify();
+        self.open_form_dialog(FormKind::Category, window, cx);
     }
 
-    fn save_category(&mut self, cx: &mut Context<Self>) {
+    fn save_category(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = self.category_form.as_ref() else {
             return;
         };
@@ -246,6 +255,7 @@ impl DirectoriesPage {
         match result {
             Ok(_) => {
                 self.category_form = None;
+                window.close_dialog(cx);
                 self.reload(cx);
             }
             Err(error) => self.error(error.to_string(), cx),
@@ -275,10 +285,12 @@ impl DirectoriesPage {
                 cx,
             ),
         });
+        self.message = None;
         cx.notify();
+        self.open_form_dialog(FormKind::Bank, window, cx);
     }
 
-    fn save_bank(&mut self, cx: &mut Context<Self>) {
+    fn save_bank(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = self.bank_form.as_ref() else {
             return;
         };
@@ -287,6 +299,7 @@ impl DirectoriesPage {
         match finance_db::save_bank(&self.database, form.id, &name, &comment) {
             Ok(_) => {
                 self.bank_form = None;
+                window.close_dialog(cx);
                 self.reload(cx);
             }
             Err(error) => self.error(error.to_string(), cx),
@@ -325,10 +338,12 @@ impl DirectoriesPage {
                 cx,
             ),
         });
+        self.message = None;
         cx.notify();
+        self.open_form_dialog(FormKind::Currency, window, cx);
     }
 
-    fn save_currency(&mut self, cx: &mut Context<Self>) {
+    fn save_currency(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = self.currency_form.as_ref() else {
             return;
         };
@@ -352,6 +367,7 @@ impl DirectoriesPage {
         match result {
             Ok(()) => {
                 self.currency_form = None;
+                window.close_dialog(cx);
                 self.reload(cx);
             }
             Err(error) => self.error(error.to_string(), cx),
@@ -410,6 +426,152 @@ impl DirectoriesPage {
         });
     }
 
+    // ---- формы в диалогах ----
+
+    fn open_form_dialog(&self, kind: FormKind, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity();
+        window.open_dialog(cx, move |dialog: Dialog, _, cx| {
+            let (title, body) = this.update(cx, |page, cx| page.form_dialog_content(kind, cx));
+            dialog
+                .title(title)
+                .centered()
+                .w(px(560.0))
+                .close_button(false)
+                .overlay_closable(false)
+                .keyboard(false)
+                .child(body)
+        });
+    }
+
+    fn form_dialog_content(
+        &mut self,
+        kind: FormKind,
+        cx: &mut Context<Self>,
+    ) -> (String, AnyElement) {
+        let danger = cx.theme().danger;
+        let (title, fields, id, save_label) = match kind {
+            FormKind::Category => {
+                let Some(form) = self.category_form.as_ref() else {
+                    return (String::new(), div().into_any_element());
+                };
+                let title = if form.id.is_some() {
+                    "Изменить категорию"
+                } else {
+                    "Новая категория"
+                };
+                let fields = div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child("Название")
+                    .child(Input::new(&form.name))
+                    .child("Родительская категория")
+                    .child(Select::new(&form.parent_select))
+                    .child(
+                        Checkbox::new("category-active")
+                            .label("Активна")
+                            .checked(form.is_active)
+                            .on_click(cx.listener(|page, checked: &bool, _, cx| {
+                                if let Some(form) = page.category_form.as_mut() {
+                                    form.is_active = *checked;
+                                }
+                                cx.notify();
+                            })),
+                    );
+                (title.to_owned(), fields, "category", "Сохранить категорию")
+            }
+            FormKind::Bank => {
+                let Some(form) = self.bank_form.as_ref() else {
+                    return (String::new(), div().into_any_element());
+                };
+                let title = if form.id.is_some() {
+                    "Изменить банк"
+                } else {
+                    "Новый банк"
+                };
+                let fields = div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child("Название")
+                    .child(Input::new(&form.name))
+                    .child("Комментарий")
+                    .child(Input::new(&form.comment));
+                (title.to_owned(), fields, "bank", "Сохранить банк")
+            }
+            FormKind::Currency => {
+                let Some(form) = self.currency_form.as_ref() else {
+                    return (String::new(), div().into_any_element());
+                };
+                let primary_code = self
+                    .currencies
+                    .iter()
+                    .find(|c| c.is_primary)
+                    .map_or("—".to_owned(), |c| c.code.clone());
+                let title = match &form.rate_for {
+                    Some(code) => format!("Курс {code} к {primary_code}"),
+                    None => "Новая валюта".to_owned(),
+                };
+                let fields = div().flex().flex_col().gap_2();
+                let fields = if form.rate_for.is_some() {
+                    fields
+                        .child("За 1 единицу валюты")
+                        .child(Input::new(&form.rate))
+                        .child("Дата курса (ГГГГ-ММ-ДД)")
+                        .child(Input::new(&form.rate_date))
+                } else {
+                    fields
+                        .child("Код (3 заглавные латинские буквы)")
+                        .child(Input::new(&form.code))
+                        .child("Название")
+                        .child(Input::new(&form.name))
+                };
+                (title, fields, "currency", "Сохранить")
+            }
+        };
+        let error = self.message.clone();
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .child(fields)
+            .when_some(error, |body, (message, _)| {
+                body.child(div().text_color(danger).child(message))
+            })
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new(SharedString::from(format!("{id}-cancel")))
+                            .label("Отмена")
+                            .on_click(cx.listener(move |page, _, window, cx| {
+                                match kind {
+                                    FormKind::Category => page.category_form = None,
+                                    FormKind::Bank => page.bank_form = None,
+                                    FormKind::Currency => page.currency_form = None,
+                                }
+                                page.message = None;
+                                window.close_dialog(cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("{id}-save")))
+                            .primary()
+                            .label(save_label)
+                            .on_click(cx.listener(move |page, _, window, cx| match kind {
+                                FormKind::Category => page.save_category(window, cx),
+                                FormKind::Bank => page.save_bank(window, cx),
+                                FormKind::Currency => page.save_currency(window, cx),
+                            })),
+                    ),
+            );
+        (title, body.into_any_element())
+    }
+
     // ---- отрисовка ----
 
     fn list(&self, has_rows: bool, cx: &App) -> Div {
@@ -439,18 +601,6 @@ impl DirectoriesPage {
             .border_l_1()
             .border_color(cx.theme().border)
             .px_1()
-    }
-
-    fn panel(&self, title: &str, cx: &App) -> Div {
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .p_3()
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded_md()
-            .child(div().font_weight(FontWeight::BOLD).child(title.to_owned()))
     }
 
     fn render_categories(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -503,50 +653,6 @@ impl DirectoriesPage {
                     ),
             );
         }
-        let form =
-            self.category_form.as_ref().map(|form| {
-                self.panel(
-                    if form.id.is_some() {
-                        "Изменить категорию"
-                    } else {
-                        "Новая категория"
-                    },
-                    cx,
-                )
-                .child("Название")
-                .child(Input::new(&form.name))
-                .child("Родительская категория")
-                .child(Select::new(&form.parent_select))
-                .child(
-                    Checkbox::new("category-active")
-                        .label("Активна")
-                        .checked(form.is_active)
-                        .on_click(cx.listener(|page, checked: &bool, _, cx| {
-                            if let Some(form) = page.category_form.as_mut() {
-                                form.is_active = *checked;
-                            }
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(Button::new("category-cancel").label("Отмена").on_click(
-                            cx.listener(|page, _, _, cx| {
-                                page.category_form = None;
-                                cx.notify();
-                            }),
-                        ))
-                        .child(
-                            Button::new("category-save")
-                                .primary()
-                                .label("Сохранить категорию")
-                                .on_click(cx.listener(|page, _, _, cx| page.save_category(cx))),
-                        ),
-                )
-            });
         div()
             .flex_1()
             .flex()
@@ -566,6 +672,7 @@ impl DirectoriesPage {
                     .child(
                         Button::new("category-add")
                             .primary()
+                            .small()
                             .label("Добавить категорию")
                             .icon(IconName::Plus)
                             .on_click(cx.listener(|page, _, window, cx| {
@@ -573,7 +680,6 @@ impl DirectoriesPage {
                             })),
                     ),
             )
-            .children(form)
             .child(list)
     }
 
@@ -614,41 +720,7 @@ impl DirectoriesPage {
                     ),
             );
         }
-        let form = self.bank_form.as_ref().map(|form| {
-            self.panel(
-                if form.id.is_some() {
-                    "Изменить банк"
-                } else {
-                    "Новый банк"
-                },
-                cx,
-            )
-            .child("Название")
-            .child(Input::new(&form.name))
-            .child("Комментарий")
-            .child(Input::new(&form.comment))
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap_2()
-                    .child(
-                        Button::new("bank-cancel")
-                            .label("Отмена")
-                            .on_click(cx.listener(|page, _, _, cx| {
-                                page.bank_form = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("bank-save")
-                            .primary()
-                            .label("Сохранить банк")
-                            .on_click(cx.listener(|page, _, _, cx| page.save_bank(cx))),
-                    ),
-            )
-        });
-        div().flex().flex_col().gap_2().children(form).child(list)
+        div().flex().flex_col().gap_2().child(list)
     }
 
     fn render_currencies(&mut self, cx: &mut Context<Self>) -> Div {
@@ -727,50 +799,10 @@ impl DirectoriesPage {
             );
             let _ = &c3;
         }
-        let form =
-            self.currency_form.as_ref().map(|form| {
-                let title = match &form.rate_for {
-                    Some(code) => format!("Курс {code} к {primary_code}"),
-                    None => "Новая валюта".to_owned(),
-                };
-                let panel = self.panel(&title, cx);
-                let panel = if form.rate_for.is_some() {
-                    panel
-                        .child("За 1 единицу валюты")
-                        .child(Input::new(&form.rate))
-                        .child("Дата курса (ГГГГ-ММ-ДД)")
-                        .child(Input::new(&form.rate_date))
-                } else {
-                    panel
-                        .child("Код (3 заглавные латинские буквы)")
-                        .child(Input::new(&form.code))
-                        .child("Название")
-                        .child(Input::new(&form.name))
-                };
-                panel.child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(Button::new("currency-cancel").label("Отмена").on_click(
-                            cx.listener(|page, _, _, cx| {
-                                page.currency_form = None;
-                                cx.notify();
-                            }),
-                        ))
-                        .child(
-                            Button::new("currency-save")
-                                .primary()
-                                .label("Сохранить")
-                                .on_click(cx.listener(|page, _, _, cx| page.save_currency(cx))),
-                        ),
-                )
-            });
         div()
             .flex()
             .flex_col()
             .gap_2()
-            .children(form)
             .child(list)
             .child(div().text_color(muted).child(
                 "Курс означает количество единиц основной валюты за 1 единицу выбранной валюты.",
@@ -801,11 +833,13 @@ impl Render for DirectoriesPage {
         let add_right = match tab {
             RightTab::Banks => Button::new("bank-add")
                 .primary()
+                .small()
                 .label("Добавить банк")
                 .icon(IconName::Plus)
                 .on_click(cx.listener(|page, _, window, cx| page.open_bank_form(None, window, cx))),
             RightTab::Currencies => Button::new("currency-add")
                 .primary()
+                .small()
                 .label("Добавить валюту")
                 .icon(IconName::Plus)
                 .on_click(
@@ -823,30 +857,22 @@ impl Render for DirectoriesPage {
             .child(
                 div()
                     .flex()
-                    .gap_2()
+                    .w_full()
+                    .items_center()
+                    .justify_between()
                     .child(
-                        toggle(
-                            "kind-income",
-                            "Категории доходов",
-                            kind == TransactionKind::Income,
-                        )
-                        .on_click(
-                            cx.listener(|page, _, _, cx| {
-                                page.set_kind(TransactionKind::Income, cx)
-                            }),
-                        ),
+                        div()
+                            .text_size(px(24.0))
+                            .font_weight(FontWeight::BOLD)
+                            .child("Справочники"),
                     )
                     .child(
-                        toggle(
-                            "kind-expense",
-                            "Категории расходов",
-                            kind == TransactionKind::Expense,
-                        )
-                        .on_click(
-                            cx.listener(|page, _, _, cx| {
-                                page.set_kind(TransactionKind::Expense, cx)
-                            }),
-                        ),
+                        Button::new("refresh-directories")
+                            .secondary()
+                            .large()
+                            .label("Обновить")
+                            .icon(IconName::Replace)
+                            .on_click(cx.listener(|page, _, _, cx| page.reload(cx))),
                     ),
             )
             .when_some(self.message.clone(), |root, (message, _)| {
@@ -857,7 +883,43 @@ impl Render for DirectoriesPage {
                     .flex()
                     .gap_6()
                     .items_start()
-                    .child(div().flex_1().child(self.render_categories(cx)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .child(
+                                        toggle(
+                                            "kind-income",
+                                            "Категории доходов",
+                                            kind == TransactionKind::Income,
+                                        )
+                                        .on_click(
+                                            cx.listener(|page, _, _, cx| {
+                                                page.set_kind(TransactionKind::Income, cx)
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        toggle(
+                                            "kind-expense",
+                                            "Категории расходов",
+                                            kind == TransactionKind::Expense,
+                                        )
+                                        .on_click(
+                                            cx.listener(|page, _, _, cx| {
+                                                page.set_kind(TransactionKind::Expense, cx)
+                                            }),
+                                        ),
+                                    ),
+                            )
+                            .child(self.render_categories(cx)),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -886,8 +948,19 @@ impl Render for DirectoriesPage {
                                                 page.set_right_tab(RightTab::Currencies, cx)
                                             }),
                                         ),
-                                    )
-                                    .child(div().flex_1())
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().flex_1().font_weight(FontWeight::BOLD).child(
+                                        match tab {
+                                            RightTab::Banks => "Банки",
+                                            RightTab::Currencies => "Валюты",
+                                        },
+                                    ))
                                     .child(add_right),
                             )
                             .child(right),

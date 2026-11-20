@@ -8,7 +8,7 @@ All page-level add buttons use a Plus icon instead of a textual plus and retain 
 
 On Income and Expenses, the page title is on the left side of the header row and `Добавить доход` / `Добавить расход` with the Plus icon is aligned to the right, followed by `Обновить` with the Replace icon. Both actions use the Large button size; Add uses the Primary variant and refresh uses Secondary. Refresh reloads the transaction list with the current filter values and does not reset them.
 
-On Directories, the add buttons for categories, banks, and currencies use the default Medium button size and the Plus icon.
+On Directories, the header has the page title on the left and a Large Secondary `Обновить` button (Replace icon) on the right, which reloads all directories. Below it, the category-kind switch (`Категории доходов` / `Категории расходов`) sits on the left and the `Банки` / `Валюты` switch on the right in the same row. The add buttons for categories, banks, and currencies use the Small size and the Plus icon.
 
 The Income page keeps Add enabled even if no active categories exist; it shows a notice to add a category instead. Future pages should make missing prerequisites clear and should not allow an action that cannot create a valid record.
 
