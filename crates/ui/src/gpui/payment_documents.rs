@@ -12,7 +12,7 @@ use finance_core::{
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::dialog::AlertDialog;
+use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::{
@@ -21,7 +21,6 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-const PAGE_SIZE: usize = 100;
 const DATE_FORMAT: &str = "%Y-%m-%d";
 const ROW_HEIGHT: f32 = 40.0;
 const ALL_LABEL: &str = "Все";
@@ -29,8 +28,23 @@ const ALL_BANKS_LABEL: &str = "Все банки";
 const NO_CURRENCY_LABEL: &str = "валюта не указана";
 const RATE_WARNING: &str =
     "Условие сохраняется как возможность; приложение не подтверждает выполнение порога трат.";
-const COLUMN_WIDTHS: [f32; 11] = [
-    130.0, 100.0, 90.0, 110.0, 90.0, 105.0, 80.0, 125.0, 100.0, 150.0, 160.0,
+/// Фиксированные ширины колонок 0..=8; колонка «Связанные накопления» занимает остаток,
+/// «Действия» закреплены справа.
+const FIXED_COLUMN_WIDTHS: [f32; 9] = [130.0, 95.0, 90.0, 100.0, 75.0, 105.0, 80.0, 125.0, 100.0];
+const SAVINGS_COLUMN: usize = 9;
+const ACTIONS_COLUMN_WIDTH: f32 = 180.0;
+const HEADERS: [&str; 11] = [
+    "Банк",
+    "Система",
+    "Тип",
+    "Сумма",
+    "Валюта",
+    "Дата платежа",
+    "Льгота, дни",
+    "Условие ставки",
+    "Минимум трат",
+    "Связанные накопления",
+    "Действия",
 ];
 
 type Choice = Entity<SelectState<Vec<SharedString>>>;
@@ -103,7 +117,7 @@ fn savings_label(savings: &SavingsAccount) -> String {
 }
 
 /// Строковые значения формы, не зависящие от GUI.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct CardInput {
     bank_id: Option<i64>,
     payment_system: Option<PaymentSystem>,
@@ -187,7 +201,25 @@ struct CardForm {
     type_select: Choice,
     currency_select: Choice,
     error: Option<String>,
+    initial: CardInput,
     _subscriptions: Vec<Subscription>,
+}
+
+impl CardForm {
+    fn input(&self, cx: &App) -> CardInput {
+        CardInput {
+            bank_id: self.bank_id,
+            payment_system: self.payment_system,
+            card_type: self.card_type,
+            amount: self.amount.read(cx).value().to_string(),
+            currency: self.currency,
+            due_date: self.due_date.read(cx).value().to_string(),
+            grace_period_days: self.grace_period_days.read(cx).value().to_string(),
+            affects_deposit_rate: self.affects_deposit_rate,
+            min_monthly_spend: self.min_monthly_spend.read(cx).value().to_string(),
+            savings_ids: self.savings_ids.clone(),
+        }
+    }
 }
 
 pub(crate) struct PaymentDocumentsPage {
@@ -202,9 +234,9 @@ pub(crate) struct PaymentDocumentsPage {
     system_filter_select: Choice,
     type_filter_select: Choice,
     currency_filter_select: Choice,
-    current_page: usize,
     message: Option<(String, bool)>,
     form: Option<CardForm>,
+    confirm_discard: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -287,9 +319,9 @@ impl PaymentDocumentsPage {
             system_filter_select,
             type_filter_select,
             currency_filter_select,
-            current_page: 0,
             message: None,
             form: None,
+            confirm_discard: false,
             _subscriptions: subscriptions,
         };
         page.reload(window, cx);
@@ -340,7 +372,6 @@ impl PaymentDocumentsPage {
         ) {
             Ok(entries) => {
                 self.entries = entries;
-                self.current_page = 0;
                 if matches!(&self.message, Some((_, true))) {
                     self.message = None;
                 }
@@ -393,6 +424,8 @@ impl PaymentDocumentsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.message = None;
+        self.confirm_discard = false;
         let bank_id = match existing {
             Some(document) => Some(document.bank_id),
             None => self.bank_filter,
@@ -492,7 +525,7 @@ impl PaymentDocumentsPage {
             },
         ));
 
-        self.form = Some(CardForm {
+        let mut form = CardForm {
             id: existing.map(|d| d.id),
             bank_id,
             payment_system,
@@ -538,27 +571,111 @@ impl PaymentDocumentsPage {
             type_select,
             currency_select,
             error: None,
+            initial: CardInput {
+                bank_id,
+                payment_system,
+                card_type,
+                amount: String::new(),
+                currency,
+                due_date: String::new(),
+                grace_period_days: String::new(),
+                affects_deposit_rate: false,
+                min_monthly_spend: String::new(),
+                savings_ids: Vec::new(),
+            },
             _subscriptions: subscriptions,
+        };
+        form.initial = form.input(cx);
+        self.form = Some(form);
+        cx.notify();
+        self.open_form_dialog(window, cx);
+    }
+
+    fn open_form_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity();
+        window.open_dialog(cx, move |dialog: Dialog, _, cx| {
+            let (title, body) = this.update(cx, |page, cx| {
+                let title = match page.form.as_ref().map(|form| form.id.is_some()) {
+                    Some(true) => "Изменить платёжную карту",
+                    _ => "Новая платёжная карта",
+                };
+                (title, page.render_form_dialog(cx))
+            });
+            dialog
+                .title(title)
+                .centered()
+                .w(px(820.0))
+                .close_button(false)
+                .overlay_closable(false)
+                .keyboard(false)
+                .child(body)
         });
+    }
+
+    fn render_form_dialog(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if self.confirm_discard {
+            self.render_discard_confirmation(cx)
+        } else {
+            self.render_form(cx)
+        }
+    }
+
+    fn render_discard_confirmation(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_4()
+            .child("Несохранённые изменения будут потеряны.")
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("card-continue-editing")
+                            .label("Вернуться к форме")
+                            .on_click(cx.listener(|page, _, _, cx| {
+                                page.confirm_discard = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("card-discard-changes")
+                            .primary()
+                            .label("Не сохранять")
+                            .on_click(cx.listener(|page, _, window, cx| {
+                                page.form = None;
+                                page.confirm_discard = false;
+                                window.close_dialog(cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn request_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let has_changes = self
+            .form
+            .as_ref()
+            .is_some_and(|form| form.input(cx) != form.initial);
+        if has_changes {
+            self.confirm_discard = true;
+        } else {
+            self.form = None;
+            self.confirm_discard = false;
+            window.close_dialog(cx);
+        }
         cx.notify();
     }
 
-    fn save(&mut self, cx: &mut Context<Self>) {
+    /// Сохраняет форму; `true` — карта сохранена и диалог можно закрывать.
+    fn save(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(form) = self.form.as_ref() else {
-            return;
+            return false;
         };
-        let input = CardInput {
-            bank_id: form.bank_id,
-            payment_system: form.payment_system,
-            card_type: form.card_type,
-            amount: form.amount.read(cx).value().to_string(),
-            currency: form.currency,
-            due_date: form.due_date.read(cx).value().to_string(),
-            grace_period_days: form.grace_period_days.read(cx).value().to_string(),
-            affects_deposit_rate: form.affects_deposit_rate,
-            min_monthly_spend: form.min_monthly_spend.read(cx).value().to_string(),
-            savings_ids: form.savings_ids.clone(),
-        };
+        let input = form.input(cx);
         let id = form.id;
         let result = build_details(&input).and_then(|details| {
             finance_db::save_payment_document(&self.database, id, &details)
@@ -567,17 +684,20 @@ impl PaymentDocumentsPage {
         match result {
             Ok(_) => {
                 self.form = None;
+                self.confirm_discard = false;
                 self.refresh(cx);
                 if !matches!(&self.message, Some((_, true))) {
                     self.message = Some(("Платёжная карта сохранена".to_owned(), false));
                     cx.notify();
                 }
+                true
             }
             Err(message) => {
                 if let Some(form) = self.form.as_mut() {
                     form.error = Some(message);
                 }
                 cx.notify();
+                false
             }
         }
     }
@@ -629,53 +749,88 @@ impl PaymentDocumentsPage {
 
     // ---- отрисовка ----
 
-    fn labeled(caption: &'static str, width: f32, child: impl IntoElement) -> Div {
+    fn render_filters(&self, cx: &mut Context<Self>) -> Div {
+        let active = self.has_active_filters();
+        let filter = |label: &'static str, width: f32, control: AnyElement| {
+            div()
+                .w(px(width))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_size(px(12.0)).child(label))
+                .child(control)
+        };
         div()
-            .w(px(width))
             .flex()
             .flex_col()
-            .gap_1()
-            .child(caption)
-            .child(child)
-    }
-
-    fn render_filters(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.has_active_filters();
-        div()
-            .flex()
-            .flex_wrap()
-            .items_end()
             .gap_2()
-            .child(Self::labeled(
-                "Банк",
-                230.0,
-                Select::new(&self.bank_filter_select).placeholder(ALL_BANKS_LABEL),
-            ))
-            .child(Self::labeled(
-                "Платёжная система",
-                170.0,
-                Select::new(&self.system_filter_select).placeholder(ALL_LABEL),
-            ))
-            .child(Self::labeled(
-                "Тип карты",
-                160.0,
-                Select::new(&self.type_filter_select).placeholder(ALL_LABEL),
-            ))
-            .child(Self::labeled(
-                "Валюта",
-                120.0,
-                Select::new(&self.currency_filter_select).placeholder(ALL_LABEL),
-            ))
             .child(
-                Button::new("filters-reset")
-                    .label("Сбросить")
-                    .disabled(!active)
-                    .on_click(cx.listener(|page, _, window, cx| page.reset_filters(window, cx))),
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_start()
+                    .gap_2()
+                    .child(filter(
+                        "Банк",
+                        240.0,
+                        Select::new(&self.bank_filter_select)
+                            .placeholder(ALL_BANKS_LABEL)
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Платёжная система",
+                        170.0,
+                        Select::new(&self.system_filter_select)
+                            .placeholder(ALL_LABEL)
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Тип карты",
+                        160.0,
+                        Select::new(&self.type_filter_select)
+                            .placeholder(ALL_LABEL)
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Валюта",
+                        150.0,
+                        Select::new(&self.currency_filter_select)
+                            .placeholder(ALL_LABEL)
+                            .small()
+                            .into_any_element(),
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("filters-apply")
+                            .primary()
+                            .small()
+                            .label("Применить")
+                            .on_click(cx.listener(|page, _, _, cx| page.refresh(cx))),
+                    )
+                    .child(
+                        Button::new("filters-reset")
+                            .small()
+                            .label("Сбросить фильтры")
+                            .disabled(!active)
+                            .on_click(
+                                cx.listener(|page, _, window, cx| page.reset_filters(window, cx)),
+                            ),
+                    ),
             )
     }
 
-    fn render_form(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let form = self.form.as_ref()?;
+    fn render_form(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(form) = self.form.as_ref() else {
+            return div().into_any_element();
+        };
         let danger = cx.theme().danger;
         let warning = cx.theme().warning;
         let muted = cx.theme().muted_foreground;
@@ -685,72 +840,65 @@ impl PaymentDocumentsPage {
             Some(PaymentCardType::Credit) => "Кредитный лимит",
             None => "Сумма карты",
         };
-        let mut panel = div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .p_3()
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded_md()
-            .child(
-                div()
-                    .font_weight(FontWeight::BOLD)
-                    .child(if form.id.is_some() {
-                        "Изменить платёжную карту"
-                    } else {
-                        "Новая платёжная карта"
-                    }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_3()
-                    .child(Self::labeled(
-                        "Банк",
-                        240.0,
-                        Select::new(&form.bank_select).placeholder("Выберите банк"),
-                    ))
-                    .child(Self::labeled(
-                        "Платёжная система",
-                        170.0,
-                        Select::new(&form.system_select).placeholder("Выберите"),
-                    ))
-                    .child(Self::labeled(
-                        "Тип карты",
-                        160.0,
-                        Select::new(&form.type_select).placeholder("Выберите"),
-                    )),
-            );
+        let field = |label: &'static str, control: AnyElement| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_size(px(12.0)).child(label))
+                .child(control)
+        };
+
+        let mut fields = div().flex().flex_col().gap_3().child(
+            div()
+                .flex()
+                .gap_4()
+                .child(field(
+                    "Банк",
+                    Select::new(&form.bank_select)
+                        .placeholder("Выберите банк")
+                        .into_any_element(),
+                ))
+                .child(field(
+                    "Платёжная система",
+                    Select::new(&form.system_select)
+                        .placeholder("Выберите")
+                        .into_any_element(),
+                ))
+                .child(field(
+                    "Тип карты",
+                    Select::new(&form.type_select)
+                        .placeholder("Выберите")
+                        .into_any_element(),
+                )),
+        );
         let mut amounts = div()
             .flex()
-            .flex_wrap()
-            .gap_3()
-            .child(Self::labeled(
+            .gap_4()
+            .child(field(
                 amount_caption,
-                170.0,
-                Input::new(&form.amount),
+                Input::new(&form.amount).into_any_element(),
             ))
-            .child(Self::labeled(
+            .child(field(
                 "Валюта карты",
-                190.0,
-                Select::new(&form.currency_select).placeholder(NO_CURRENCY_LABEL),
+                Select::new(&form.currency_select)
+                    .placeholder(NO_CURRENCY_LABEL)
+                    .into_any_element(),
             ));
         if is_credit {
             amounts = amounts
-                .child(Self::labeled(
+                .child(field(
                     "Дата платежа (ГГГГ-ММ-ДД)",
-                    200.0,
-                    Input::new(&form.due_date),
+                    Input::new(&form.due_date).into_any_element(),
                 ))
-                .child(Self::labeled(
+                .child(field(
                     "Льготный период, дней",
-                    170.0,
-                    Input::new(&form.grace_period_days),
+                    Input::new(&form.grace_period_days).into_any_element(),
                 ));
         }
-        panel = panel.child(amounts).child(
+        fields = fields.child(amounts).child(
             Checkbox::new("card-affects-rate")
                 .label("Условия карты могут влиять на ставку по накоплениям")
                 .checked(form.affects_deposit_rate)
@@ -765,271 +913,325 @@ impl PaymentDocumentsPage {
                 })),
         );
         if form.affects_deposit_rate {
-            panel = panel.child(Self::labeled(
-                "Минимум трат в месяц",
-                200.0,
-                Input::new(&form.min_monthly_spend),
-            ));
-            panel = panel.child("Выберите связанные накопления этого же банка:");
-            if form.available_savings.is_empty() {
-                panel = panel.child(div().text_color(muted).child(
-                    "Нет накоплений этого банка. Добавьте накопление, чтобы задать условие.",
-                ));
-            } else {
-                let mut list = div().id("card-savings-options").flex().flex_col().gap_1();
-                for savings in &form.available_savings {
-                    let id = savings.id;
-                    list = list.child(
-                        Checkbox::new(("card-savings", id as usize))
-                            .label(savings_label(savings))
-                            .checked(form.savings_ids.contains(&id))
-                            .on_click(cx.listener(move |page, checked: &bool, _, cx| {
-                                if let Some(form) = page.form.as_mut() {
-                                    if *checked {
-                                        if !form.savings_ids.contains(&id) {
-                                            form.savings_ids.push(id);
-                                        }
-                                    } else {
-                                        form.savings_ids.retain(|x| *x != id);
-                                    }
+            fields = fields.child(
+                div()
+                    .flex()
+                    .gap_4()
+                    .child(field(
+                        "Минимум трат в месяц",
+                        Input::new(&form.min_monthly_spend).into_any_element(),
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .child("Связанные накопления этого же банка"),
+                            )
+                            .child(if form.available_savings.is_empty() {
+                                div().text_xs().text_color(muted).child(
+                                    "Нет накоплений этого банка. Добавьте накопление, чтобы задать условие.",
+                                ).into_any_element()
+                            } else {
+                                let mut list =
+                                    div().id("card-savings-options").flex().flex_col().gap_1();
+                                for savings in &form.available_savings {
+                                    let id = savings.id;
+                                    list = list.child(
+                                        Checkbox::new(("card-savings", id as usize))
+                                            .label(savings_label(savings))
+                                            .checked(form.savings_ids.contains(&id))
+                                            .on_click(cx.listener(
+                                                move |page, checked: &bool, _, cx| {
+                                                    if let Some(form) = page.form.as_mut() {
+                                                        if *checked {
+                                                            if !form.savings_ids.contains(&id) {
+                                                                form.savings_ids.push(id);
+                                                            }
+                                                        } else {
+                                                            form.savings_ids.retain(|x| *x != id);
+                                                        }
+                                                    }
+                                                    cx.notify();
+                                                },
+                                            )),
+                                    );
                                 }
-                                cx.notify();
-                            })),
-                    );
-                }
-                panel = panel.child(list.max_h(px(120.0)).overflow_y_scroll());
-            }
+                                list.max_h(px(80.0)).overflow_y_scroll().into_any_element()
+                            }),
+                    ),
+            );
+            fields = fields.child(div().text_xs().text_color(warning).child(RATE_WARNING));
         }
+
+        let mut panel = div().flex().flex_col().gap_3().p_4().child(fields);
         if let Some(error) = &form.error {
             panel = panel.child(div().text_color(danger).child(error.clone()));
         }
-        Some(
-            panel.child(
+        panel
+            .child(
                 div()
                     .flex()
-                    .items_center()
+                    .justify_end()
                     .gap_2()
-                    .child(div().flex_1().when(form.affects_deposit_rate, |d| {
-                        d.text_color(warning).child(RATE_WARNING)
-                    }))
-                    .child(
-                        Button::new("card-cancel")
-                            .label("Отмена")
-                            .on_click(cx.listener(|page, _, _, cx| {
-                                page.form = None;
-                                cx.notify();
-                            })),
-                    )
                     .child(
                         Button::new("card-save")
                             .primary()
                             .label("Сохранить")
-                            .on_click(cx.listener(|page, _, _, cx| page.save(cx))),
-                    ),
-            ),
-        )
+                            .on_click(cx.listener(|page, _, window, cx| {
+                                if page.save(cx) {
+                                    window.close_dialog(cx);
+                                }
+                            })),
+                    )
+                    .child(Button::new("card-cancel").label("Отмена").on_click(
+                        cx.listener(|page, _, window, cx| page.request_cancel(window, cx)),
+                    )),
+            )
+            .into_any_element()
     }
 
-    fn render_pager(&mut self, page_count: usize, cx: &mut Context<Self>) -> impl IntoElement {
-        let current = self.current_page;
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(
-                Button::new("page-prev")
-                    .compact()
-                    .label("← Назад")
-                    .disabled(current == 0)
-                    .on_click(cx.listener(|page, _, _, cx| {
-                        page.current_page = page.current_page.saturating_sub(1);
-                        cx.notify();
-                    })),
-            )
-            .child(format!("Страница {} из {page_count}", current + 1))
-            .child(
-                Button::new("page-next")
-                    .compact()
-                    .label("Далее →")
-                    .disabled(current + 1 >= page_count)
-                    .on_click(cx.listener(|page, _, _, cx| {
-                        page.current_page += 1;
-                        cx.notify();
-                    })),
-            )
-    }
-
-    fn render_table(&mut self, cx: &mut Context<Self>) -> Div {
+    fn render_table(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let border = cx.theme().border;
         let stripe = cx.theme().muted;
-        let page_count = self.entries.len().div_ceil(PAGE_SIZE);
-        self.current_page = self.current_page.min(page_count.saturating_sub(1));
-        let start = self.current_page * PAGE_SIZE;
-        let end = (start + PAGE_SIZE).min(self.entries.len());
-        let entries: Vec<PaymentDocument> = self.entries[start..end].to_vec();
-
+        let count = self.entries.len();
         let header = div()
             .flex()
+            .w_full()
             .h(px(ROW_HEIGHT))
             .items_center()
             .border_1()
             .border_color(border)
             .font_weight(FontWeight::BOLD)
             .children(
-                [
-                    "Банк",
-                    "Платёжная система",
-                    "Тип",
-                    "Сумма",
-                    "Валюта",
-                    "Дата платежа",
-                    "Льгота, дни",
-                    "Условие ставки",
-                    "Минимум трат",
-                    "Связанные накопления",
-                    "Действия",
-                ]
-                .into_iter()
-                .zip(COLUMN_WIDTHS)
-                .enumerate()
-                .map(|(index, (title, width))| cell(width, title.to_owned(), border, index > 0)),
+                HEADERS
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, title)| table_cell(index, title.to_owned(), border)),
             );
-        let mut table = div().flex().flex_col().child(header);
-        for (index, document) in entries.into_iter().enumerate() {
-            let id = document.id;
-            let values = [
-                document.bank_name.clone(),
-                document.payment_system.code().to_owned(),
-                document.card_type.title().to_owned(),
-                canonical_amount(document.amount),
-                document
-                    .currency
-                    .map_or(NO_CURRENCY_LABEL, Currency::code)
-                    .to_owned(),
-                document
-                    .due_date
-                    .map_or_else(String::new, |d| d.format(DATE_FORMAT).to_string()),
-                document
-                    .grace_period_days
-                    .map_or_else(String::new, |d| d.to_string()),
-                if document.affects_deposit_rate {
-                    "Условно повышает"
-                } else {
-                    "Нет"
-                }
+        let body = if count == 0 {
+            div()
+                .w_full()
+                .p_4()
+                .child("Платёжных карт по выбранным условиям нет.")
+                .into_any_element()
+        } else {
+            uniform_list(
+                "cards-rows",
+                count,
+                cx.processor(move |page, range: std::ops::Range<usize>, _, cx| {
+                    range
+                        .map(|index| page.render_row(index, stripe, cx))
+                        .collect::<Vec<_>>()
+                }),
+            )
+            .flex_1()
+            .w_full()
+            .into_any_element()
+        };
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .w_full()
+            .child(header)
+            .child(body)
+    }
+
+    fn render_row(
+        &mut self,
+        index: usize,
+        stripe: Hsla,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let document = self.entries[index].clone();
+        let border = cx.theme().border;
+        let id = document.id;
+        let values = [
+            document.bank_name.clone(),
+            document.payment_system.code().to_owned(),
+            document.card_type.title().to_owned(),
+            canonical_amount(document.amount),
+            document
+                .currency
+                .map_or(NO_CURRENCY_LABEL, Currency::code)
                 .to_owned(),
-                document
-                    .min_monthly_spend
-                    .map_or_else(String::new, canonical_amount),
-                document
-                    .linked_savings
-                    .iter()
-                    .map(|s| {
-                        if s.is_active {
-                            s.title.clone()
-                        } else {
-                            format!("{} (неактивно)", s.title)
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ];
-            let edit_target = document.clone();
-            let delete_target = document;
-            table = table.child(
+            document
+                .due_date
+                .map_or_else(String::new, |d| d.format(DATE_FORMAT).to_string()),
+            document
+                .grace_period_days
+                .map_or_else(String::new, |d| d.to_string()),
+            if document.affects_deposit_rate {
+                "Условно повышает"
+            } else {
+                "Нет"
+            }
+            .to_owned(),
+            document
+                .min_monthly_spend
+                .map_or_else(String::new, canonical_amount),
+            document
+                .linked_savings
+                .iter()
+                .map(|s| {
+                    if s.is_active {
+                        s.title.clone()
+                    } else {
+                        format!("{} (неактивно)", s.title)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        ];
+        let edit_target = document.clone();
+        let delete_target = document;
+        div()
+            .id(("card-row", id as usize))
+            .flex()
+            .w_full()
+            .h(px(ROW_HEIGHT))
+            .items_center()
+            .border_l_1()
+            .border_r_1()
+            .border_b_1()
+            .border_color(border)
+            .when(index % 2 == 1, |row| row.bg(stripe))
+            .children(
+                values
+                    .into_iter()
+                    .enumerate()
+                    .map(|(column, value)| table_cell(column, value, border)),
+            )
+            .child(
                 div()
-                    .id(("card-row", id as usize))
+                    .w(px(ACTIONS_COLUMN_WIDTH))
+                    .h_full()
                     .flex()
-                    .min_h(px(ROW_HEIGHT))
                     .items_center()
                     .border_l_1()
-                    .border_r_1()
-                    .border_b_1()
                     .border_color(border)
-                    .when(index % 2 == 1, |row| row.bg(stripe))
-                    .children(
-                        values
-                            .into_iter()
-                            .zip(COLUMN_WIDTHS)
-                            .enumerate()
-                            .map(|(index, (v, w))| cell(w, v, border, index > 0)),
+                    .gap_1()
+                    .justify_end()
+                    .child(
+                        Button::new(("card-edit", id as usize))
+                            .xsmall()
+                            .label("Изменить")
+                            .on_click(cx.listener(move |page, _, window, cx| {
+                                page.open_form(Some(&edit_target), window, cx)
+                            })),
                     )
                     .child(
-                        div()
-                            .w(px(COLUMN_WIDTHS[10]))
-                            .self_stretch()
-                            .flex()
-                            .items_center()
-                            .border_l_1()
-                            .border_color(border)
-                            .gap_1()
-                            .child(
-                                Button::new(("card-edit", id as usize))
-                                    .xsmall()
-                                    .label("Изменить")
-                                    .on_click(cx.listener(move |page, _, window, cx| {
-                                        page.open_form(Some(&edit_target), window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new(("card-delete", id as usize))
-                                    .danger()
-                                    .xsmall()
-                                    .label("Удалить")
-                                    .on_click(cx.listener(move |page, _, window, cx| {
-                                        page.confirm_delete(&delete_target, window, cx)
-                                    })),
-                            ),
+                        Button::new(("card-delete", id as usize))
+                            .danger()
+                            .xsmall()
+                            .label("Удалить")
+                            .on_click(cx.listener(move |page, _, window, cx| {
+                                page.confirm_delete(&delete_target, window, cx)
+                            })),
                     ),
-            );
-        }
-        let mut wrapper = div().flex().flex_col().gap_2();
-        if page_count > 1 {
-            wrapper = wrapper.child(self.render_pager(page_count, cx));
-        }
-        wrapper.child(
-            div()
-                .id("cards-table-scroll")
-                .overflow_x_scroll()
-                .child(table),
-        )
+            )
     }
 }
 
 fn cell(width: f32, text: String, border: Hsla, separator: bool) -> Div {
     div()
         .w(px(width))
-        .self_stretch()
+        .h_full()
         .flex()
         .items_center()
         .when(separator, |cell| cell.border_l_1().border_color(border))
         .px_2()
         .overflow_hidden()
+        .whitespace_nowrap()
         .child(text)
+}
+
+fn table_cell(index: usize, text: String, border: Hsla) -> Div {
+    match index {
+        0..=8 => cell(FIXED_COLUMN_WIDTHS[index], text, border, index > 0),
+        SAVINGS_COLUMN => div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .border_l_1()
+            .border_color(border)
+            .px_2()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .child(text),
+        _ => div()
+            .w(px(ACTIONS_COLUMN_WIDTH))
+            .h_full()
+            .px_2()
+            .flex()
+            .items_center()
+            .border_l_1()
+            .border_color(border)
+            .justify_end()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .child(text),
+    }
 }
 
 impl Render for PaymentDocumentsPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let danger = cx.theme().danger;
         let success = cx.theme().success;
+        let header = div()
+            .flex()
+            .w_full()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_size(px(24.0))
+                    .font_weight(FontWeight::BOLD)
+                    .child("Платёжные карты"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("new-card")
+                            .primary()
+                            .large()
+                            .label("Добавить карту")
+                            .icon(IconName::Plus)
+                            .disabled(self.form.is_some() || self.banks.is_empty())
+                            .on_click(
+                                cx.listener(|page, _, window, cx| page.open_form(None, window, cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("refresh-cards")
+                            .secondary()
+                            .large()
+                            .label("Обновить")
+                            .icon(IconName::Replace)
+                            .on_click(cx.listener(|page, _, window, cx| page.reload(window, cx))),
+                    ),
+            );
         let mut root = div()
             .id("payment-documents-page")
             .size_full()
-            .overflow_y_scroll()
             .flex()
             .flex_col()
             .gap_2()
-            .p_3();
-        root = root.child(
-            div().flex().items_center().gap_2().child(
-                Button::new("new-card")
-                    .primary()
-                    .label("Добавить карту")
-                    .icon(IconName::Plus)
-                    .disabled(self.form.is_some() || self.banks.is_empty())
-                    .on_click(cx.listener(|page, _, window, cx| page.open_form(None, window, cx))),
-            ),
-        );
+            .p_3()
+            .child(header);
         if self.banks.is_empty() {
             root = root.child(
                 "Сначала добавьте банк в разделе «Справочники», чтобы создать платёжную карту.",
@@ -1043,14 +1245,7 @@ impl Render for PaymentDocumentsPage {
                     .child(message),
             );
         }
-        if let Some(form) = self.render_form(cx) {
-            root = root.child(form);
-        }
-        if self.entries.is_empty() {
-            root.child("Платёжных карт по выбранным условиям нет.")
-        } else {
-            root.child(self.render_table(cx))
-        }
+        root.child(self.render_table(cx))
     }
 }
 

@@ -1236,9 +1236,7 @@ impl SavingsPage {
 /// Колонка «Название» занимает свободную ширину, остальные имеют фиксированную.
 fn cell(index: usize, width: f32, text: String, border: Hsla) -> Div {
     let base = if index == 1 {
-        div()
-            .flex_1()
-            .min_w(px(width))
+        div().flex_1().min_w(px(width))
     } else {
         div().w(px(width)).flex_none()
     };

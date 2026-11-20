@@ -1091,12 +1091,15 @@ impl TransactionsPage {
             );
         }
         if amount_text.contains('/') {
-            fields = fields.child(div().text_xs().text_color(muted).child(DIVISION_ROUNDING_WARNING));
+            fields = fields.child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(DIVISION_ROUNDING_WARNING),
+            );
         }
 
-        let mut panel = div().flex().flex_col().gap_3().p_4().child(
-            fields,
-        );
+        let mut panel = div().flex().flex_col().gap_3().p_4().child(fields);
         if let Some((message, true)) = &self.message {
             panel = panel.child(div().text_color(danger).child(message.clone()));
         }
