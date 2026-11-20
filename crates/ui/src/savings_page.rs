@@ -34,11 +34,13 @@ pub(super) struct SavingsPage {
     search: String,
     current_page: usize,
     form: SavingsForm,
+    form_snapshot: Option<SavingsForm>,
     show_form: bool,
+    show_discard_confirmation: bool,
     pending_delete: Option<(i64, String)>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, PartialEq)]
 struct SavingsForm {
     id: Option<i64>,
     bank_id: Option<i64>,
@@ -90,7 +92,9 @@ impl SavingsPage {
             is_active: true,
             ..SavingsForm::default()
         };
+        self.form_snapshot = Some(self.form.clone());
         self.show_form = true;
+        self.show_discard_confirmation = false;
     }
 
     pub(super) fn render(
@@ -377,11 +381,12 @@ impl SavingsPage {
         }
 
         if self.show_form {
-            if let Some(result) = self.render_form(ui, database, banks) {
+            if let Some(result) = self.render_form(context, database, banks) {
                 return Some(result);
             }
         }
 
+        self.render_discard_confirmation(context);
         self.render_delete_confirmation(context, database)
     }
 
@@ -416,7 +421,9 @@ impl SavingsPage {
             is_active: account.is_active,
             error: None,
         };
+        self.form_snapshot = Some(self.form.clone());
         self.show_form = true;
+        self.show_discard_confirmation = false;
     }
 
     fn clear_search_filter(&mut self) {
@@ -439,148 +446,214 @@ impl SavingsPage {
 
     fn render_form(
         &mut self,
-        ui: &mut egui::Ui,
+        context: &egui::Context,
         database: &Database,
         banks: &[Bank],
     ) -> Option<(String, bool)> {
-        ui.separator();
-        ui.heading(if self.form.id.is_some() {
+        let mut save_clicked = false;
+        let mut cancel_clicked = false;
+        let title = if self.form.id.is_some() {
             "Изменить накопление"
         } else {
             "Новое накопление"
-        });
+        };
+        egui::Modal::new(egui::Id::new("savings_form_modal"))
+            .frame(egui::Frame::popup(&context.style()).inner_margin(egui::Margin::same(16)))
+            .show(context, |ui| {
+                ui.set_min_width(680.0);
+                ui.set_max_width(840.0);
+                ui.spacing_mut().item_spacing = egui::vec2(16.0, 12.0);
+                ui.heading(title);
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("savings_form_fields")
+                    .max_height((context.screen_rect().height() - 240.0).max(180.0))
+                    .show(ui, |ui| self.render_form_fields(ui, banks));
 
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Название");
-            ui.add(egui::TextEdit::singleline(&mut self.form.title).desired_width(180.0));
-            ui.label("Банк");
-            let selected_bank = self
-                .form
-                .bank_id
-                .and_then(|id| banks.iter().find(|bank| bank.id == id))
-                .map_or("Выберите банк", |bank| bank.name.as_str());
-            egui::ComboBox::from_id_salt("savings_form_bank")
-                .selected_text(selected_bank)
-                .show_ui(ui, |ui| {
-                    for bank in banks {
-                        ui.selectable_value(&mut self.form.bank_id, Some(bank.id), &bank.name);
-                    }
+                if let Some(error) = &self.form.error {
+                    ui.add_space(8.0);
+                    ui.colored_label(egui::Color32::RED, error);
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                let save_fill = ui.visuals().widgets.active.bg_fill;
+                ui.horizontal(|ui| {
+                    ui.add_space((ui.available_width() - 248.0).max(0.0));
+                    save_clicked = ui
+                        .add_sized(
+                            egui::vec2(120.0, 36.0),
+                            egui::Button::new("Сохранить").fill(save_fill),
+                        )
+                        .clicked();
+                    ui.add_space(8.0);
+                    cancel_clicked = ui
+                        .add_sized(egui::vec2(120.0, 36.0), egui::Button::new("Отмена"))
+                        .clicked();
                 });
-            ui.checkbox(&mut self.form.is_active, "Активно");
-        });
-
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Сумма");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.form.amount)
-                    .desired_width(130.0)
-                    .hint_text("Например, 100000"),
-            );
-            ui.label("Базовая ставка, %");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.form.base_rate)
-                    .desired_width(90.0)
-                    .hint_text("Например, 5,5"),
-            );
-        });
-
-        ui.checkbox(
-            &mut self.form.use_threshold,
-            "Есть ставка при выполнении условий",
-        );
-        if self.form.use_threshold {
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Ставка при условии, %");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.form.rate_after_threshold)
-                        .desired_width(90.0),
-                );
-                ui.label("Пороговая сумма трат");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.form.threshold_amount)
-                        .desired_width(130.0),
-                );
             });
-        }
-
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Дата открытия (ГГГГ-ММ-ДД)");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.form.opened_date)
-                    .desired_width(130.0)
-                    .hint_text("ГГГГ-ММ-ДД"),
-            );
-            ui.label("Дата начисления процентов (ГГГГ-ММ-ДД)");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.form.interest_accrual_date)
-                    .desired_width(130.0)
-                    .hint_text("ГГГГ-ММ-ДД"),
-            );
-        });
-
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Срок");
-            egui::ComboBox::from_id_salt("savings_form_term")
-                .selected_text(
-                    self.form
-                        .term_type
-                        .map_or("Выберите срок", SavingsTerm::title),
-                )
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.form.term_type,
-                        Some(SavingsTerm::Limited),
-                        SavingsTerm::Limited.title(),
-                    );
-                    ui.selectable_value(
-                        &mut self.form.term_type,
-                        Some(SavingsTerm::Unlimited),
-                        SavingsTerm::Unlimited.title(),
-                    );
-                });
-            if self.form.term_type == Some(SavingsTerm::Limited) {
-                ui.label("Дата окончания (ГГГГ-ММ-ДД)");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.form.term_end_date).desired_width(130.0),
-                );
-            }
-
-            ui.label("Проценты");
-            egui::ComboBox::from_id_salt("savings_interest_destination")
-                .selected_text(
-                    self.form
-                        .interest_destination
-                        .map_or("Выберите назначение", InterestDestination::title),
-                )
-                .show_ui(ui, |ui| {
-                    for destination in InterestDestination::ALL {
-                        ui.selectable_value(
-                            &mut self.form.interest_destination,
-                            Some(destination),
-                            destination.title(),
-                        );
-                    }
-                });
-        });
-
-        if let Some(error) = &self.form.error {
-            ui.colored_label(egui::Color32::RED, error);
-        }
-
-        let mut save_clicked = false;
-        let mut cancel_clicked = false;
-        ui.horizontal(|ui| {
-            save_clicked = ui.button("Сохранить накопление").clicked();
-            cancel_clicked = ui.button("Отмена").clicked();
-        });
         if cancel_clicked {
-            self.show_form = false;
+            self.request_form_cancel();
             return None;
         }
         if !save_clicked {
             return None;
         }
 
+        self.save_form(database)
+    }
+
+    fn render_form_fields(&mut self, ui: &mut egui::Ui, banks: &[Bank]) {
+        ui.label(egui::RichText::new("Основное").strong());
+        ui.horizontal_wrapped(|ui| {
+            render_savings_text_field(ui, "Название", &mut self.form.title, 280.0, None);
+            ui.vertical(|ui| {
+                ui.set_min_width(280.0);
+                ui.set_max_width(280.0);
+                ui.label("Банк");
+                ui.add_space(4.0);
+                let selected_bank = self
+                    .form
+                    .bank_id
+                    .and_then(|id| banks.iter().find(|bank| bank.id == id))
+                    .map_or("Выберите банк", |bank| bank.name.as_str());
+                egui::ComboBox::from_id_salt("savings_form_bank")
+                    .width(280.0)
+                    .selected_text(selected_bank)
+                    .show_ui(ui, |ui| {
+                        for bank in banks {
+                            ui.selectable_value(&mut self.form.bank_id, Some(bank.id), &bank.name);
+                        }
+                    });
+            });
+        });
+        ui.checkbox(&mut self.form.is_active, "Активно");
+
+        ui.add_space(20.0);
+        ui.label(egui::RichText::new("Сумма и ставки").strong());
+        ui.horizontal_wrapped(|ui| {
+            render_savings_text_field(
+                ui,
+                "Сумма",
+                &mut self.form.amount,
+                240.0,
+                Some("Например, 100000"),
+            );
+            render_savings_text_field(
+                ui,
+                "Базовая ставка, %",
+                &mut self.form.base_rate,
+                240.0,
+                Some("Например, 5,5"),
+            );
+        });
+        ui.checkbox(
+            &mut self.form.use_threshold,
+            "Есть ставка при выполнении условий",
+        );
+        if self.form.use_threshold {
+            ui.horizontal_wrapped(|ui| {
+                render_savings_text_field(
+                    ui,
+                    "Ставка при условии, %",
+                    &mut self.form.rate_after_threshold,
+                    240.0,
+                    None,
+                );
+                render_savings_text_field(
+                    ui,
+                    "Пороговая сумма трат",
+                    &mut self.form.threshold_amount,
+                    240.0,
+                    None,
+                );
+            });
+        }
+
+        ui.add_space(20.0);
+        ui.label(egui::RichText::new("Даты").strong());
+        ui.horizontal_wrapped(|ui| {
+            render_savings_text_field(
+                ui,
+                "Дата открытия (ГГГГ-ММ-ДД)",
+                &mut self.form.opened_date,
+                280.0,
+                Some("ГГГГ-ММ-ДД"),
+            );
+            render_savings_text_field(
+                ui,
+                "Дата начисления процентов (ГГГГ-ММ-ДД)",
+                &mut self.form.interest_accrual_date,
+                280.0,
+                Some("ГГГГ-ММ-ДД"),
+            );
+        });
+
+        ui.add_space(20.0);
+        ui.label(egui::RichText::new("Условия").strong());
+        ui.horizontal_wrapped(|ui| {
+            ui.vertical(|ui| {
+                ui.set_min_width(240.0);
+                ui.set_max_width(240.0);
+                ui.label("Срок");
+                ui.add_space(4.0);
+                egui::ComboBox::from_id_salt("savings_form_term")
+                    .width(240.0)
+                    .selected_text(
+                        self.form
+                            .term_type
+                            .map_or("Выберите срок", SavingsTerm::title),
+                    )
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.form.term_type,
+                            Some(SavingsTerm::Limited),
+                            SavingsTerm::Limited.title(),
+                        );
+                        ui.selectable_value(
+                            &mut self.form.term_type,
+                            Some(SavingsTerm::Unlimited),
+                            SavingsTerm::Unlimited.title(),
+                        );
+                    });
+            });
+            if self.form.term_type == Some(SavingsTerm::Limited) {
+                render_savings_text_field(
+                    ui,
+                    "Дата окончания (ГГГГ-ММ-ДД)",
+                    &mut self.form.term_end_date,
+                    240.0,
+                    Some("ГГГГ-ММ-ДД"),
+                );
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.vertical(|ui| {
+                ui.set_min_width(280.0);
+                ui.set_max_width(280.0);
+                ui.label("Назначение процентов");
+                ui.add_space(4.0);
+                egui::ComboBox::from_id_salt("savings_interest_destination")
+                    .width(280.0)
+                    .selected_text(
+                        self.form
+                            .interest_destination
+                            .map_or("Выберите назначение", InterestDestination::title),
+                    )
+                    .show_ui(ui, |ui| {
+                        for destination in InterestDestination::ALL {
+                            ui.selectable_value(
+                                &mut self.form.interest_destination,
+                                Some(destination),
+                                destination.title(),
+                            );
+                        }
+                    });
+            });
+        });
+    }
+
+    fn save_form(&mut self, database: &Database) -> Option<(String, bool)> {
         let details = match self.form.details() {
             Ok(details) => details,
             Err(error) => {
@@ -591,6 +664,8 @@ impl SavingsPage {
         match finance_db::save_savings(database, self.form.id, &details) {
             Ok(_) => {
                 self.show_form = false;
+                self.form_snapshot = None;
+                self.show_discard_confirmation = false;
                 match self.refresh(database) {
                     Ok(()) => Some(("Накопление сохранено".to_owned(), false)),
                     Err(error) => Some((error.to_string(), true)),
@@ -600,6 +675,73 @@ impl SavingsPage {
                 self.form.error = Some(error.to_string());
                 None
             }
+        }
+    }
+
+    fn request_form_cancel(&mut self) {
+        if self.form_has_unsaved_changes() {
+            self.show_discard_confirmation = true;
+        } else {
+            self.close_form_without_saving();
+        }
+    }
+
+    fn form_has_unsaved_changes(&self) -> bool {
+        let Some(snapshot) = &self.form_snapshot else {
+            return false;
+        };
+        let mut current = self.form.clone();
+        let mut initial = snapshot.clone();
+        current.error = None;
+        initial.error = None;
+        current != initial
+    }
+
+    fn close_form_without_saving(&mut self) {
+        self.show_form = false;
+        self.show_discard_confirmation = false;
+        self.form_snapshot = None;
+    }
+
+    fn render_discard_confirmation(&mut self, context: &egui::Context) {
+        if !self.show_discard_confirmation {
+            return;
+        }
+        let mut keep_editing = false;
+        let mut discard = false;
+        egui::Modal::new(egui::Id::new("savings_discard_confirmation")).show(context, |ui| {
+            ui.set_max_width(420.0);
+            ui.heading("Несохранённые изменения");
+            ui.label("Отменить изменения и закрыть форму?");
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                ui.add_space((ui.available_width() - 358.0).max(0.0));
+                keep_editing = ui
+                    .add_sized(
+                        egui::vec2(190.0, 36.0),
+                        egui::Button::new("Продолжить редактирование"),
+                    )
+                    .clicked();
+                ui.add_space(8.0);
+                discard = ui
+                    .add_sized(
+                        egui::vec2(160.0, 36.0),
+                        egui::Button::new("Отменить изменения"),
+                    )
+                    .clicked();
+            });
+        });
+        if keep_editing {
+            self.resolve_form_cancel(false);
+        } else if discard {
+            self.resolve_form_cancel(true);
+        }
+    }
+
+    fn resolve_form_cancel(&mut self, discard: bool) {
+        self.show_discard_confirmation = false;
+        if discard {
+            self.close_form_without_saving();
         }
     }
 
@@ -637,6 +779,26 @@ impl SavingsPage {
         }
         None
     }
+}
+
+fn render_savings_text_field(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut String,
+    width: f32,
+    hint: Option<&str>,
+) {
+    ui.vertical(|ui| {
+        ui.set_min_width(width);
+        ui.set_max_width(width);
+        ui.label(label);
+        ui.add_space(4.0);
+        let mut field = egui::TextEdit::singleline(value).desired_width(width);
+        if let Some(hint) = hint {
+            field = field.hint_text(hint);
+        }
+        ui.add(field);
+    });
 }
 
 impl SavingsForm {
@@ -709,7 +871,7 @@ fn parse_optional_savings_date(value: &str, field_name: &str) -> Result<Option<N
 mod tests {
     use chrono::NaiveDate;
     use eframe::egui;
-    use finance_core::{InterestDestination, SavingsTerm};
+    use finance_core::{Bank, InterestDestination, SavingsTerm};
 
     use super::{savings_column_widths, SavingsForm, SavingsPage, SAVINGS_COLUMN_MIN_WIDTHS};
 
@@ -817,6 +979,171 @@ mod tests {
             .details()
             .unwrap_err()
             .contains("дату начисления процентов"));
+    }
+
+    #[test]
+    fn editing_existing_savings_populates_all_saved_values() {
+        let (_database, mut page) = filtered_savings_page();
+
+        page.begin_edit(1);
+
+        assert!(page.show_form);
+        assert_eq!(page.form.id, Some(1));
+        assert_eq!(page.form.bank_id, Some(1));
+        assert_eq!(page.form.title, "Alpha");
+        assert_eq!(page.form.amount, "100");
+        assert_eq!(page.form.base_rate, "1");
+        assert_eq!(page.form.opened_date, "2026-03-01");
+        assert_eq!(page.form.interest_accrual_date, "2026-03-31");
+        assert_eq!(page.form.term_type, Some(SavingsTerm::Unlimited));
+        assert_eq!(
+            page.form.interest_destination,
+            Some(InterestDestination::Reinvest)
+        );
+        assert!(page.form.is_active);
+    }
+
+    #[test]
+    fn editing_form_saves_changes_to_the_existing_savings_record() {
+        let (database, mut page) = filtered_savings_page();
+        page.begin_edit(1);
+        page.form.title = "Изменённый вклад".to_owned();
+        page.form.amount = "1250.50".to_owned();
+
+        let result = page.save_form(&database);
+
+        assert_eq!(result, Some(("Накопление сохранено".to_owned(), false)));
+        assert!(!page.show_form);
+        let entries = finance_db::list_savings(&database, None, None, "")
+            .expect("saved savings should be readable without the previous filter");
+        assert_eq!(entries.len(), 5);
+        let updated = entries
+            .iter()
+            .find(|entry| entry.id == 1)
+            .expect("edit should preserve the existing record id");
+        assert_eq!(updated.title, "Изменённый вклад");
+        assert_eq!(updated.amount.to_string(), "1250.5");
+    }
+
+    #[test]
+    fn saving_validation_error_keeps_form_open_and_preserves_input() {
+        let (database, mut page) = filtered_savings_page();
+        page.begin_edit(1);
+        page.form.amount = "не число".to_owned();
+
+        let result = page.save_form(&database);
+
+        assert_eq!(result, None);
+        assert!(page.show_form);
+        assert_eq!(page.form.amount, "не число");
+        assert!(page.form.error.is_some());
+    }
+
+    #[test]
+    fn saving_database_error_keeps_form_open_and_preserves_input() {
+        let (database, mut page) = filtered_savings_page();
+        page.begin_edit(1);
+        page.form.bank_id = Some(999);
+        page.form.title = "Несохранённое название".to_owned();
+
+        let result = page.save_form(&database);
+
+        assert_eq!(result, None);
+        assert!(page.show_form);
+        assert_eq!(page.form.bank_id, Some(999));
+        assert_eq!(page.form.title, "Несохранённое название");
+        assert!(page.form.error.is_some());
+        assert_eq!(page.entries[0].title, "Alpha");
+    }
+
+    #[test]
+    fn cancelling_edited_form_requires_confirmation_before_discarding() {
+        let (_database, mut page) = filtered_savings_page();
+        page.begin_edit(1);
+        page.request_form_cancel();
+        assert!(!page.show_form);
+
+        page.begin_edit(1);
+        page.form.title = "Черновик".to_owned();
+        page.request_form_cancel();
+
+        assert!(page.show_form);
+        assert!(page.show_discard_confirmation);
+        page.resolve_form_cancel(false);
+        assert!(page.show_form);
+        assert!(!page.show_discard_confirmation);
+
+        page.request_form_cancel();
+        page.resolve_form_cancel(true);
+        assert!(!page.show_form);
+        assert!(!page.show_discard_confirmation);
+        assert!(page.form_snapshot.is_none());
+    }
+
+    #[test]
+    fn savings_edit_form_renders_with_available_actions_at_minimum_window_size() {
+        let (database, mut page) = filtered_savings_page();
+        page.begin_edit(1);
+        let banks = [Bank {
+            id: 1,
+            name: "Банк Альфа".to_owned(),
+            comment: String::new(),
+        }];
+        let context = egui::Context::default();
+        let mut output = None;
+        for _ in 0..2 {
+            output = Some(context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_280.0, 720.0),
+                    )),
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default().show(context, |ui| {
+                        page.render(context, ui, &database, &banks);
+                    });
+                },
+            ));
+        }
+        assert!(page.show_form);
+        let output = output.expect("edit form should render twice");
+        let text_shapes = output
+            .shapes
+            .iter()
+            .filter_map(|clipped_shape| match &clipped_shape.shape {
+                egui::epaint::Shape::Text(text_shape) => {
+                    Some((text_shape.galley.job.text.as_str(), text_shape.pos))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let save = text_shapes
+            .iter()
+            .find_map(|(text, position)| (*text == "Сохранить").then_some(*position))
+            .unwrap_or_else(|| {
+                panic!(
+                    "save action should be visible, rendered text: {:?}",
+                    text_shapes.iter().map(|(text, _)| text).collect::<Vec<_>>()
+                )
+            });
+        let cancel = text_shapes
+            .iter()
+            .find_map(|(text, position)| (*text == "Отмена").then_some(*position))
+            .expect("cancel action should be visible");
+
+        assert!(text_shapes
+            .iter()
+            .any(|(text, _)| *text == "Изменить накопление"));
+        assert!(text_shapes.iter().any(|(text, _)| *text == "Название"));
+        assert!(text_shapes
+            .iter()
+            .any(|(text, _)| *text == "Назначение процентов"));
+        assert!(save.x < cancel.x);
+        assert!((save.y - cancel.y).abs() < 1.0);
+        assert!(save.x >= 0.0 && cancel.x < 1_280.0);
+        assert!(save.y >= 0.0 && cancel.y < 720.0);
     }
 
     fn valid_savings_form() -> SavingsForm {
