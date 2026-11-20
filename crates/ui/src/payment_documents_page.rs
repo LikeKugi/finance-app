@@ -1,3 +1,4 @@
+use crate::TABLE_ROW_HEIGHT;
 use chrono::NaiveDate;
 use eframe::egui;
 use finance_core::{
@@ -218,9 +219,9 @@ impl PaymentDocumentsPage {
                 egui::Grid::new("payment_documents_table")
                     .striped(true)
                     .min_col_width(95.0)
+                    .min_row_height(TABLE_ROW_HEIGHT)
                     .show(ui, |ui| {
                         for title in [
-                            "Действия",
                             "Банк",
                             "Платёжная система",
                             "Тип",
@@ -231,20 +232,13 @@ impl PaymentDocumentsPage {
                             "Условие ставки",
                             "Минимум трат",
                             "Связанные накопления",
+                            "Действия",
                         ] {
                             ui.strong(title);
                         }
                         ui.end_row();
 
                         for document in &entries {
-                            let (edit_clicked, delete_clicked) = ui
-                                .horizontal(|ui| {
-                                    (
-                                        ui.small_button("Изменить").clicked(),
-                                        ui.small_button("Удалить").clicked(),
-                                    )
-                                })
-                                .inner;
                             ui.label(&document.bank_name);
                             ui.label(document.payment_system.code());
                             ui.label(document.card_type.title());
@@ -293,6 +287,14 @@ impl PaymentDocumentsPage {
                                     .collect::<Vec<_>>()
                                     .join(", "),
                             );
+                            let (edit_clicked, delete_clicked) = ui
+                                .horizontal(|ui| {
+                                    (
+                                        ui.small_button("Изменить").clicked(),
+                                        ui.small_button("Удалить").clicked(),
+                                    )
+                                })
+                                .inner;
                             ui.end_row();
 
                             if edit_clicked {
@@ -664,6 +666,19 @@ mod tests {
 
     use super::PaymentDocumentsPage;
 
+    fn text_positions(output: &egui::FullOutput, text: &str) -> Vec<egui::Pos2> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped_shape| match &clipped_shape.shape {
+                egui::epaint::Shape::Text(text_shape) if text_shape.galley.job.text == text => {
+                    Some(text_shape.pos)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     fn database_with_bank() -> finance_db::Database {
         let database = finance_db::Database::open_in_memory().unwrap();
         database
@@ -752,6 +767,22 @@ mod tests {
         assert!(rendered_text.contains(&"USD"));
         assert!(rendered_text.contains(&"Платёжная система"));
         assert!(rendered_text.contains(&"Удалить"));
+
+        let actions_header_x = text_positions(&output, "Действия")[0].x;
+        let savings_header_x = text_positions(&output, "Связанные накопления")[0].x;
+        assert!(
+            actions_header_x > savings_header_x,
+            "actions should be the last table column"
+        );
+
+        let mut bank_row_positions = text_positions(&output, "Банк Альфа");
+        bank_row_positions.sort_by(|left, right| left.y.total_cmp(&right.y));
+        assert_eq!(bank_row_positions.len(), 2);
+        assert!(
+            bank_row_positions[1].y - bank_row_positions[0].y >= crate::TABLE_ROW_HEIGHT,
+            "payment document rows should be at least {} points tall",
+            crate::TABLE_ROW_HEIGHT
+        );
     }
 
     #[test]
