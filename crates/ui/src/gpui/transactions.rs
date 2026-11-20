@@ -1267,7 +1267,16 @@ impl Render for TransactionsPage {
                         .font_weight(FontWeight::BOLD)
                         .child("Доходы"),
                 )
-                .child(add_button),
+                .child(
+                    div().flex().items_center().gap_2().child(add_button).child(
+                        Button::new("refresh-income")
+                            .secondary()
+                            .large()
+                            .label("Обновить")
+                            .icon(IconName::Replace)
+                            .on_click(cx.listener(|page, _, _, cx| page.refresh(cx))),
+                    ),
+                ),
             TransactionKind::Expense => div().flex().items_center().gap_2().child(add_button),
         };
         root = root.child(header);

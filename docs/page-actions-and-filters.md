@@ -6,7 +6,7 @@ This document records the action-button and filter patterns on the existing Inco
 
 All page-level add buttons use a Plus icon instead of a textual plus and retain the icon's normal button foreground color. Add opens a form for a new record; fields may be prefilled with page defaults.
 
-On Income, the page title is on the left side of the header row and `Добавить доход` with the Plus icon is aligned to the right. This header action uses the Large button size and has no refresh action.
+On Income, the page title is on the left side of the header row and `Добавить доход` with the Plus icon is aligned to the right, followed by `Обновить` with the Replace icon. Both actions use the Large button size; Add uses the Primary variant and refresh uses Secondary. Refresh reloads the transaction list with the current filter values and does not reset them.
 
 On Directories, the add buttons for categories, banks, and currencies use the default Medium button size and the Plus icon.
 
