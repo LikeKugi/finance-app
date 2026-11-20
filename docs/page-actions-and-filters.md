@@ -1,6 +1,6 @@
 # Page Actions and Filters
 
-This document records the action-button and filter patterns on the existing Income, Expenses, Savings, and Analysis pages. It also recommends a consistent pattern for future pages. The recommendations below do not describe behavior already implemented everywhere.
+This document records the action-button and filter patterns on the existing Income, Expenses, Savings, Payment Cards, and Analysis pages. It also recommends a consistent pattern for future pages. The recommendations below do not describe behavior already implemented everywhere.
 
 ## Header Actions
 
@@ -47,13 +47,20 @@ On Savings, refresh also reloads the bank list and returns the results table to 
 
 ### Savings
 
-- Search, bank, and status filters appear in a horizontally scrollable row above the table.
-- Editing search, bank, or status does not reload the results until `Применить` is clicked.
+- Search, bank, currency, and status filters appear in a horizontally scrollable row above the table.
+- Editing search, bank, currency, or status does not reload the results until `Применить` is clicked.
+- Currency options are `Все`, `RUB`, and `USD`. A currency selection matches only accounts explicitly set to that currency; `Все` includes accounts with an unknown currency.
 - Each active filter has an `×` control. Clearing one immediately reloads the results using the other values currently in the controls.
 - `Сбросить фильтры` clears all filters and reloads the list. It is disabled when no filters are active.
 - The `↻ Обновить` header action reloads the banks and results with the current filter values, then returns the table to its first page.
 - If no records match, the page shows an empty-state message.
 - Opening date and interest-accrual date are optional `YYYY-MM-DD` values in the add/edit form; clearing either field stores it as unknown, shown as `—` in the table. These are manually maintained reference dates and do not trigger interest calculations or assert that an accrual was verified by the bank.
+
+### Payment Cards
+
+- Bank, payment system, card type, and currency filters appear in a horizontally scrollable row above the table.
+- Currency options are `Все`, `RUB`, and `USD`; selecting a currency and clicking `Применить` filters the full combination of selected conditions. A currency-specific selection excludes cards with unknown currency.
+- The `×` control clears the currency filter and immediately reloads using the other conditions. `Сбросить фильтры` clears all four filters and reloads the full list.
 
 ## Recommended Pattern for Future Pages
 

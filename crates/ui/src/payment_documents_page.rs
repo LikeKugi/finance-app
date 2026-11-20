@@ -13,6 +13,7 @@ const PAGE_SIZE: usize = 100;
 pub(super) struct PaymentDocumentsPage {
     entries: Vec<PaymentDocument>,
     bank_filter: Option<i64>,
+    currency_filter: Option<Currency>,
     card_type_filter: Option<PaymentCardType>,
     payment_system_filter: Option<PaymentSystem>,
     current_page: usize,
@@ -40,14 +41,26 @@ struct PaymentDocumentForm {
 
 impl PaymentDocumentsPage {
     pub(super) fn refresh(&mut self, database: &Database) -> Result<(), finance_db::DbError> {
-        self.entries = finance_db::list_payment_documents(
+        self.entries = finance_db::list_payment_documents_filtered(
             database,
             self.bank_filter,
             self.card_type_filter,
             self.payment_system_filter,
+            self.currency_filter,
         )?;
         self.current_page = 0;
         Ok(())
+    }
+
+    fn clear_currency_filter(&mut self) {
+        self.currency_filter = None;
+    }
+
+    fn reset_filters(&mut self) {
+        self.bank_filter = None;
+        self.currency_filter = None;
+        self.card_type_filter = None;
+        self.payment_system_filter = None;
     }
 
     pub(super) fn begin_new(
@@ -141,21 +154,43 @@ impl PaymentDocumentsPage {
                             }
                         });
 
+                    ui.label("Валюта");
+                    egui::ComboBox::from_id_salt("payment_documents_currency_filter")
+                        .width(80.0)
+                        .selected_text(self.currency_filter.map_or("Все", Currency::code))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.currency_filter, None, "Все");
+                            for currency in Currency::ALL {
+                                ui.selectable_value(
+                                    &mut self.currency_filter,
+                                    Some(currency),
+                                    currency.code(),
+                                );
+                            }
+                        });
+                    if ui
+                        .add_enabled(self.currency_filter.is_some(), egui::Button::new("×"))
+                        .on_hover_text("Очистить валюту")
+                        .clicked()
+                    {
+                        self.clear_currency_filter();
+                        should_refresh = true;
+                    }
+
                     if ui.button("Применить").clicked() {
                         should_refresh = true;
                     }
                     if ui
                         .add_enabled(
                             self.bank_filter.is_some()
+                                || self.currency_filter.is_some()
                                 || self.card_type_filter.is_some()
                                 || self.payment_system_filter.is_some(),
                             egui::Button::new("Сбросить фильтры"),
                         )
                         .clicked()
                     {
-                        self.bank_filter = None;
-                        self.card_type_filter = None;
-                        self.payment_system_filter = None;
+                        self.reset_filters();
                         should_refresh = true;
                     }
                 });
@@ -726,6 +761,12 @@ mod tests {
             .execute_batch(include_str!("../../db/migrations/V7__expense_cards.sql"))
             .unwrap();
         database
+            .execute_batch(include_str!("../../db/migrations/V8__currencies.sql"))
+            .unwrap();
+        database
+            .execute_batch(include_str!("../../db/migrations/V9__savings_currency.sql"))
+            .unwrap();
+        database
             .execute_batch("INSERT INTO banks (id, name) VALUES (1, 'Банк Альфа');")
             .unwrap();
         database
@@ -785,6 +826,7 @@ mod tests {
         assert!(!rendered_text.contains(&"Кредитный лимит"));
         assert!(rendered_text.contains(&"валюта не указана"));
         assert!(rendered_text.contains(&"USD"));
+        assert!(rendered_text.contains(&"Валюта"));
         assert!(rendered_text.contains(&"Платёжная система"));
         assert!(rendered_text.contains(&"Удалить"));
 
@@ -803,6 +845,38 @@ mod tests {
             "payment document rows should be at least {} points tall",
             crate::common::TABLE_ROW_HEIGHT
         );
+    }
+
+    #[test]
+    fn payment_document_currency_filter_excludes_unknown_currency_and_reset_restores_all() {
+        let database = database_with_bank();
+        database
+            .execute_batch(
+                "INSERT INTO payment_documents (
+                     id, bank_id, payment_system, card_type, amount, currency
+                 ) VALUES
+                     (1, 1, 'VISA', 'debit', '10', 'RUB'),
+                     (2, 1, 'MIR', 'debit', '20', 'USD'),
+                     (3, 1, 'MasterCard', 'debit', '30', NULL);",
+            )
+            .unwrap();
+        let mut page = PaymentDocumentsPage {
+            currency_filter: Some(Currency::Usd),
+            ..PaymentDocumentsPage::default()
+        };
+        page.refresh(&database).unwrap();
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            [2]
+        );
+
+        page.reset_filters();
+        page.refresh(&database).unwrap();
+        assert_eq!(page.entries.len(), 3);
+        assert!(page.entries.iter().any(|entry| entry.currency.is_none()));
     }
 
     #[test]

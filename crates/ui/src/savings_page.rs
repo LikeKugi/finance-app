@@ -1,8 +1,8 @@
 use chrono::NaiveDate;
 use eframe::egui;
 use finance_core::{
-    canonical_amount, parse_amount, parse_non_negative_decimal, Bank, InterestDestination,
-    SavingsAccount, SavingsDetails, SavingsTerm,
+    canonical_amount, parse_amount, parse_non_negative_decimal, Bank, Currency,
+    InterestDestination, SavingsAccount, SavingsDetails, SavingsTerm,
 };
 use finance_db::{self, Database};
 
@@ -10,13 +10,14 @@ use super::common::TABLE_ROW_HEIGHT;
 use super::date_input::{date_input, DateInputState};
 
 const SAVINGS_PAGE_SIZE: usize = 100;
-const SAVINGS_COLUMN_MIN_WIDTHS: [f32; 12] = [
-    80.0, 100.0, 75.0, 95.0, 105.0, 75.0, 80.0, 90.0, 105.0, 120.0, 75.0, 145.0,
+const SAVINGS_COLUMN_MIN_WIDTHS: [f32; 13] = [
+    80.0, 100.0, 75.0, 75.0, 95.0, 105.0, 75.0, 80.0, 90.0, 105.0, 120.0, 75.0, 145.0,
 ];
-const SAVINGS_COLUMN_GROWTH_WEIGHTS: [f32; 12] =
-    [0.8, 1.1, 0.9, 1.0, 1.2, 0.9, 0.9, 0.9, 1.0, 1.1, 0.8, 1.0];
+const SAVINGS_COLUMN_GROWTH_WEIGHTS: [f32; 13] = [
+    0.8, 1.1, 0.9, 0.8, 1.0, 1.2, 0.9, 0.9, 0.9, 1.0, 1.1, 0.8, 1.0,
+];
 
-fn savings_column_widths(available_width: f32) -> [f32; 12] {
+fn savings_column_widths(available_width: f32) -> [f32; 13] {
     let minimum_width: f32 = SAVINGS_COLUMN_MIN_WIDTHS.iter().sum();
     let extra_width = (available_width - minimum_width).max(0.0);
     let total_growth_weight: f32 = SAVINGS_COLUMN_GROWTH_WEIGHTS.iter().sum();
@@ -31,6 +32,7 @@ fn savings_column_widths(available_width: f32) -> [f32; 12] {
 pub(super) struct SavingsPage {
     entries: Vec<SavingsAccount>,
     bank_filter: Option<i64>,
+    currency_filter: Option<Currency>,
     active_filter: Option<bool>,
     search: String,
     current_page: usize,
@@ -48,6 +50,7 @@ pub(super) struct SavingsPage {
 struct SavingsForm {
     id: Option<i64>,
     bank_id: Option<i64>,
+    currency: Option<Currency>,
     title: String,
     amount: String,
     base_rate: String,
@@ -70,8 +73,13 @@ enum TableAction {
 
 impl SavingsPage {
     pub(super) fn refresh(&mut self, database: &Database) -> Result<(), finance_db::DbError> {
-        self.entries =
-            finance_db::list_savings(database, self.bank_filter, self.active_filter, &self.search)?;
+        self.entries = finance_db::list_savings_filtered(
+            database,
+            self.bank_filter,
+            self.active_filter,
+            self.currency_filter,
+            &self.search,
+        )?;
         self.current_page = 0;
         Ok(())
     }
@@ -82,7 +90,7 @@ impl SavingsPage {
         );
         ui.colored_label(
             egui::Color32::from_rgb(160, 105, 0),
-            "Суммы и ставки сохраняются как введены; валюта и фактические начисления для накоплений пока не определены.",
+            "Валюта накопления указывается отдельно; фактические начисления процентов здесь не рассчитываются.",
         );
     }
 
@@ -162,6 +170,30 @@ impl SavingsPage {
                     }
                     ui.add_space(8.0);
 
+                    ui.label("Валюта");
+                    egui::ComboBox::from_id_salt("savings_currency_filter")
+                        .width(80.0)
+                        .selected_text(self.currency_filter.map_or("Все", Currency::code))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.currency_filter, None, "Все");
+                            for currency in Currency::ALL {
+                                ui.selectable_value(
+                                    &mut self.currency_filter,
+                                    Some(currency),
+                                    currency.code(),
+                                );
+                            }
+                        });
+                    if ui
+                        .add_enabled(self.currency_filter.is_some(), egui::Button::new("×"))
+                        .on_hover_text("Очистить валюту")
+                        .clicked()
+                    {
+                        self.clear_currency_filter();
+                        should_refresh = true;
+                    }
+                    ui.add_space(8.0);
+
                     ui.label("Статус");
                     egui::ComboBox::from_id_salt("savings_active_filter")
                         .selected_text(match self.active_filter {
@@ -189,6 +221,7 @@ impl SavingsPage {
                     }
                     let has_active_filters = !self.search.is_empty()
                         || self.bank_filter.is_some()
+                        || self.currency_filter.is_some()
                         || self.active_filter.is_some();
                     if ui
                         .add_enabled(has_active_filters, egui::Button::new("Сбросить фильтры"))
@@ -258,6 +291,7 @@ impl SavingsPage {
                                 "Банк",
                                 "Название",
                                 "Сумма",
+                                "Валюта",
                                 "Базовая ставка",
                                 "Ставка при условии",
                                 "Порог",
@@ -291,6 +325,7 @@ impl SavingsPage {
                         .enumerate()
                     {
                         let amount = account.amount.to_string();
+                        let currency = account.currency.map_or("—", Currency::code);
                         let base_rate = format!("{}%", account.base_rate);
                         let rate_after_threshold = account
                             .rate_after_threshold
@@ -334,6 +369,7 @@ impl SavingsPage {
                                     account.bank_name.as_str(),
                                     account.title.as_str(),
                                     amount.as_str(),
+                                    currency,
                                     base_rate.as_str(),
                                     rate_after_threshold.as_str(),
                                     threshold_amount.as_str(),
@@ -356,10 +392,10 @@ impl SavingsPage {
                                     );
                                 }
                                 ui.allocate_ui_with_layout(
-                                    egui::vec2(column_widths[11], row_height),
+                                    egui::vec2(column_widths[12], row_height),
                                     egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| {
-                                        ui.set_min_width(column_widths[11]);
+                                        ui.set_min_width(column_widths[12]);
                                         if ui.small_button("Изменить").clicked() {
                                             action = Some(TableAction::Edit(account.id));
                                         }
@@ -403,6 +439,7 @@ impl SavingsPage {
         self.form = SavingsForm {
             id: Some(account.id),
             bank_id: Some(account.bank_id),
+            currency: account.currency,
             title: account.title.clone(),
             amount: canonical_amount(account.amount),
             base_rate: canonical_amount(account.base_rate),
@@ -446,6 +483,10 @@ impl SavingsPage {
         self.bank_filter = None;
     }
 
+    fn clear_currency_filter(&mut self) {
+        self.currency_filter = None;
+    }
+
     fn clear_active_filter(&mut self) {
         self.active_filter = None;
     }
@@ -453,6 +494,7 @@ impl SavingsPage {
     fn reset_filters(&mut self) {
         self.clear_search_filter();
         self.clear_bank_filter();
+        self.clear_currency_filter();
         self.clear_active_filter();
     }
 
@@ -518,7 +560,7 @@ impl SavingsPage {
 
     fn render_form_fields(&mut self, ui: &mut egui::Ui, banks: &[Bank]) {
         ui.label(egui::RichText::new("Основное").strong());
-        ui.columns(3, |columns| {
+        ui.columns(4, |columns| {
             let title_width = columns[0].available_width();
             render_savings_text_field(
                 &mut columns[0],
@@ -549,7 +591,28 @@ impl SavingsPage {
                     });
             });
 
-            render_savings_checkbox_field(&mut columns[2], &mut self.form.is_active, "Активно");
+            let currency_width = columns[2].available_width();
+            columns[2].vertical(|ui| {
+                ui.set_min_width(currency_width);
+                ui.set_max_width(currency_width);
+                ui.label("Валюта");
+                ui.add_space(4.0);
+                egui::ComboBox::from_id_salt("savings_form_currency")
+                    .width(currency_width)
+                    .selected_text(self.form.currency.map_or("Не указана", Currency::code))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.form.currency, None, "Не указана");
+                        for currency in Currency::ALL {
+                            ui.selectable_value(
+                                &mut self.form.currency,
+                                Some(currency),
+                                currency.code(),
+                            );
+                        }
+                    });
+            });
+
+            render_savings_checkbox_field(&mut columns[3], &mut self.form.is_active, "Активно");
         });
 
         ui.add_space(20.0);
@@ -900,6 +963,7 @@ impl SavingsForm {
             bank_id,
             title: self.title.clone(),
             amount,
+            currency: self.currency,
             base_rate,
             rate_after_threshold,
             threshold_amount,
@@ -928,7 +992,7 @@ fn parse_optional_savings_date(value: &str, field_name: &str) -> Result<Option<N
 mod tests {
     use chrono::NaiveDate;
     use eframe::egui;
-    use finance_core::{Bank, InterestDestination, SavingsTerm};
+    use finance_core::{Bank, Currency, InterestDestination, SavingsTerm};
 
     use super::{savings_column_widths, SavingsForm, SavingsPage, SAVINGS_COLUMN_MIN_WIDTHS};
 
@@ -993,6 +1057,8 @@ mod tests {
         assert!(rendered_text.contains(&"Ставка при условии"));
         assert!(rendered_text.contains(&"Дата открытия"));
         assert!(rendered_text.contains(&"Дата начисления процентов"));
+        assert!(rendered_text.contains(&"Валюта"));
+        assert!(rendered_text.contains(&"USD"));
         assert!(rendered_text.contains(&"Действия"));
         assert!(rendered_text.contains(&"Alpha"));
         assert!(rendered_text.contains(&"01.03.2026"));
@@ -1049,6 +1115,7 @@ mod tests {
         assert_eq!(page.form.bank_id, Some(1));
         assert_eq!(page.form.title, "Alpha");
         assert_eq!(page.form.amount, "100");
+        assert_eq!(page.form.currency, Some(Currency::Usd));
         assert_eq!(page.form.base_rate, "1");
         assert_eq!(page.form.opened_date, "2026-03-01");
         assert_eq!(page.form.interest_accrual_date, "2026-03-31");
@@ -1066,6 +1133,7 @@ mod tests {
         page.begin_edit(1);
         page.form.title = "Изменённый вклад".to_owned();
         page.form.amount = "1250.50".to_owned();
+        page.form.currency = Some(Currency::Rub);
         page.form.opened_date = "2026-03-15".to_owned();
         page.form.interest_accrual_date = "2026-03-16".to_owned();
         page.form.term_type = Some(SavingsTerm::Limited);
@@ -1083,6 +1151,7 @@ mod tests {
             .find(|entry| entry.id == 1)
             .expect("edit should preserve the existing record id");
         assert_eq!(updated.title, "Изменённый вклад");
+        assert_eq!(updated.currency, Some(Currency::Rub));
         assert_eq!(updated.amount.to_string(), "1250.5");
         assert_eq!(updated.opened_date, NaiveDate::from_ymd_opt(2026, 3, 15));
         assert_eq!(
@@ -1341,18 +1410,32 @@ mod tests {
             .execute_batch(include_str!("../../db/migrations/V5__savings_dates.sql"))
             .expect("savings date migration should apply");
         database
+            .execute_batch(include_str!(
+                "../../db/migrations/V6__income_card_balances.sql"
+            ))
+            .expect("income card migration should apply");
+        database
+            .execute_batch(include_str!("../../db/migrations/V7__expense_cards.sql"))
+            .expect("expense card migration should apply");
+        database
+            .execute_batch(include_str!("../../db/migrations/V8__currencies.sql"))
+            .expect("currency migration should apply");
+        database
+            .execute_batch(include_str!("../../db/migrations/V9__savings_currency.sql"))
+            .expect("savings currency migration should apply");
+        database
             .execute_batch(
                 "INSERT INTO banks (id, name) VALUES (1, 'Банк Альфа'), (2, 'Банк Бета');
                  INSERT INTO savings (
                      id, bank_id, title, amount, base_rate, term_type,
                      term_end_date, opened_date, interest_accrual_date,
-                     interest_destination, is_active
+                     interest_destination, is_active, currency
                  ) VALUES
-                     (1, 1, 'Alpha', '100', '1', 'unlimited', NULL, '2026-03-01', '2026-03-31', 'reinvest', 1),
-                     (2, 1, 'Alpha', '100', '1', 'unlimited', NULL, NULL, NULL, 'reinvest', 0),
-                     (3, 1, 'Gamma', '100', '1', 'unlimited', NULL, NULL, NULL, 'reinvest', 1),
-                     (4, 2, 'Alpha', '100', '1', 'unlimited', NULL, NULL, NULL, 'reinvest', 1),
-                     (5, 2, 'Beta', '100', '1', 'unlimited', NULL, NULL, NULL, 'reinvest', 0);",
+                     (1, 1, 'Alpha', '100', '1', 'unlimited', NULL, '2026-03-01', '2026-03-31', 'reinvest', 1, 'USD'),
+                     (2, 1, 'Alpha', '100', '1', 'unlimited', NULL, NULL, NULL, 'reinvest', 0, NULL),
+                     (3, 1, 'Gamma', '100', '1', 'unlimited', NULL, NULL, NULL, 'reinvest', 1, 'RUB'),
+                     (4, 2, 'Alpha', '100', '1', 'unlimited', NULL, NULL, NULL, 'reinvest', 1, NULL),
+                     (5, 2, 'Beta', '100', '1', 'unlimited', NULL, NULL, NULL, 'reinvest', 0, NULL);",
             )
             .expect("savings fixtures should be inserted");
 
@@ -1415,14 +1498,44 @@ mod tests {
     }
 
     #[test]
+    fn applying_and_clearing_savings_currency_filter_updates_results() {
+        let (database, mut page) = filtered_savings_page();
+        page.search.clear();
+        page.currency_filter = Some(Currency::Usd);
+        page.refresh(&database)
+            .expect("USD savings filter should load");
+
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            [1]
+        );
+
+        page.clear_currency_filter();
+        page.refresh(&database)
+            .expect("clearing currency filter should load all matching currencies");
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            [1, 3]
+        );
+    }
+
+    #[test]
     fn resetting_savings_filters_clears_all_values_and_refreshes_results() {
         let (database, mut page) = filtered_savings_page();
+        page.currency_filter = Some(Currency::Rub);
         page.reset_filters();
         page.refresh(&database)
             .expect("results without filters should load");
 
         assert!(page.search.is_empty());
         assert_eq!(page.bank_filter, None);
+        assert_eq!(page.currency_filter, None);
         assert_eq!(page.active_filter, None);
         assert_eq!(page.entries.len(), 5);
     }

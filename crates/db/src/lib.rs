@@ -52,6 +52,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 8,
         sql: include_str!("../migrations/V8__currencies.sql"),
     },
+    Migration {
+        version: 9,
+        sql: include_str!("../migrations/V9__savings_currency.sql"),
+    },
 ];
 
 struct Migration {
@@ -1266,78 +1270,106 @@ pub fn list_savings(
     is_active: Option<bool>,
     search: &str,
 ) -> Result<Vec<SavingsAccount>, DbError> {
+    list_savings_filtered(connection, bank_id, is_active, None, search)
+}
+
+/// Lists savings accounts with optional bank, activity, currency, and text filters.
+pub fn list_savings_filtered(
+    connection: &Connection,
+    bank_id: Option<i64>,
+    is_active: Option<bool>,
+    currency: Option<Currency>,
+    search: &str,
+) -> Result<Vec<SavingsAccount>, DbError> {
     let mut statement = connection.prepare(
         "SELECT s.id, s.bank_id, b.name, s.title, s.amount, s.base_rate,
                 s.rate_after_threshold, s.threshold_amount, s.term_type, s.term_end_date,
-                s.interest_destination, s.is_active, s.opened_date, s.interest_accrual_date
+                s.interest_destination, s.is_active, s.opened_date, s.interest_accrual_date,
+                s.currency
          FROM savings s JOIN banks b ON b.id = s.bank_id
          WHERE (?1 IS NULL OR s.bank_id = ?1)
            AND (?2 IS NULL OR s.is_active = ?2)
+           AND (?3 IS NULL OR s.currency = ?3)
          ORDER BY b.name COLLATE NOCASE, s.title COLLATE NOCASE, s.id",
     )?;
-    let rows = statement.query_map(params![bank_id, is_active], |row| {
-        let amount = parse_decimal_text(row.get(4)?, 4)?;
-        let base_rate = parse_decimal_text(row.get(5)?, 5)?;
-        let rate_after_threshold = row
-            .get::<_, Option<String>>(6)?
-            .map(|value| parse_decimal_text(value, 6))
-            .transpose()?;
-        let threshold_amount = row
-            .get::<_, Option<String>>(7)?
-            .map(|value| parse_decimal_text(value, 7))
-            .transpose()?;
-        let term_type_text = row.get::<_, String>(8)?;
-        let term_type = term_type_text.parse::<SavingsTerm>().map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(8, Type::Text, Box::new(error))
-        })?;
-        let term_end_date = row
-            .get::<_, Option<String>>(9)?
-            .map(|value| {
-                NaiveDate::parse_from_str(&value, "%Y-%m-%d").map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(9, Type::Text, Box::new(error))
-                })
-            })
-            .transpose()?;
-        let interest_destination_text = row.get::<_, String>(10)?;
-        let interest_destination = interest_destination_text
-            .parse::<InterestDestination>()
-            .map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(10, Type::Text, Box::new(error))
+    let rows = statement.query_map(
+        params![bank_id, is_active, currency.map(Currency::code)],
+        |row| {
+            let amount = parse_decimal_text(row.get(4)?, 4)?;
+            let base_rate = parse_decimal_text(row.get(5)?, 5)?;
+            let rate_after_threshold = row
+                .get::<_, Option<String>>(6)?
+                .map(|value| parse_decimal_text(value, 6))
+                .transpose()?;
+            let threshold_amount = row
+                .get::<_, Option<String>>(7)?
+                .map(|value| parse_decimal_text(value, 7))
+                .transpose()?;
+            let term_type_text = row.get::<_, String>(8)?;
+            let term_type = term_type_text.parse::<SavingsTerm>().map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(8, Type::Text, Box::new(error))
             })?;
-        let opened_date = row
-            .get::<_, Option<String>>(12)?
-            .map(|value| {
-                NaiveDate::parse_from_str(&value, "%Y-%m-%d").map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(12, Type::Text, Box::new(error))
+            let term_end_date = row
+                .get::<_, Option<String>>(9)?
+                .map(|value| {
+                    NaiveDate::parse_from_str(&value, "%Y-%m-%d").map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(9, Type::Text, Box::new(error))
+                    })
                 })
-            })
-            .transpose()?;
-        let interest_accrual_date = row
-            .get::<_, Option<String>>(13)?
-            .map(|value| {
-                NaiveDate::parse_from_str(&value, "%Y-%m-%d").map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(13, Type::Text, Box::new(error))
+                .transpose()?;
+            let interest_destination_text = row.get::<_, String>(10)?;
+            let interest_destination = interest_destination_text
+                .parse::<InterestDestination>()
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(10, Type::Text, Box::new(error))
+                })?;
+            let opened_date = row
+                .get::<_, Option<String>>(12)?
+                .map(|value| {
+                    NaiveDate::parse_from_str(&value, "%Y-%m-%d").map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(12, Type::Text, Box::new(error))
+                    })
                 })
-            })
-            .transpose()?;
+                .transpose()?;
+            let interest_accrual_date = row
+                .get::<_, Option<String>>(13)?
+                .map(|value| {
+                    NaiveDate::parse_from_str(&value, "%Y-%m-%d").map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(13, Type::Text, Box::new(error))
+                    })
+                })
+                .transpose()?;
 
-        Ok(SavingsAccount {
-            id: row.get(0)?,
-            bank_id: row.get(1)?,
-            bank_name: row.get(2)?,
-            title: row.get(3)?,
-            amount,
-            base_rate,
-            rate_after_threshold,
-            threshold_amount,
-            opened_date,
-            interest_accrual_date,
-            term_type,
-            term_end_date,
-            interest_destination,
-            is_active: row.get(11)?,
-        })
-    })?;
+            Ok(SavingsAccount {
+                id: row.get(0)?,
+                bank_id: row.get(1)?,
+                bank_name: row.get(2)?,
+                title: row.get(3)?,
+                amount,
+                currency: row
+                    .get::<_, Option<String>>(14)?
+                    .map(|value| {
+                        value.parse().map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                14,
+                                Type::Text,
+                                Box::new(error),
+                            )
+                        })
+                    })
+                    .transpose()?,
+                base_rate,
+                rate_after_threshold,
+                threshold_amount,
+                opened_date,
+                interest_accrual_date,
+                term_type,
+                term_end_date,
+                interest_destination,
+                is_active: row.get(11)?,
+            })
+        },
+    )?;
     let accounts = rows.collect::<Result<Vec<_>, _>>()?;
     let search = search.trim().to_lowercase();
     if search.is_empty() {
@@ -1382,14 +1414,15 @@ pub fn save_savings(
     let interest_accrual_date = savings
         .interest_accrual_date
         .map(|date| date.format("%Y-%m-%d").to_string());
+    let currency = savings.currency.map(Currency::code);
     if let Some(id) = id {
         let changed = connection.execute(
             "UPDATE savings
              SET bank_id = ?1, title = ?2, amount = ?3, base_rate = ?4,
                  rate_after_threshold = ?5, threshold_amount = ?6, term_type = ?7,
                  term_end_date = ?8, opened_date = ?9, interest_accrual_date = ?10,
-                 interest_destination = ?11, is_active = ?12
-             WHERE id = ?13",
+                 interest_destination = ?11, is_active = ?12, currency = ?13
+             WHERE id = ?14",
             params![
                 savings.bank_id,
                 savings.title.trim(),
@@ -1403,6 +1436,7 @@ pub fn save_savings(
                 interest_accrual_date,
                 savings.interest_destination.code(),
                 savings.is_active,
+                currency,
                 id
             ],
         )?;
@@ -1415,8 +1449,8 @@ pub fn save_savings(
             "INSERT INTO savings (
                 bank_id, title, amount, base_rate, rate_after_threshold, threshold_amount,
                 term_type, term_end_date, opened_date, interest_accrual_date,
-                interest_destination, is_active
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                interest_destination, is_active, currency
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 savings.bank_id,
                 savings.title.trim(),
@@ -1429,7 +1463,8 @@ pub fn save_savings(
                 opened_date,
                 interest_accrual_date,
                 savings.interest_destination.code(),
-                savings.is_active
+                savings.is_active,
+                currency
             ],
         )?;
         Ok(connection.last_insert_rowid())
@@ -1452,6 +1487,17 @@ pub fn list_payment_documents(
     card_type: Option<PaymentCardType>,
     payment_system: Option<PaymentSystem>,
 ) -> Result<Vec<PaymentDocument>, DbError> {
+    list_payment_documents_filtered(connection, bank_id, card_type, payment_system, None)
+}
+
+/// Lists payment documents filtered by bank, card type, payment system, and currency.
+pub fn list_payment_documents_filtered(
+    connection: &Connection,
+    bank_id: Option<i64>,
+    card_type: Option<PaymentCardType>,
+    payment_system: Option<PaymentSystem>,
+    currency: Option<Currency>,
+) -> Result<Vec<PaymentDocument>, DbError> {
     let mut statement = connection.prepare(
         "SELECT document.id, document.bank_id, bank.name, document.payment_system,
                 document.card_type, document.amount, document.due_date,
@@ -1462,6 +1508,7 @@ pub fn list_payment_documents(
          WHERE (?1 IS NULL OR document.bank_id = ?1)
            AND (?2 IS NULL OR document.card_type = ?2)
            AND (?3 IS NULL OR document.payment_system = ?3)
+           AND (?4 IS NULL OR document.currency = ?4)
          ORDER BY bank.name COLLATE NOCASE, document.payment_system,
                   document.card_type, document.id",
     )?;
@@ -1470,7 +1517,8 @@ pub fn list_payment_documents(
             params![
                 bank_id,
                 card_type.map(PaymentCardType::code),
-                payment_system.map(PaymentSystem::code)
+                payment_system.map(PaymentSystem::code),
+                currency.map(Currency::code)
             ],
             |row| {
                 let payment_system_text = row.get::<_, String>(3)?;
@@ -2097,7 +2145,8 @@ mod tests {
         add_currency, delete_bank, delete_category, delete_currency, delete_payment_document,
         delete_savings, export_database_backup_from_path, get_app_setting,
         has_pending_database_import, initialize, list_currencies, list_payment_documents,
-        list_savings, list_transaction_amounts, list_transactions, load_analysis_transactions,
+        list_payment_documents_filtered, list_savings, list_savings_filtered,
+        list_transaction_amounts, list_transactions, load_analysis_transactions,
         load_analysis_transactions_by_category, restore_pending_database_import, save_bank,
         save_category, save_payment_document, save_savings, save_transaction, set_app_setting,
         set_currency_exchange_rate, set_primary_currency, stage_database_import, DbError,
@@ -2109,6 +2158,7 @@ mod tests {
             bank_id,
             title: "Семейный резерв".to_owned(),
             amount: Decimal::from_str("12345678901234567890.1234").unwrap(),
+            currency: None,
             base_rate: Decimal::from_str("5.25").unwrap(),
             rate_after_threshold: Some(Decimal::from_str("7.5").unwrap()),
             threshold_amount: Some(Decimal::from_str("50000.75").unwrap()),
@@ -2195,7 +2245,7 @@ mod tests {
                         )
                         .unwrap();
                 }
-                4..=7 => {}
+                4..=8 => {}
                 _ => unreachable!(),
             }
         }
@@ -2212,14 +2262,14 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v8-")
+                    .starts_with("data.before-migration-v9-")
             })
             .count()
     }
 
     #[test]
     fn initialize_migrates_supported_versions_and_preserves_backup_and_data() {
-        for version in 1..=7 {
+        for version in 1..=8 {
             let directory = tempfile::tempdir().unwrap();
             let database_path = directory.path().join("data.db");
             drop(create_legacy_database(&database_path, version));
@@ -2230,7 +2280,7 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap();
-            assert_eq!(latest_version, 8);
+            assert_eq!(latest_version, 9);
 
             let income_count = connection
                 .query_row("SELECT COUNT(*) FROM incomes", [], |row| {
@@ -2366,7 +2416,7 @@ mod tests {
                     entry
                         .file_name()
                         .to_string_lossy()
-                        .starts_with("data.before-migration-v8-")
+                        .starts_with("data.before-migration-v9-")
                 })
                 .expect("upgrade should create a backup")
                 .path();
@@ -2552,7 +2602,38 @@ mod tests {
                 row.get::<_, i64>(0)
             })
             .unwrap();
-        assert_eq!(schema_version, 8);
+        assert_eq!(schema_version, 9);
+    }
+
+    #[test]
+    fn migration_v9_preserves_existing_savings_without_assuming_currency() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        drop(create_legacy_database(&database_path, 8));
+
+        let connection = initialize(&database_path).unwrap();
+        let savings = list_savings(&connection, None, None, "").unwrap();
+        let backup_version = std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("data.before-migration-v9-")
+            })
+            .map(|entry| Connection::open(entry.path()).unwrap())
+            .map(|backup| {
+                backup
+                    .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap()
+            });
+
+        assert_eq!(savings.len(), 1);
+        assert_eq!(savings[0].currency, None);
+        assert_eq!(backup_version, Some(8));
     }
 
     #[test]
@@ -2571,7 +2652,7 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
             .unwrap();
 
-        assert_eq!(migration_count, 8);
+        assert_eq!(migration_count, 9);
         assert_eq!(foreign_keys_enabled, 1);
     }
 
@@ -3800,7 +3881,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .contains("before-migration-v8")
+                    .contains("before-migration-v9")
             })
             .count();
 
@@ -3825,6 +3906,7 @@ mod tests {
             Decimal::from_str("12345678901234567890.1234").unwrap()
         );
         assert_eq!(account.base_rate, Decimal::from_str("5.25").unwrap());
+        assert_eq!(account.currency, None);
         assert_eq!(
             account.rate_after_threshold,
             Some(Decimal::from_str("7.5").unwrap())
@@ -3851,6 +3933,61 @@ mod tests {
         assert!(list_savings(&connection, None, Some(false), "")
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn savings_currency_is_saved_and_filterable_without_changing_unknown_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let bank_id = save_bank(&connection, None, "Банк", "").unwrap();
+
+        let mut rub = savings_details(bank_id);
+        rub.currency = Some(Currency::Rub);
+        save_savings(&connection, None, &rub).unwrap();
+        let mut usd = savings_details(bank_id);
+        usd.title = "Долларовый резерв".to_owned();
+        usd.currency = Some(Currency::Usd);
+        save_savings(&connection, None, &usd).unwrap();
+        let unknown_id = save_savings(&connection, None, &savings_details(bank_id)).unwrap();
+
+        assert_eq!(
+            list_savings_filtered(
+                &connection,
+                Some(bank_id),
+                Some(true),
+                Some(Currency::Rub),
+                "семейный",
+            )
+            .unwrap()
+            .iter()
+            .map(|account| account.currency)
+            .collect::<Vec<_>>(),
+            [Some(Currency::Rub)]
+        );
+        assert_eq!(
+            list_savings_filtered(
+                &connection,
+                Some(bank_id),
+                Some(true),
+                Some(Currency::Usd),
+                "долларовый",
+            )
+            .unwrap()
+            .iter()
+            .map(|account| account.currency)
+            .collect::<Vec<_>>(),
+            [Some(Currency::Usd)]
+        );
+        let all_savings = list_savings(&connection, None, None, "").unwrap();
+        assert_eq!(all_savings.len(), 3);
+        assert_eq!(
+            all_savings
+                .iter()
+                .find(|account| account.id == unknown_id)
+                .unwrap()
+                .currency,
+            None
+        );
     }
 
     #[test]
@@ -3997,7 +4134,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v8-")
+                    .starts_with("data.before-migration-v9-")
             })
             .expect("upgrade from V4 should create a backup")
             .path();
@@ -4009,7 +4146,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(savings_dates, (None, None));
-        assert_eq!(migration_version, 8);
+        assert_eq!(migration_version, 9);
         assert_eq!(backup_version, 4);
     }
 
@@ -4097,6 +4234,39 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn payment_document_currency_filter_returns_only_matching_known_currency() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let bank_id = save_bank(&connection, None, "Банк", "").unwrap();
+
+        let mut rub = payment_document_details(bank_id);
+        rub.currency = Some(Currency::Rub);
+        save_payment_document(&connection, None, &rub).unwrap();
+        let mut usd = payment_document_details(bank_id);
+        usd.payment_system = PaymentSystem::Mir;
+        usd.currency = Some(Currency::Usd);
+        save_payment_document(&connection, None, &usd).unwrap();
+        save_payment_document(&connection, None, &payment_document_details(bank_id)).unwrap();
+
+        let filtered = list_payment_documents_filtered(
+            &connection,
+            None,
+            Some(PaymentCardType::Debit),
+            Some(PaymentSystem::Mir),
+            Some(Currency::Usd),
+        )
+        .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].currency, Some(Currency::Usd));
+        assert_eq!(
+            list_payment_documents(&connection, None, None, None)
+                .unwrap()
+                .len(),
+            3
         );
     }
 

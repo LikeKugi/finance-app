@@ -663,6 +663,9 @@ mod tests {
         database
             .execute_batch(include_str!("../../db/migrations/V8__currencies.sql"))
             .unwrap();
+        database
+            .execute_batch(include_str!("../../db/migrations/V9__savings_currency.sql"))
+            .unwrap();
 
         let (category_table, transaction_table, active_tab) = match kind {
             TransactionKind::Income => ("income_categories", "incomes", ModuleTab::Income),
@@ -709,6 +712,7 @@ mod tests {
             include_str!("../../db/migrations/V6__income_card_balances.sql"),
             include_str!("../../db/migrations/V7__expense_cards.sql"),
             include_str!("../../db/migrations/V8__currencies.sql"),
+            include_str!("../../db/migrations/V9__savings_currency.sql"),
         ] {
             database.execute_batch(migration).unwrap();
         }
@@ -783,6 +787,7 @@ mod tests {
                 bank_id: bank,
                 title: "Резерв".to_owned(),
                 amount: 1000.into(),
+                currency: None,
                 base_rate: 5.into(),
                 rate_after_threshold: None,
                 threshold_amount: None,
@@ -1597,7 +1602,7 @@ mod tests {
     }
 
     #[test]
-    fn savings_filters_render_in_search_bank_status_order_with_updated_actions() {
+    fn savings_filters_render_in_search_bank_currency_status_order_with_updated_actions() {
         let database =
             finance_db::Database::open_in_memory().expect("in-memory SQLite should open");
         let mut savings_page = SavingsPage::default();
@@ -1610,8 +1615,9 @@ mod tests {
 
         let search = text_positions(&output, "Поиск")[0];
         let bank = text_positions(&output, "Банк")[0];
+        let currency = text_positions(&output, "Валюта")[0];
         let status = text_positions(&output, "Статус")[0];
-        assert!(search.x < bank.x && bank.x < status.x);
+        assert!(search.x < bank.x && bank.x < currency.x && currency.x < status.x);
         assert_eq!(text_positions(&output, "Применить").len(), 1);
         assert_eq!(text_positions(&output, "Сбросить фильтры").len(), 1);
         assert!(text_positions(&output, "Применить фильтры").is_empty());
