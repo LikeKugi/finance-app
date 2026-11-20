@@ -429,7 +429,7 @@ impl eframe::App for FinanceApp {
         render_analysis_footer(context, self.active_tab, &self.analysis_page);
 
         let mut refresh_analysis_categories = false;
-        let mut close_for_import = self.settings_page.poll_operation();
+        let close_for_import = self.settings_page.poll_operation();
         egui::CentralPanel::default().show(context, |ui| {
             ui.horizontal(|ui| {
                 ui.heading(self.active_tab.title());
