@@ -1,5 +1,6 @@
-use std::fs;
-use std::path::Path;
+use std::fs::{self, OpenOptions};
+use std::io;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -11,6 +12,7 @@ use finance_core::{
     PaymentDocumentDetails, PaymentSystem, SavingsAccount, SavingsDetails, SavingsTerm,
     TransactionAmount, TransactionKind,
 };
+use rusqlite::backup::Backup;
 use rusqlite::{
     params, types::Type, Connection, OpenFlags, OptionalExtension, TransactionBehavior,
 };
@@ -72,6 +74,14 @@ pub enum DbError {
     UnrecognizedSchema,
     #[error("История миграций повреждена; данные не изменены")]
     InvalidMigrationHistory,
+    #[error("Файл базы данных не прошёл проверку целостности: {0}")]
+    InvalidDatabaseIntegrity(String),
+    #[error("Выбранный файл не содержит базы данных FinanceApp")]
+    InvalidDatabaseSnapshot,
+    #[error("Файл резервной копии уже существует; выберите другое имя")]
+    BackupDestinationExists,
+    #[error("Не удалось подготовить импорт: рядом с базой уже есть незавершённое восстановление")]
+    ImportRecoveryInProgress,
     #[error("База данных изменилась во время подготовки обновления; повторите запуск")]
     ConcurrentDatabaseModification,
     #[error("Проверка внешних ключей после миграции не пройдена: {0}")]
@@ -145,6 +155,348 @@ pub fn initialize(path: &Path) -> Result<Connection, DbError> {
     apply_migrations(&mut connection, path)?;
 
     Ok(connection)
+}
+
+/// Reads an application setting from the existing settings table.
+pub fn get_app_setting(connection: &Connection, key: &str) -> Result<Option<String>, DbError> {
+    Ok(connection
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            [key],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// Stores an application setting without changing the database schema.
+pub fn set_app_setting(connection: &Connection, key: &str, value: &str) -> Result<(), DbError> {
+    connection.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+/// Exports the whole database as a consistent SQLite snapshot without replacing an existing file.
+pub fn export_database_backup(connection: &Connection, destination: &Path) -> Result<(), DbError> {
+    if destination.exists() {
+        return Err(DbError::BackupDestinationExists);
+    }
+
+    let temporary_path = create_temporary_file_near(destination, "export")?;
+    let result = (|| {
+        create_consistent_copy(connection, &temporary_path)?;
+        validate_database(&temporary_path)?;
+        match fs::hard_link(&temporary_path, destination) {
+            Ok(()) => {
+                fs::remove_file(&temporary_path)?;
+                Ok(())
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                Err(DbError::BackupDestinationExists)
+            }
+            Err(error) => Err(error.into()),
+        }
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    result
+}
+
+/// Opens the live database read-only and exports a consistent SQLite snapshot.
+pub fn export_database_backup_from_path(
+    database_path: &Path,
+    destination: &Path,
+) -> Result<(), DbError> {
+    let connection = Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    export_database_backup(&connection, destination)
+}
+
+/// Validates and stages a complete SQLite backup for import after the app closes its connections.
+pub fn stage_database_import(source: &Path, database_path: &Path) -> Result<(), DbError> {
+    let pending_path = pending_import_path(database_path);
+    if pending_path.exists() {
+        return Err(DbError::ImportRecoveryInProgress);
+    }
+
+    let source_connection = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    source_connection.busy_timeout(Duration::from_secs(5))?;
+    validate_database_connection(&source_connection)?;
+
+    let work_directory = create_import_work_directory(database_path)?;
+    let candidate_path = work_directory.join("candidate.db");
+    let result = (|| {
+        create_consistent_copy(&source_connection, &candidate_path)?;
+        validate_database_snapshot(&candidate_path)?;
+
+        let migrated_candidate = initialize(&candidate_path)?;
+        drop(migrated_candidate);
+        validate_database(&candidate_path)?;
+
+        for entry in fs::read_dir(&work_directory)? {
+            let entry = entry?;
+            if entry.path() != candidate_path {
+                fs::remove_file(entry.path())?;
+            }
+        }
+
+        fs::rename(&candidate_path, &pending_path)?;
+        if let Err(error) = fs::remove_dir(&work_directory) {
+            let _ = fs::remove_file(&pending_path);
+            return Err(error.into());
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&work_directory);
+    }
+    result
+}
+
+/// Reports whether a staged import is waiting for the application to close.
+pub fn has_pending_database_import(database_path: &Path) -> bool {
+    pending_import_path(database_path).exists()
+}
+
+/// Installs a previously validated snapshot, retaining a consistent backup of the current database.
+pub fn restore_pending_database_import(database_path: &Path) -> Result<bool, DbError> {
+    recover_interrupted_import(database_path)?;
+
+    let pending_path = pending_import_path(database_path);
+    if !pending_path.exists() {
+        return Ok(false);
+    }
+    validate_database(&pending_path)?;
+
+    let rollback_path = rollback_import_path(database_path);
+    if rollback_path.exists() {
+        return Err(DbError::ImportRecoveryInProgress);
+    }
+
+    if database_path.exists() {
+        let current_database =
+            Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let backup_path = unique_sibling_path(database_path, "before-import")?;
+        export_database_backup(&current_database, &backup_path)?;
+        drop(current_database);
+        fs::rename(database_path, &rollback_path)?;
+    }
+
+    if let Err(error) = fs::rename(&pending_path, database_path) {
+        if rollback_path.exists() {
+            fs::rename(&rollback_path, database_path)?;
+        }
+        return Err(error.into());
+    }
+
+    if rollback_path.exists() {
+        fs::remove_file(rollback_path)?;
+    }
+    Ok(true)
+}
+
+fn create_consistent_copy(source: &Connection, destination: &Path) -> Result<(), DbError> {
+    let mut target = Connection::open(destination)?;
+    target.busy_timeout(Duration::from_secs(5))?;
+    {
+        let backup = Backup::new(source, &mut target)?;
+        backup.run_to_completion(128, Duration::from_millis(10), None)?;
+    }
+    validate_database_connection(&target)?;
+    Ok(())
+}
+
+fn validate_database(path: &Path) -> Result<(), DbError> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    validate_database_connection(&connection)?;
+    validate_current_schema(&connection)
+}
+
+fn validate_database_snapshot(path: &Path) -> Result<(), DbError> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    validate_database_connection(&connection)
+}
+
+fn validate_database_connection(connection: &Connection) -> Result<(), DbError> {
+    let integrity =
+        connection.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))?;
+    if integrity != "ok" {
+        return Err(DbError::InvalidDatabaseIntegrity(integrity));
+    }
+
+    let foreign_key_violation =
+        connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+    if foreign_key_violation > 0 {
+        return Err(DbError::ForeignKeyIntegrity(
+            "обнаружены нарушения ссылочной целостности".to_owned(),
+        ));
+    }
+
+    if detect_migration_version(connection)?.is_none() {
+        return Err(DbError::InvalidDatabaseSnapshot);
+    }
+    Ok(())
+}
+
+fn validate_current_schema(connection: &Connection) -> Result<(), DbError> {
+    let current_version = MIGRATIONS.last().map_or(0, |migration| migration.version);
+    if detect_migration_version(connection)? != Some(current_version) {
+        return Err(DbError::InvalidDatabaseSnapshot);
+    }
+
+    for table in [
+        "app_settings",
+        "banks",
+        "income_categories",
+        "expense_categories",
+        "incomes",
+        "expenses",
+        "savings",
+        "payment_documents",
+        "document_rate_links",
+        "currencies",
+    ] {
+        let exists = connection.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+            )",
+            [table],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !exists {
+            return Err(DbError::InvalidDatabaseSnapshot);
+        }
+    }
+    Ok(())
+}
+
+fn create_temporary_file_near(path: &Path, purpose: &str) -> Result<PathBuf, DbError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("database.db");
+
+    for attempt in 0..100 {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos();
+        let temporary_path = parent.join(format!(
+            ".{file_name}.{purpose}-{}-{timestamp}-{attempt}.tmp",
+            std::process::id()
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+        {
+            Ok(_) => return Ok(temporary_path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "не удалось создать временный файл для операции с базой данных",
+    )
+    .into())
+}
+
+fn create_import_work_directory(database_path: &Path) -> Result<PathBuf, DbError> {
+    let parent = database_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    for attempt in 0..100 {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos();
+        let work_directory = parent.join(format!(
+            ".financeapp-import-{}-{timestamp}-{attempt}",
+            std::process::id()
+        ));
+        match fs::create_dir(&work_directory) {
+            Ok(()) => return Ok(work_directory),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "не удалось создать временный каталог для импорта",
+    )
+    .into())
+}
+
+fn pending_import_path(database_path: &Path) -> PathBuf {
+    let mut file_name = database_path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("data.db"))
+        .to_os_string();
+    file_name.push(".import-pending");
+    database_path.with_file_name(file_name)
+}
+
+fn rollback_import_path(database_path: &Path) -> PathBuf {
+    let mut file_name = database_path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("data.db"))
+        .to_os_string();
+    file_name.push(".import-rollback");
+    database_path.with_file_name(file_name)
+}
+
+fn recover_interrupted_import(database_path: &Path) -> Result<(), DbError> {
+    let rollback_path = rollback_import_path(database_path);
+    if !rollback_path.exists() {
+        return Ok(());
+    }
+
+    if !database_path.exists() {
+        fs::rename(rollback_path, database_path)?;
+        return Ok(());
+    }
+
+    let recovered_path = unique_sibling_path(database_path, "recovered-import")?;
+    fs::rename(rollback_path, recovered_path)?;
+    Ok(())
+}
+
+fn unique_sibling_path(path: &Path, label: &str) -> Result<PathBuf, DbError> {
+    let file_stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("database");
+    for attempt in 0..100 {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos();
+        let candidate =
+            path.with_file_name(format!("{file_stem}.{label}-{timestamp}-{attempt}.db"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "не удалось выбрать свободное имя файла резервной копии",
+    )
+    .into())
 }
 
 /// Returns the configured currencies, including the primary currency and known rates.
@@ -1737,16 +2089,18 @@ mod tests {
         Currency, CurrencyDefinition, DomainError, InterestDestination, PaymentCardType,
         PaymentDocumentDetails, PaymentSystem, SavingsDetails, SavingsTerm, TransactionKind,
     };
-    use rusqlite::Connection;
+    use rusqlite::{Connection, OpenFlags};
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
     use super::{
         add_currency, delete_bank, delete_category, delete_currency, delete_payment_document,
-        delete_savings, initialize, list_currencies, list_payment_documents, list_savings,
-        list_transaction_amounts, list_transactions, load_analysis_transactions,
-        load_analysis_transactions_by_category, save_bank, save_category, save_payment_document,
-        save_savings, save_transaction, set_currency_exchange_rate, set_primary_currency, DbError,
+        delete_savings, export_database_backup_from_path, get_app_setting,
+        has_pending_database_import, initialize, list_currencies, list_payment_documents,
+        list_savings, list_transaction_amounts, list_transactions, load_analysis_transactions,
+        load_analysis_transactions_by_category, restore_pending_database_import, save_bank,
+        save_category, save_payment_document, save_savings, save_transaction, set_app_setting,
+        set_currency_exchange_rate, set_primary_currency, stage_database_import, DbError,
         MIGRATIONS,
     };
 
@@ -4119,5 +4473,138 @@ mod tests {
                 ..
             )))
         ));
+    }
+
+    #[test]
+    fn app_settings_can_be_read_and_updated() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = initialize(&directory.path().join("data.db")).unwrap();
+
+        assert_eq!(get_app_setting(&database, "theme").unwrap(), None);
+        set_app_setting(&database, "theme", "dark").unwrap();
+
+        assert_eq!(
+            get_app_setting(&database, "theme").unwrap(),
+            Some("dark".to_owned())
+        );
+    }
+
+    #[test]
+    fn export_database_backup_includes_committed_wal_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let backup_path = directory.path().join("export.db");
+        let database = initialize(&database_path).unwrap();
+        let journal_mode = database
+            .query_row("PRAGMA journal_mode = WAL", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        set_app_setting(&database, "theme", "light").unwrap();
+
+        export_database_backup_from_path(&database_path, &backup_path).unwrap();
+
+        let exported =
+            Connection::open_with_flags(&backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        assert_eq!(
+            get_app_setting(&exported, "theme").unwrap(),
+            Some("light".to_owned())
+        );
+    }
+
+    #[test]
+    fn export_database_backup_does_not_replace_an_existing_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let backup_path = directory.path().join("export.db");
+        drop(initialize(&database_path).unwrap());
+        std::fs::write(&backup_path, b"keep existing file").unwrap();
+
+        let error = export_database_backup_from_path(&database_path, &backup_path).unwrap_err();
+
+        assert!(matches!(error, DbError::BackupDestinationExists));
+        assert_eq!(std::fs::read(backup_path).unwrap(), b"keep existing file");
+    }
+
+    #[test]
+    fn staged_import_preserves_current_database_and_keeps_a_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let source_path = directory.path().join("source.db");
+
+        let current = initialize(&database_path).unwrap();
+        set_app_setting(&current, "theme", "light").unwrap();
+        drop(current);
+        let source = initialize(&source_path).unwrap();
+        set_app_setting(&source, "theme", "dark").unwrap();
+        drop(source);
+
+        stage_database_import(&source_path, &database_path).unwrap();
+        assert!(has_pending_database_import(&database_path));
+        let current = Connection::open(&database_path).unwrap();
+        assert_eq!(
+            get_app_setting(&current, "theme").unwrap(),
+            Some("light".to_owned())
+        );
+        drop(current);
+
+        assert!(restore_pending_database_import(&database_path).unwrap());
+        let imported = initialize(&database_path).unwrap();
+        assert_eq!(
+            get_app_setting(&imported, "theme").unwrap(),
+            Some("dark".to_owned())
+        );
+        let backup_path = std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().contains("before-import"))
+            })
+            .expect("the replaced database should have a backup");
+        let backup =
+            Connection::open_with_flags(&backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        assert_eq!(
+            get_app_setting(&backup, "theme").unwrap(),
+            Some("light".to_owned())
+        );
+    }
+
+    #[test]
+    fn invalid_import_does_not_change_the_current_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let source_path = directory.path().join("invalid.db");
+        let database = initialize(&database_path).unwrap();
+        set_app_setting(&database, "theme", "system").unwrap();
+        std::fs::write(&source_path, b"not a SQLite database").unwrap();
+
+        assert!(stage_database_import(&source_path, &database_path).is_err());
+        assert!(!has_pending_database_import(&database_path));
+        assert_eq!(
+            get_app_setting(&database, "theme").unwrap(),
+            Some("system".to_owned())
+        );
+    }
+
+    #[test]
+    fn importing_a_supported_older_schema_upgrades_the_staged_copy() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let source_path = directory.path().join("older.db");
+        drop(create_legacy_database(&source_path, 7));
+
+        stage_database_import(&source_path, &database_path).unwrap();
+        assert!(restore_pending_database_import(&database_path).unwrap());
+
+        let imported = initialize(&database_path).unwrap();
+        let imported_version = imported
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!(imported_version, MIGRATIONS.last().unwrap().version);
     }
 }

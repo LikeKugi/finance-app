@@ -18,6 +18,7 @@ mod expense_page;
 mod income_page;
 mod payment_documents_page;
 mod savings_page;
+mod settings_page;
 mod transactions_page;
 
 use analysis_page::AnalysisPage;
@@ -27,6 +28,7 @@ use common::{
 use date_input::DateInputState;
 use payment_documents_page::PaymentDocumentsPage;
 use savings_page::SavingsPage;
+use settings_page::SettingsPage;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ModuleTab {
@@ -36,16 +38,18 @@ enum ModuleTab {
     PaymentDocuments,
     Analysis,
     Directories,
+    Settings,
 }
 
 impl ModuleTab {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Income,
         Self::Expenses,
         Self::Savings,
         Self::PaymentDocuments,
         Self::Analysis,
         Self::Directories,
+        Self::Settings,
     ];
 
     const fn title(self) -> &'static str {
@@ -56,6 +60,7 @@ impl ModuleTab {
             Self::PaymentDocuments => "Платёжные карты",
             Self::Analysis => "Анализ",
             Self::Directories => "Справочники",
+            Self::Settings => "Настройки",
         }
     }
 
@@ -63,7 +68,11 @@ impl ModuleTab {
         match self {
             Self::Income => Some(TransactionKind::Income),
             Self::Expenses => Some(TransactionKind::Expense),
-            Self::Savings | Self::PaymentDocuments | Self::Analysis | Self::Directories => None,
+            Self::Savings
+            | Self::PaymentDocuments
+            | Self::Analysis
+            | Self::Directories
+            | Self::Settings => None,
         }
     }
 }
@@ -139,6 +148,7 @@ struct FinanceApp {
     savings_page: SavingsPage,
     payment_documents_page: PaymentDocumentsPage,
     analysis_page: AnalysisPage,
+    settings_page: SettingsPage,
     directory_kind: TransactionKind,
     directory_right_tab: DirectoryRightTab,
     search: String,
@@ -169,6 +179,7 @@ impl FinanceApp {
     }
 
     fn with_database_path(database: Database, database_path: Option<PathBuf>) -> Self {
+        let settings_page = SettingsPage::load(&database);
         let mut app = Self {
             database,
             database_path,
@@ -190,6 +201,7 @@ impl FinanceApp {
             savings_page: SavingsPage::default(),
             payment_documents_page: PaymentDocumentsPage::default(),
             analysis_page: AnalysisPage::default(),
+            settings_page,
             directory_kind: TransactionKind::Income,
             directory_right_tab: DirectoryRightTab::Banks,
             search: String::new(),
@@ -417,6 +429,7 @@ impl eframe::App for FinanceApp {
         render_analysis_footer(context, self.active_tab, &self.analysis_page);
 
         let mut refresh_analysis_categories = false;
+        let mut close_for_import = self.settings_page.poll_operation();
         egui::CentralPanel::default().show(context, |ui| {
             ui.horizontal(|ui| {
                 ui.heading(self.active_tab.title());
@@ -544,12 +557,23 @@ impl eframe::App for FinanceApp {
                         refresh_analysis_categories,
                     );
                 }
+                ModuleTab::Settings => {
+                    self.settings_page.render(
+                        context,
+                        ui,
+                        &self.database,
+                        self.database_path.as_deref(),
+                    );
+                }
             }
         });
         if refresh_analysis_categories {
             self.refresh_analysis_categories();
         }
         self.render_delete_confirmation(context);
+        if close_for_import {
+            context.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 }
 
@@ -565,11 +589,12 @@ pub fn run(database: Database, database_path: PathBuf) -> eframe::Result<()> {
     eframe::run_native(
         "FinanceApp — управление финансами",
         options,
-        Box::new(move |_creation_context| {
-            Ok(Box::new(FinanceApp::with_database_path(
-                database,
-                Some(database_path),
-            )))
+        Box::new(move |creation_context| {
+            let app = FinanceApp::with_database_path(database, Some(database_path));
+            creation_context
+                .egui_ctx
+                .set_theme(app.settings_page.theme().to_egui());
+            Ok(Box::new(app))
         }),
     )
 }

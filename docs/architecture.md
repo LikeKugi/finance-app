@@ -28,7 +28,7 @@ The UI currently calls `finance-db` operations directly; a separate application-
 
 ## Application startup and data flow
 
-`crates/app/src/main.rs` resolves the user's configuration directory through `directories::BaseDirs`, creates a `FinanceApp` subdirectory, initializes daily rolling logs, and opens `data.db` through `finance_db::initialize`. The log configuration retains up to seven files. On Windows the application data directory is `%APPDATA%\FinanceApp`; other platforms use their standard configuration directory.
+`crates/app/src/main.rs` resolves the user's configuration directory through `directories::BaseDirs`, creates a `FinanceApp` subdirectory, initializes daily rolling logs, restores a confirmed staged database import after closing the UI connection, and opens `data.db` through `finance_db::initialize`. The log configuration retains up to seven files. On Windows the application data directory is `%APPDATA%\FinanceApp`; other platforms use their standard configuration directory.
 
 The initialized SQLite connection and database path are passed to `finance_ui::run`. The UI renders the module screens and calls database functions to load, validate, and persist user changes. SQLite is bundled through `rusqlite`, so normal application use does not depend on a separately installed SQLite server or network access.
 
@@ -48,13 +48,13 @@ Financial amounts, rates, and thresholds are represented with `rust_decimal::Dec
 - **Payment documents:** create, edit, and delete; bank, payment-system, and card-type filters; debit and credit fields; and savings links restricted to the same bank. Payment-system values are stored as `VISA`, `MasterCard`, and `MIR`. Debit-card amounts mean current balance; credit-card amounts mean the credit limit, not user-owned funds. Income can be linked to a debit card and adjusts its balance atomically; expenses can reference a card but do not change card balances.
 - **Analysis:** inclusive date filtering and all/income-only/expense-only modes; category totals and shares by transaction type and currency; and separate RUB and USD results without implicit conversion. Reports read both transaction tables from a single read-only SQLite snapshot.
 
-The native UI exposes six Russian-language tabs: income, expenses, savings, payment cards, analysis, and directories. Automated tests are primarily colocated in Rust source files, including the core, database, and UI crates, rather than a separate top-level `tests/` tree.
+The native UI exposes seven Russian-language tabs: income, expenses, savings, payment cards, analysis, directories, and settings. Settings persist light, dark, or system theme preference in the existing `app_settings` table. They export the whole database as a standalone SQLite backup using SQLite's backup API; imports validate integrity, foreign keys, and supported migration history, upgrade a staged copy, require confirmation, create a backup of the current database, and reopen the app with the imported data. Automated tests are primarily colocated in Rust source files, including the core, database, and UI crates, rather than a separate top-level `tests/` tree.
 
 ## Deferred functionality and known limitations
 
 - Interest accrual estimates, yield projections, and verification of card-spend thresholds are deferred. Savings lack balance history and bank-specific accrual rules; card links and user-marked qualifying expenses do not prove that a threshold was met.
 - Analysis forecasts, a special-category criterion, and currency conversion in reports are not implemented. RUB and USD are not combined into one amount.
-- CSV, XLSX, SQL dump, and user-facing database export are not implemented; there is no export crate.
+- CSV, XLSX, and SQL dump export are not implemented; the settings screen currently imports and exports only complete SQLite `.db` backups.
 - The database can store additional currencies and their rates, but transactions and transaction screens remain limited to RUB/USD.
 - The current source provides a primary-currency selector in the directories screen. `README.md` still says that this selector is not surfaced in the UI; that statement is stale relative to `crates/ui/src/directories_page.rs`.
 - This document does not assert that Windows packaging, installer behavior, or performance targets have been verified; those require their own platform-specific checks.

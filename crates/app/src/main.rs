@@ -28,14 +28,27 @@ fn main() -> Result<()> {
 
     tracing::info!("Запуск FinanceApp");
     let database_path = app_directory.join("data.db");
-    let database = finance_db::initialize(&database_path).with_context(|| {
-        format!(
-            "Не удалось открыть базу данных: {}",
-            database_path.display()
-        )
-    })?;
-    finance_ui::run(database, database_path)
-        .map_err(|error| anyhow::anyhow!("Не удалось запустить окно приложения: {error:?}"))?;
+    loop {
+        finance_db::restore_pending_database_import(&database_path)
+            .context("Не удалось восстановить резервную копию данных")?;
+        let database = finance_db::initialize(&database_path).with_context(|| {
+            format!(
+                "Не удалось открыть базу данных: {}",
+                database_path.display()
+            )
+        })?;
+        let run_result = finance_ui::run(database, database_path.clone())
+            .map_err(|error| anyhow::anyhow!("Не удалось запустить окно приложения: {error:?}"));
+
+        if finance_db::has_pending_database_import(&database_path) {
+            finance_db::restore_pending_database_import(&database_path)
+                .context("Не удалось восстановить выбранную резервную копию")?;
+            run_result?;
+            continue;
+        }
+        run_result?;
+        break;
+    }
     tracing::info!("Завершение FinanceApp");
 
     Ok(())
