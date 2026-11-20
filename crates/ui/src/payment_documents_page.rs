@@ -78,15 +78,6 @@ impl PaymentDocumentsPage {
                 "Сначала добавьте банк в разделе «Справочники», чтобы создать платёжный документ.",
             );
         }
-        if self.show_form {
-            if let Some(message) = self.render_form(ui, database, banks) {
-                return Some(message);
-            }
-            ui.add_space(12.0);
-            ui.separator();
-            ui.add_space(12.0);
-        }
-
         let mut should_refresh = false;
         egui::ScrollArea::horizontal()
             .id_salt("payment_documents_filters_scroll")
@@ -170,12 +161,19 @@ impl PaymentDocumentsPage {
                 });
             });
 
-        ui.separator();
         if should_refresh {
             if let Err(error) = self.refresh(database) {
                 return Some((error.to_string(), true));
             }
         }
+
+        if self.show_form {
+            if let Some(message) = self.render_form(ui, database, banks) {
+                return Some(message);
+            }
+        }
+
+        ui.separator();
 
         if self.entries.is_empty() {
             ui.label("Платёжных документов по выбранным условиям нет.");
@@ -812,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn payment_document_form_renders_above_filters_with_warning_and_actions_in_footer() {
+    fn payment_document_form_renders_between_filters_and_empty_list_with_warning_and_actions() {
         let database = database_with_bank();
         let banks = finance_db::list_banks(&database).unwrap();
 
@@ -845,8 +843,8 @@ mod tests {
             let save = text_positions(&output, "Сохранить")[0];
             let cancel = text_positions(&output, "Отмена")[0];
 
-            assert!(form_title.y < filters.y);
-            assert!(filters.y < empty_list.y);
+            assert!(filters.y < form_title.y);
+            assert!(form_title.y < empty_list.y);
             assert_eq!(warnings.len(), usize::from(affects_deposit_rate));
             if let Some(warning) = warnings.first() {
                 assert!((warning.y - save.y).abs() < 1.0);
@@ -856,6 +854,44 @@ mod tests {
             assert!(save.x < cancel.x);
             assert!(cancel.x > 960.0, "action buttons should be on the right");
         }
+    }
+
+    #[test]
+    fn payment_document_edit_form_renders_between_filters_and_table() {
+        let database = database_with_bank();
+        database
+            .execute_batch(
+                "INSERT INTO payment_documents (
+                     id, bank_id, payment_system, card_type, amount, currency
+                 ) VALUES (1, 1, 'VISA', 'debit', '10', 'RUB');",
+            )
+            .unwrap();
+        let banks = finance_db::list_banks(&database).unwrap();
+        let mut page = PaymentDocumentsPage::default();
+        page.refresh(&database).unwrap();
+        page.begin_edit(&database, 1).unwrap();
+        let context = egui::Context::default();
+        let output = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_280.0, 720.0),
+                )),
+                ..Default::default()
+            },
+            |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    page.render(context, ui, &database, &banks);
+                });
+            },
+        );
+
+        let filters = text_positions(&output, "Применить")[0];
+        let form_title = text_positions(&output, "Изменить платёжный документ")[0];
+        let table_header = text_positions(&output, "Дата платежа")[0];
+
+        assert!(filters.y < form_title.y);
+        assert!(form_title.y < table_header.y);
     }
 
     #[test]
