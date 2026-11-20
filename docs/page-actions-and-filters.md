@@ -1,10 +1,12 @@
 # Page Actions and Filters
 
-This document records the action-button and filter patterns on the existing Income, Expenses, Savings, Payment Cards, and Analysis pages. It also defines a shared header pattern for pages and sections; the standard is a recommendation and does not imply that every page already implements it.
+This document records the action-button and filter patterns on the existing Income, Expenses, Savings, Payment Cards, Analysis, and Directories pages. It also defines a shared header pattern for pages and sections; the standard is a recommendation and does not imply that every page already implements it.
 
 ## Header Actions
 
-On Income, the page title is on the left side of the header row and `+ Добавить доход` is aligned to the right. This header has no refresh action. Add opens a form for a new record; fields may be prefilled with page defaults.
+On Income, the page title is on the left side of the header row and `Добавить доход` with a Plus icon in the same foreground color as the label is aligned to the right. This header action uses the Large button size and has no refresh action. Add opens a form for a new record; fields may be prefilled with page defaults.
+
+On Directories, the add buttons for categories, banks, and currencies use the default Medium button size.
 
 The Income page keeps Add enabled even if no active categories exist; it shows a notice to add a category instead. Future pages should make missing prerequisites clear and should not allow an action that cannot create a valid record.
 
@@ -86,8 +88,8 @@ Use the same header layout on every page and section:
 
 1. Use a full-width header row with the page or section title on the left and its available action buttons grouped on the right, vertically centered on the same row.
 2. Render page titles in bold 24 logical-pixel text. Use a consistent, visually subordinate heading size for sections while keeping the same alignment and action placement.
-3. Show only actions that apply to that page or section. When available, place `+ Добавить` before `↻ Обновить`; do not add an unavailable action or leave a placeholder button. If there are no actions, keep the title in its usual left position.
-4. Keep action buttons consistent in size; the recommended size is 140 × 40 logical pixels. If the available width is insufficient, move the action group to a second row aligned to the right rather than allowing it to overlap the title.
+3. Show only actions that apply to that page or section. When available, place `Добавить` before `↻ Обновить`; use a Plus icon instead of a textual plus for the Income header action. Do not add an unavailable action or leave a placeholder button. If there are no actions, keep the title in its usual left position.
+4. Keep action buttons consistent in size within their action group. The Income add action uses Large, and add actions on Directories use the default Medium size. If the available width is insufficient, move the action group to a second row aligned to the right rather than allowing it to overlap the title.
 
 ## Recommended Filter Pattern for Future Pages
 

@@ -19,7 +19,7 @@ use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IndexPath, Sizable as _, WindowExt as _,
+    ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _, WindowExt as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -1246,8 +1246,11 @@ impl Render for TransactionsPage {
         let add_button = Button::new("new-transaction")
             .primary()
             .label(match self.kind {
-                TransactionKind::Income => "+ Добавить доход",
-                TransactionKind::Expense => "+ Добавить расход",
+                TransactionKind::Income => "Добавить доход",
+                TransactionKind::Expense => "Добавить расход",
+            })
+            .when(matches!(self.kind, TransactionKind::Income), |button| {
+                button.large().icon(IconName::Plus)
             })
             .disabled(self.form.is_some())
             .on_click(cx.listener(|page, _, window, cx| page.open_form(None, window, cx)));

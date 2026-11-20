@@ -110,38 +110,57 @@ impl Render for AppShell {
 }
 
 pub fn run(database: Database, database_path: PathBuf) {
-    application().run(move |cx| {
-        init(cx);
-        let options = WindowOptions {
-            window_min_size: Some(size(px(1280.0), px(720.0))),
-            ..WindowOptions::default()
-        };
-        let database = Rc::new(database);
-        open_window(options, cx, move |window, cx| {
-            let income = cx.new(|cx| {
-                TransactionsPage::new(database.clone(), TransactionKind::Income, window, cx)
-            });
-            let expenses = cx.new(|cx| {
-                TransactionsPage::new(database.clone(), TransactionKind::Expense, window, cx)
-            });
-            let directories = cx.new(|cx| DirectoriesPage::new(database.clone(), cx));
-            let savings = cx.new(|cx| SavingsPage::new(database.clone(), window, cx));
-            let payment_documents =
-                cx.new(|cx| PaymentDocumentsPage::new(database.clone(), window, cx));
-            let analysis = cx.new(|cx| AnalysisPage::new(database.clone(), window, cx));
-            let settings =
-                cx.new(|cx| SettingsPage::new(database.clone(), database_path.clone(), window, cx));
-            cx.new(|_| AppShell {
-                active: PageTab::Income,
-                income,
-                expenses,
-                directories,
-                savings,
-                payment_documents,
-                analysis,
-                settings,
+    application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(move |cx| {
+            init(cx);
+            let options = WindowOptions {
+                window_min_size: Some(size(px(1280.0), px(720.0))),
+                ..WindowOptions::default()
+            };
+            let database = Rc::new(database);
+            open_window(options, cx, move |window, cx| {
+                let income = cx.new(|cx| {
+                    TransactionsPage::new(database.clone(), TransactionKind::Income, window, cx)
+                });
+                let expenses = cx.new(|cx| {
+                    TransactionsPage::new(database.clone(), TransactionKind::Expense, window, cx)
+                });
+                let directories = cx.new(|cx| DirectoriesPage::new(database.clone(), cx));
+                let savings = cx.new(|cx| SavingsPage::new(database.clone(), window, cx));
+                let payment_documents =
+                    cx.new(|cx| PaymentDocumentsPage::new(database.clone(), window, cx));
+                let analysis = cx.new(|cx| AnalysisPage::new(database.clone(), window, cx));
+                let settings = cx.new(|cx| {
+                    SettingsPage::new(database.clone(), database_path.clone(), window, cx)
+                });
+                cx.new(|_| AppShell {
+                    active: PageTab::Income,
+                    income,
+                    expenses,
+                    directories,
+                    savings,
+                    payment_documents,
+                    analysis,
+                    settings,
+                })
             })
-        })
-        .expect("не удалось открыть окно");
-    });
+            .expect("не удалось открыть окно");
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::assets::{Assets, IconName};
+    use gpui_kit::AssetSource;
+
+    #[test]
+    fn bundled_plus_icon_is_available() {
+        let icon_path = IconName::Plus.path();
+        let icon = Assets
+            .load(icon_path.as_ref())
+            .expect("ошибка чтения встроенного значка Plus");
+
+        assert!(icon.is_some(), "встроенный значок Plus отсутствует");
+    }
 }
