@@ -12,18 +12,22 @@ use finance_core::{
 };
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::calendar::Date;
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, IndexPath, WindowExt as _};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, IndexPath, Sizable as _, WindowExt as _,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
 use super::support::category_tree_labels;
 use super::support::{comment_suggestions, DIVISION_ROUNDING_WARNING};
-use super::support::{set_period_dates, DatePeriod};
+use super::support::{date_period_range, DatePeriod, DatePeriodRange};
 
 const DATE_FORMAT: &str = "%Y-%m-%d";
 const ROW_HEIGHT: f32 = 40.0;
@@ -41,14 +45,21 @@ fn choice(
     cx.new(|cx| SelectState::new(items, Some(IndexPath::default().row(selected)), window, cx))
 }
 
-fn parse_optional_date(value: &str) -> Result<Option<NaiveDate>, String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Ok(None);
+fn selected_date(state: &DatePickerState) -> Option<NaiveDate> {
+    match state.date() {
+        Date::Single(date) => date,
+        Date::Range(_, _) => None,
     }
-    NaiveDate::parse_from_str(value, DATE_FORMAT)
-        .map(Some)
-        .map_err(|_| "Введите дату фильтра в формате ГГГГ-ММ-ДД".to_owned())
+}
+
+fn period_dates(
+    period: DatePeriod,
+    today: NaiveDate,
+) -> Option<(Option<NaiveDate>, Option<NaiveDate>)> {
+    date_period_range(period, today).map(|range| match range {
+        DatePeriodRange::Unbounded => (None, None),
+        DatePeriodRange::Bounded(from, to) => (Some(from), Some(to)),
+    })
 }
 
 fn card_label(card: &PaymentDocument) -> String {
@@ -103,8 +114,8 @@ pub(crate) struct TransactionsPage {
     balance_period: Option<(Option<NaiveDate>, Option<NaiveDate>)>,
     message: Option<(String, bool)>,
     search: Entity<InputState>,
-    from: Entity<InputState>,
-    to: Entity<InputState>,
+    from: Entity<DatePickerState>,
+    to: Entity<DatePickerState>,
     category_filter: Option<i64>,
     category_filter_ids: Vec<i64>,
     category_filter_select: Choice,
@@ -123,22 +134,27 @@ impl TransactionsPage {
         cx: &mut Context<Self>,
     ) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Поиск"));
-        let from = cx.new(|cx| InputState::new(window, cx).placeholder("С: ГГГГ-ММ-ДД"));
-        let to = cx.new(|cx| InputState::new(window, cx).placeholder("По: ГГГГ-ММ-ДД"));
+        let from = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
+        let to = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
         let category_filter_select = choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
         let currency_filter_select = choice(Self::currency_filter_labels(), 0, window, cx);
         let period_select = choice(Self::period_labels(), 0, window, cx);
 
         let mut subscriptions = Vec::new();
-        for input in [&search, &from, &to] {
+        subscriptions.push(cx.subscribe_in(
+            &search,
+            window,
+            |this: &mut Self, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.refresh(cx);
+                }
+            },
+        ));
+        for date_picker in [&from, &to] {
             subscriptions.push(cx.subscribe_in(
-                input,
+                date_picker,
                 window,
-                |this: &mut Self, _, event: &InputEvent, _, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
-                        this.refresh(cx);
-                    }
-                },
+                |_, _, _: &DatePickerEvent, _, cx| cx.notify(),
             ));
         }
         subscriptions.push(cx.subscribe_in(
@@ -267,16 +283,9 @@ impl TransactionsPage {
 
     /// Загружает операции и сальдо по текущим фильтрам; ошибки показываются, а не маскируются.
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
-        let from = self.from.read(cx).value().to_string();
-        let to = self.to.read(cx).value().to_string();
+        let from = selected_date(self.from.read(cx));
+        let to = selected_date(self.to.read(cx));
         let search = self.search.read(cx).value().to_string();
-        let (from, to) = match (parse_optional_date(&from), parse_optional_date(&to)) {
-            (Ok(from), Ok(to)) => (from, to),
-            (Err(message), _) | (_, Err(message)) => {
-                self.error(message, cx);
-                return;
-            }
-        };
         if matches!((from, to), (Some(start), Some(end)) if start > end) {
             self.error("Начало периода не может быть позже окончания", cx);
             return;
@@ -323,29 +332,32 @@ impl TransactionsPage {
     }
 
     fn apply_period(&mut self, period: DatePeriod, window: &mut Window, cx: &mut Context<Self>) {
-        let mut from = self.from.read(cx).value().to_string();
-        let mut to = self.to.read(cx).value().to_string();
-        if !set_period_dates(period, Local::now().date_naive(), &mut from, &mut to) {
+        let Some((from, to)) = period_dates(period, Local::now().date_naive()) else {
             return;
-        }
-        self.from
-            .update(cx, |input, cx| input.set_value(from, window, cx));
+        };
+        self.from.update(cx, |state, cx| {
+            state.set_date(Date::Single(from), window, cx)
+        });
         self.to
-            .update(cx, |input, cx| input.set_value(to, window, cx));
+            .update(cx, |state, cx| state.set_date(Date::Single(to), window, cx));
         self.refresh(cx);
     }
 
     fn has_active_filters(&self, cx: &App) -> bool {
         !self.search.read(cx).value().is_empty()
-            || !self.from.read(cx).value().is_empty()
-            || !self.to.read(cx).value().is_empty()
+            || selected_date(self.from.read(cx)).is_some()
+            || selected_date(self.to.read(cx)).is_some()
             || self.category_filter.is_some()
             || self.currency_filter.is_some()
     }
 
     fn reset_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for input in [&self.search, &self.from, &self.to] {
-            input.update(cx, |input, cx| input.set_value("", window, cx));
+        self.search
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        for date_picker in [&self.from, &self.to] {
+            date_picker.update(cx, |state, cx| {
+                state.set_date(Date::Single(None), window, cx)
+            });
         }
         self.category_filter = None;
         self.currency_filter = None;
@@ -702,8 +714,16 @@ impl TransactionsPage {
                     .w(px(140.0))
                     .child(Select::new(&self.period_select).placeholder("Период")),
             )
-            .child(div().w(px(150.0)).child(Input::new(&self.from)))
-            .child(div().w(px(150.0)).child(Input::new(&self.to)))
+            .child(
+                div()
+                    .w(px(150.0))
+                    .child(DatePicker::new(&self.from).placeholder("С").small()),
+            )
+            .child(
+                div()
+                    .w(px(150.0))
+                    .child(DatePicker::new(&self.to).placeholder("По").small()),
+            )
             .child(
                 div()
                     .w(px(260.0))

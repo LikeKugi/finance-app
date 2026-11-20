@@ -64,6 +64,7 @@ pub(crate) fn date_period_range(period: DatePeriod, today: NaiveDate) -> Option<
     }
 }
 
+#[cfg(test)]
 pub(crate) fn set_period_dates(
     period: DatePeriod,
     today: NaiveDate,

@@ -17,7 +17,7 @@ On Savings, refresh also reloads the bank list and returns the results table to 
 
 ## Current Filter Behavior
 
-Shared date pickers retain previous/next-month arrow navigation and also let users choose a month and edit the year separately. Changing the displayed month or year does not change the date value until a day is selected; each page still applies that value according to its filter behavior below.
+Shared compact DatePicker controls retain previous/next-month arrow navigation and also let users choose a month and edit the year separately. Changing the displayed month or year does not change the date value until a day is selected; each page still applies that value according to its filter behavior below.
 
 ### Income and Expenses
 
@@ -28,11 +28,11 @@ Shared date pickers retain previous/next-month arrow navigation and also let use
 - Filter groups and wrapped rows have a small, consistent gap for visual separation.
 - `Применить` and `Сбросить фильтры` remain aligned to the right of the final filter row, moving to the bottom-right row when needed.
 - Search text and date edits do not reload the list on their own. Use `Применить` to apply them.
-- The `Период` selector defaults to `Весь период`. Selecting it clears both date fields; selecting year, quarter, month, week (Monday through Sunday), or day fills both fields using the current local calendar, with inclusive boundaries. Users can edit either date afterward. Use `Применить` to apply the selected range.
+- The date filters use compact DatePicker controls. The `Период` selector defaults to `Весь период`. Selecting it clears both dates; selecting year, quarter, month, week (Monday through Sunday), or day fills both controls using the current local calendar, with inclusive boundaries. Users can choose either date afterward. Use `Применить` to apply the selected range.
 - Selecting a category or currency immediately reloads the list, unlike editing search or date fields. The currency options are `Все`, `RUB`, and `USD`.
 - Each populated filter, including currency, has an `×` control. Clearing a filter immediately reloads the list using the other values currently in the controls, including values that were edited but not yet applied.
 - `Сбросить фильтры` clears all filters, returns the period selector to `Весь период`, and reloads the list. It is disabled when no filters are active.
-- Date boundaries are inclusive. Invalid dates or a start date later than the end date are reported as errors; the existing results are not replaced with an empty list.
+- Date boundaries are inclusive. A start date later than the end date is reported as an error; the existing results are not replaced with an empty list. Dates are selected through the calendar rather than entered as free-form text.
 - Applying filters updates the table and its totals. When no transactions match, the current page shows no data rows but has no dedicated filtered-empty-state message; future pages should provide one.
 
 ### Income and Expenses Comment Suggestions
@@ -56,10 +56,10 @@ Shared date pickers retain previous/next-month arrow navigation and also let use
 - Filter groups and wrapped rows have a small, consistent gap for visual separation.
 - `Применить` and `Сбросить фильтры` remain aligned to the right of the final filter row, moving to the bottom-right row when needed.
 - Date and category edits remain pending until `Применить` is clicked. The report continues to reflect the last applied filter set.
-- The `Период` selector defaults to `Весь период`. Selecting it clears both date fields; selecting year, quarter, month, week (Monday through Sunday), or day fills both fields using the current local calendar, with inclusive boundaries. Users can edit either date afterward. Date edits and period selection remain pending until `Применить` is clicked.
+- The date filters use compact DatePicker controls. The `Период` selector defaults to `Весь период`. Selecting it clears both dates; selecting year, quarter, month, week (Monday through Sunday), or day fills both controls using the current local calendar, with inclusive boundaries. Users can choose either date afterward. Date changes and period selection remain pending until `Применить` is clicked.
 - Each of the four filters has an `×` control. Clearing one immediately applies the other values currently in the controls, including edits that were not yet applied.
 - `Сбросить фильтры` clears all filters, returns the period selector to `Весь период`, and immediately reloads the report without conditions; it is disabled when no filters are active.
-- Invalid dates or a start date later than the end date are reported without replacing the displayed report with an empty result.
+- A start date later than the end date is reported without replacing the displayed report with an empty result. Dates are selected through the calendar rather than entered as free-form text.
 - The page refresh action reloads the categories and applies the values currently in the controls.
 
 ### Savings

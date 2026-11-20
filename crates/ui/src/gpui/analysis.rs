@@ -12,9 +12,10 @@ use finance_core::{
 };
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::calendar::Date;
+use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, IndexPath};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, IndexPath, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_decimal::prelude::ToPrimitive;
@@ -35,8 +36,8 @@ type Choice = Entity<SelectState<Vec<SharedString>>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AnalysisFilters {
-    from: String,
-    to: String,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
     income_category_id: Option<i64>,
     expense_category_id: Option<i64>,
 }
@@ -50,8 +51,8 @@ struct ParsedFilters {
 }
 
 fn parse_filters(filters: &AnalysisFilters) -> Result<ParsedFilters, String> {
-    let from = parse_optional_date(&filters.from, "начала")?;
-    let to = parse_optional_date(&filters.to, "окончания")?;
+    let from = filters.from;
+    let to = filters.to;
     if matches!((from, to), (Some(from), Some(to)) if from > to) {
         return Err("Начало периода не может быть позже его окончания".to_owned());
     }
@@ -63,13 +64,11 @@ fn parse_filters(filters: &AnalysisFilters) -> Result<ParsedFilters, String> {
     })
 }
 
-fn parse_optional_date(value: &str, field_name: &str) -> Result<Option<NaiveDate>, String> {
-    if value.is_empty() {
-        return Ok(None);
+fn selected_date(state: &DatePickerState) -> Option<NaiveDate> {
+    match state.date() {
+        Date::Single(date) => date,
+        Date::Range(_, _) => None,
     }
-    NaiveDate::parse_from_str(value, DATE_FORMAT)
-        .map(Some)
-        .map_err(|_| format!("Введите дату {field_name} периода в формате ГГГГ-ММ-ДД"))
 }
 
 /// Состояние запросов: номер поколения защищает от записи устаревших результатов.
@@ -255,8 +254,8 @@ impl CategoryPicker {
 pub(crate) struct AnalysisPage {
     database: Rc<Database>,
     database_path: Result<PathBuf, String>,
-    from: Entity<InputState>,
-    to: Entity<InputState>,
+    from: Entity<DatePickerState>,
+    to: Entity<DatePickerState>,
     period_select: Choice,
     income: CategoryPicker,
     expense: CategoryPicker,
@@ -276,8 +275,8 @@ impl AnalysisPage {
             Some(path) if !path.is_empty() => Ok(PathBuf::from(path)),
             _ => Err("Для анализа требуется путь к локальной базе данных.".to_owned()),
         };
-        let from = cx.new(|cx| InputState::new(window, cx).placeholder("С: ГГГГ-ММ-ДД"));
-        let to = cx.new(|cx| InputState::new(window, cx).placeholder("По: ГГГГ-ММ-ДД"));
+        let from = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
+        let to = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
         let period_labels = super::support::DatePeriod::ALL
             .into_iter()
             .map(|(_, name)| name.to_owned())
@@ -287,15 +286,11 @@ impl AnalysisPage {
         let expense_select = choice(vec![NONE_LABEL.to_owned()], window, cx);
 
         let mut subscriptions = Vec::new();
-        for input in [&from, &to] {
+        for date_picker in [&from, &to] {
             subscriptions.push(cx.subscribe_in(
-                input,
+                date_picker,
                 window,
-                |this: &mut Self, _, event: &InputEvent, _, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
-                        this.apply_pending_filters(cx);
-                    }
-                },
+                |_, _, _: &DatePickerEvent, _, cx| cx.notify(),
             ));
         }
         subscriptions.push(cx.subscribe_in(
@@ -394,8 +389,8 @@ impl AnalysisPage {
 
     fn filters(&self, cx: &App) -> AnalysisFilters {
         AnalysisFilters {
-            from: self.from.read(cx).value().trim().to_owned(),
-            to: self.to.read(cx).value().trim().to_owned(),
+            from: selected_date(self.from.read(cx)),
+            to: selected_date(self.to.read(cx)),
             income_category_id: self.income.selected,
             expense_category_id: self.expense.selected,
         }
@@ -403,8 +398,8 @@ impl AnalysisPage {
 
     fn has_active_filters(&self, cx: &App) -> bool {
         let filters = self.filters(cx);
-        !filters.from.is_empty()
-            || !filters.to.is_empty()
+        filters.from.is_some()
+            || filters.to.is_some()
             || filters.income_category_id.is_some()
             || filters.expense_category_id.is_some()
     }
@@ -415,16 +410,19 @@ impl AnalysisPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut from = self.from.read(cx).value().to_string();
-        let mut to = self.to.read(cx).value().to_string();
-        if !super::support::set_period_dates(period, Local::now().date_naive(), &mut from, &mut to)
-        {
+        let Some(range) = super::support::date_period_range(period, Local::now().date_naive())
+        else {
             return;
-        }
-        self.from
-            .update(cx, |input, cx| input.set_value(from, window, cx));
+        };
+        let (from, to) = match range {
+            super::support::DatePeriodRange::Unbounded => (None, None),
+            super::support::DatePeriodRange::Bounded(from, to) => (Some(from), Some(to)),
+        };
+        self.from.update(cx, |state, cx| {
+            state.set_date(Date::Single(from), window, cx)
+        });
         self.to
-            .update(cx, |input, cx| input.set_value(to, window, cx));
+            .update(cx, |state, cx| state.set_date(Date::Single(to), window, cx));
         cx.notify();
     }
 
@@ -479,8 +477,10 @@ impl AnalysisPage {
     }
 
     fn reset_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for input in [&self.from, &self.to] {
-            input.update(cx, |input, cx| input.set_value("", window, cx));
+        for date_picker in [&self.from, &self.to] {
+            date_picker.update(cx, |state, cx| {
+                state.set_date(Date::Single(None), window, cx)
+            });
         }
         self.period_select.update(cx, |state, cx| {
             state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
@@ -495,8 +495,10 @@ impl AnalysisPage {
     }
 
     fn clear_date(&mut self, to: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let input = if to { &self.to } else { &self.from };
-        input.update(cx, |input, cx| input.set_value("", window, cx));
+        let date_picker = if to { &self.to } else { &self.from };
+        date_picker.update(cx, |state, cx| {
+            state.set_date(Date::Single(None), window, cx)
+        });
         self.apply_pending_filters(cx);
     }
 
@@ -532,8 +534,8 @@ impl AnalysisPage {
 
     fn render_filters(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.has_active_filters(cx);
-        let from_set = !self.from.read(cx).value().trim().is_empty();
-        let to_set = !self.to.read(cx).value().trim().is_empty();
+        let from_set = selected_date(self.from.read(cx)).is_some();
+        let to_set = selected_date(self.to.read(cx)).is_some();
         let income_set = self.income.selected.is_some();
         let expense_set = self.expense.selected.is_some();
         let labeled = |text: &'static str| div().child(text);
@@ -549,7 +551,13 @@ impl AnalysisPage {
                     .child(Select::new(&self.period_select).placeholder("Выбрать")),
             )
             .child(labeled("Период с"))
-            .child(div().w(px(140.0)).child(Input::new(&self.from)))
+            .child(
+                div().w(px(140.0)).child(
+                    DatePicker::new(&self.from)
+                        .placeholder("Выбрать дату")
+                        .small(),
+                ),
+            )
             .child(Self::clear_button(
                 "analysis-clear-from",
                 from_set,
@@ -558,7 +566,13 @@ impl AnalysisPage {
                 |page, window, cx| page.clear_date(false, window, cx),
             ))
             .child(labeled("по"))
-            .child(div().w(px(140.0)).child(Input::new(&self.to)))
+            .child(
+                div().w(px(140.0)).child(
+                    DatePicker::new(&self.to)
+                        .placeholder("Выбрать дату")
+                        .small(),
+                ),
+            )
             .child(Self::clear_button(
                 "analysis-clear-to",
                 to_set,
@@ -935,8 +949,14 @@ mod tests {
 
     fn filters(from: &str, to: &str, income: Option<i64>, expense: Option<i64>) -> AnalysisFilters {
         AnalysisFilters {
-            from: from.to_owned(),
-            to: to.to_owned(),
+            from: (!from.is_empty()).then(|| {
+                NaiveDate::parse_from_str(from, super::DATE_FORMAT)
+                    .expect("test date should use the supported format")
+            }),
+            to: (!to.is_empty()).then(|| {
+                NaiveDate::parse_from_str(to, super::DATE_FORMAT)
+                    .expect("test date should use the supported format")
+            }),
             income_category_id: income,
             expense_category_id: expense,
         }
@@ -1049,18 +1069,6 @@ mod tests {
         assert_eq!(parsed.to, None);
         assert_eq!(parsed.income_category_id, Some(3));
         assert_eq!(parsed.expense_category_id, None);
-    }
-
-    #[test]
-    fn analysis_filter_rejects_malformed_dates() {
-        assert_eq!(
-            parse_filters(&filters("01.01.2027", "", None, None)),
-            Err("Введите дату начала периода в формате ГГГГ-ММ-ДД".to_owned())
-        );
-        assert_eq!(
-            parse_filters(&filters("", "вчера", None, None)),
-            Err("Введите дату окончания периода в формате ГГГГ-ММ-ДД".to_owned())
-        );
     }
 
     #[test]
