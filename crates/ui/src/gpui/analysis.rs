@@ -15,10 +15,13 @@ use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::calendar::Date;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
+use gpui_kit::component::dialog::Dialog;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{Column, ColumnSort, DataTable, TableDelegate, TableState};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _, WindowExt as _,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_decimal::prelude::ToPrimitive;
@@ -137,6 +140,7 @@ impl RequestTracker {
     }
 }
 
+#[derive(Clone)]
 struct PieChartSlice<'a> {
     category: &'a AnalysisCategoryTotal,
     share: f32,
@@ -1001,7 +1005,13 @@ impl AnalysisPage {
             .into_any_element()
     }
 
-    fn render_pie_charts(summary: &AnalysisSummary) -> impl IntoElement {
+    fn render_pie_charts(
+        &self,
+        summary: &AnalysisSummary,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        const LEGEND_VISIBLE_MAX: usize = 4;
         div().flex().gap_4().children(
             [TransactionKind::Income, TransactionKind::Expense]
                 .into_iter()
@@ -1045,30 +1055,109 @@ impl AnalysisPage {
                             .iter()
                             .map(|slice| (slice.category.category_id, slice.share))
                             .collect();
+                        let visible: Vec<_> =
+                            slices[..LEGEND_VISIBLE_MAX.min(slices.len())].to_vec();
+                        let hidden: Vec<_> =
+                            slices[LEGEND_VISIBLE_MAX.min(slices.len())..].to_vec();
+                        let legend_item = |slice: &PieChartSlice| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .size(px(12.0))
+                                        .flex_none()
+                                        .rounded_sm()
+                                        .bg(pie_chart_color(slice.category.category_id)),
+                                )
+                                .child(format!(
+                                    "{} — {}%",
+                                    slice.category.category_name,
+                                    slice.category.share_percent.round_dp(2)
+                                ))
+                        };
+                        // Соберём данные скрытых элементов как owned-значения для замыкания on_click.
+                        let hidden_data: Vec<(i64, String, f64)> = hidden
+                            .iter()
+                            .map(|slice| {
+                                (
+                                    slice.category.category_id,
+                                    slice.category.category_name.clone(),
+                                    slice.category.share_percent.to_f64().unwrap_or(0.0),
+                                )
+                            })
+                            .collect();
+                        let kind_title = kind.title().to_owned();
+                        let currency_code = currency.code().to_owned();
                         let legend = div()
                             .flex()
                             .flex_col()
                             .gap_1()
                             .min_w_0()
                             .child(div().font_weight(FontWeight::BOLD).child("Категории"))
-                            .children(slices.iter().map(|slice| {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .size(px(12.0))
-                                            .flex_none()
-                                            .rounded_sm()
-                                            .bg(pie_chart_color(slice.category.category_id)),
-                                    )
-                                    .child(format!(
-                                        "{} — {}%",
-                                        slice.category.category_name,
-                                        slice.category.share_percent.round_dp(2)
-                                    ))
-                            }));
+                            .children(visible.iter().map(legend_item))
+                            .when(!hidden_data.is_empty(), |legend| {
+                                let hidden = hidden_data.clone();
+                                let more_label = format!("Ещё {}…", hidden.len());
+                                let kind_t = kind_title.clone();
+                                let curr_c = currency_code.clone();
+                                legend.child(
+                                    div()
+                                        .id((
+                                            "legend-more",
+                                            (kind as usize) << 8 | currency as usize,
+                                        ))
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .cursor_pointer()
+                                        .text_color(cx.theme().accent_foreground)
+                                        .underline()
+                                        .child(more_label)
+                                        .on_click(move |_, window, cx| {
+                                            let hidden = hidden.clone();
+                                            let kind_t = kind_t.clone();
+                                            let curr_c = curr_c.clone();
+                                            window.open_dialog(cx, move |dialog: Dialog, _, _| {
+                                                let items: Vec<_> = hidden
+                                                    .iter()
+                                                    .map(|(cat_id, name, share)| {
+                                                        div()
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap_2()
+                                                            .child(
+                                                                div()
+                                                                    .size(px(12.0))
+                                                                    .flex_none()
+                                                                    .rounded_sm()
+                                                                    .bg(pie_chart_color(*cat_id)),
+                                                            )
+                                                            .child(format!(
+                                                                "{} — {:.2}%",
+                                                                name, share
+                                                            ))
+                                                            .into_any_element()
+                                                    })
+                                                    .collect();
+                                                dialog
+                                                    .title(format!(
+                                                        "Категории — {}, {}",
+                                                        kind_t, curr_c
+                                                    ))
+                                                    .centered()
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap_1()
+                                                            .children(items),
+                                                    )
+                                            });
+                                        }),
+                                )
+                            });
                         column = column.child(
                             div().flex().flex_col().gap_1().child(heading).child(
                                 div()
@@ -1084,7 +1173,7 @@ impl AnalysisPage {
         )
     }
 
-    fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_footer(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let border = cx.theme().border;
         let danger = cx.theme().danger;
         let notes = div()
@@ -1108,14 +1197,14 @@ impl AnalysisPage {
             .when_some(self.tracker.current_report(), |footer, summary| {
                 footer
                     .child(render_balance_summary(summary, danger))
-                    .child(Self::render_pie_charts(summary))
+                    .child(self.render_pie_charts(summary, window, cx))
             })
             .child(notes)
     }
 }
 
 impl Render for AnalysisPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let danger = cx.theme().danger;
         let border = cx.theme().border;
         let mut root = div().size_full().flex().flex_col().gap_2().p_3();
@@ -1165,7 +1254,7 @@ impl Render for AnalysisPage {
         } else {
             div().flex_1().into_any_element()
         };
-        root.child(body).child(self.render_footer(cx))
+        root.child(body).child(self.render_footer(window, cx))
     }
 }
 
