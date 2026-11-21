@@ -8,8 +8,8 @@ use std::rc::Rc;
 use chrono::{Local, NaiveDate};
 use finance_core::{
     parse_amount_expression, summarize_transaction_balance, Bank, Category, Currency,
-    CurrencyDefinition, FinancialTransaction, PaymentCardType, PaymentDocument, TransactionBalance,
-    TransactionKind,
+    CurrencyDefinition, ExpensePlace, FinancialTransaction, PaymentCardType, PaymentDocument,
+    TransactionBalance, TransactionKind,
 };
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -103,6 +103,10 @@ fn cards_for_bank(cards: &[PaymentDocument], bank_id: Option<i64>) -> Vec<&Payme
         .collect()
 }
 
+fn expense_place_label(place: &ExpensePlace) -> String {
+    format!("{} · #{}", place.name, place.id)
+}
+
 fn update_bank_filter_selection(
     bank_filter: &mut Option<i64>,
     card_filter: &mut Option<i64>,
@@ -126,6 +130,9 @@ struct Form {
     category_ids: Vec<i64>,
     category_id: Option<i64>,
     category_select: Choice,
+    expense_place_ids: Vec<Option<i64>>,
+    expense_place_id: Option<i64>,
+    expense_place_select: Choice,
     card_ids: Vec<Option<i64>>,
     card_id: Option<i64>,
     card_select: Choice,
@@ -142,6 +149,7 @@ struct FormValues {
     comment: String,
     currency: Option<Currency>,
     category_id: Option<i64>,
+    expense_place_id: Option<i64>,
     card_id: Option<i64>,
     affects_deposit_rate: bool,
 }
@@ -156,6 +164,7 @@ pub(crate) struct TransactionsPage {
     database: Rc<Database>,
     kind: TransactionKind,
     categories: Vec<Category>,
+    expense_places: Vec<ExpensePlace>,
     banks: Vec<Bank>,
     currencies: Vec<CurrencyDefinition>,
     cards: Vec<PaymentDocument>,
@@ -172,6 +181,9 @@ pub(crate) struct TransactionsPage {
     category_filter: Option<i64>,
     category_filter_ids: Vec<i64>,
     category_filter_select: Choice,
+    expense_place_filter: Option<i64>,
+    expense_place_filter_ids: Vec<i64>,
+    expense_place_filter_select: Choice,
     bank_filter: Option<i64>,
     bank_filter_ids: Vec<i64>,
     bank_filter_select: Choice,
@@ -197,6 +209,7 @@ impl TransactionsPage {
         let from = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
         let to = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
         let category_filter_select = choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
+        let expense_place_filter_select = choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
         let bank_filter_select = choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
         let card_filter_select = choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
         let currency_filter_select = choice(Self::currency_filter_labels(), 0, window, cx);
@@ -233,6 +246,23 @@ impl TransactionsPage {
                     })
                     .and_then(|position| position.checked_sub(1))
                     .and_then(|position| this.category_filter_ids.get(position).copied());
+                this.refresh(cx);
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
+            &expense_place_filter_select,
+            window,
+            |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                let SelectEvent::Confirm(value) = event;
+                this.expense_place_filter = value
+                    .as_ref()
+                    .and_then(|label| {
+                        this.expense_place_filter_labels()
+                            .iter()
+                            .position(|item| item == label.as_ref())
+                    })
+                    .and_then(|position| position.checked_sub(1))
+                    .and_then(|position| this.expense_place_filter_ids.get(position).copied());
                 this.refresh(cx);
             },
         ));
@@ -306,7 +336,7 @@ impl TransactionsPage {
         ));
 
         let widths = load_column_widths(&database, kind);
-        let table_delegate = TransactionsTable::new(cx.entity().downgrade(), widths);
+        let table_delegate = TransactionsTable::new(cx.entity().downgrade(), kind, widths);
         let table = cx.new(|cx| TableState::new(table_delegate, window, cx).col_movable(false));
         subscriptions.push(
             cx.subscribe(&table, |this: &mut Self, _, event: &TableEvent, cx| {
@@ -320,6 +350,7 @@ impl TransactionsPage {
             database,
             kind,
             categories: Vec::new(),
+            expense_places: Vec::new(),
             banks: Vec::new(),
             currencies: Vec::new(),
             cards: Vec::new(),
@@ -336,6 +367,9 @@ impl TransactionsPage {
             category_filter: None,
             category_filter_ids: Vec::new(),
             category_filter_select,
+            expense_place_filter: None,
+            expense_place_filter_ids: Vec::new(),
+            expense_place_filter_select,
             bank_filter: None,
             bank_filter_ids: Vec::new(),
             bank_filter_select,
@@ -384,6 +418,12 @@ impl TransactionsPage {
             .collect()
     }
 
+    fn expense_place_filter_labels(&self) -> Vec<String> {
+        std::iter::once(NONE_LABEL.to_owned())
+            .chain(self.expense_places.iter().map(expense_place_label))
+            .collect()
+    }
+
     fn bank_filter_labels(&self) -> Vec<String> {
         std::iter::once(NONE_LABEL.to_owned())
             .chain(self.banks.iter().map(|bank| bank.name.clone()))
@@ -403,6 +443,7 @@ impl TransactionsPage {
     fn save_column_widths(&mut self, widths: &[Pixels], cx: &mut Context<Self>) {
         let widths = column_widths_with_fixed_actions(
             widths.iter().map(|width| f32::from(*width)).collect(),
+            self.kind,
         );
         self.table
             .update(cx, |table, _| table.delegate_mut().set_widths(&widths));
@@ -454,8 +495,16 @@ impl TransactionsPage {
                 return false;
             }
         };
+        let expense_places = match finance_db::list_expense_places(&self.database) {
+            Ok(places) => places,
+            Err(error) => {
+                self.error(error.to_string(), cx);
+                return false;
+            }
+        };
         self.banks = banks;
         self.filter_cards = cards;
+        self.expense_places = expense_places;
         if self
             .bank_filter
             .is_some_and(|bank_id| !self.banks.iter().any(|bank| bank.id == bank_id))
@@ -470,8 +519,36 @@ impl TransactionsPage {
         }) {
             self.card_filter = None;
         }
+        if self
+            .expense_place_filter
+            .is_some_and(|place_id| !self.expense_places.iter().any(|place| place.id == place_id))
+        {
+            self.expense_place_filter = None;
+        }
 
         self.bank_filter_ids = self.banks.iter().map(|bank| bank.id).collect();
+        self.expense_place_filter_ids = self.expense_places.iter().map(|place| place.id).collect();
+        let selected_place_index = self
+            .expense_place_filter
+            .and_then(|place_id| {
+                self.expense_place_filter_ids
+                    .iter()
+                    .position(|candidate| *candidate == place_id)
+            })
+            .map_or(0, |position| position + 1);
+        let expense_place_items: Vec<SharedString> = self
+            .expense_place_filter_labels()
+            .into_iter()
+            .map(SharedString::from)
+            .collect();
+        self.expense_place_filter_select.update(cx, |state, cx| {
+            state.set_items(expense_place_items, window, cx);
+            state.set_selected_index(
+                Some(IndexPath::default().row(selected_place_index)),
+                window,
+                cx,
+            );
+        });
         let bank_items: Vec<SharedString> = self
             .bank_filter_labels()
             .into_iter()
@@ -548,7 +625,7 @@ impl TransactionsPage {
                 return;
             }
         }
-        match finance_db::list_transactions_filtered(
+        match finance_db::list_transactions_filtered_by_place(
             &self.database,
             self.kind,
             from,
@@ -558,6 +635,7 @@ impl TransactionsPage {
             &search,
             self.bank_filter,
             self.card_filter,
+            self.expense_place_filter,
         ) {
             Ok(transactions) => {
                 self.table.update(cx, |table, cx| {
@@ -604,6 +682,7 @@ impl TransactionsPage {
             || selected_date(self.from.read(cx)).is_some()
             || selected_date(self.to.read(cx)).is_some()
             || self.category_filter.is_some()
+            || self.expense_place_filter.is_some()
             || self.bank_filter.is_some()
             || self.card_filter.is_some()
             || self.currency_filter.is_some()
@@ -618,12 +697,14 @@ impl TransactionsPage {
             });
         }
         self.category_filter = None;
+        self.expense_place_filter = None;
         self.bank_filter = None;
         self.card_filter = None;
         self.currency_filter = None;
         self.sync_card_filter_options(window, cx);
         for select in [
             &self.category_filter_select,
+            &self.expense_place_filter_select,
             &self.bank_filter_select,
             &self.card_filter_select,
             &self.currency_filter_select,
@@ -675,7 +756,7 @@ impl TransactionsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.load_form_sources(cx) {
+        if !self.reload_filter_sources(window, cx) || !self.load_form_sources(cx) {
             return;
         }
         self.message = None;
@@ -689,6 +770,7 @@ impl TransactionsPage {
                 .map(|category| category.id)
         });
         let card_id = existing.and_then(|t| t.payment_document_id);
+        let expense_place_id = existing.and_then(|t| t.expense_place_id);
         let date =
             existing.map_or_else(|| Local::now().date_naive(), |transaction| transaction.date);
         let initial_values = FormValues {
@@ -697,6 +779,7 @@ impl TransactionsPage {
             comment: existing.map_or_else(String::new, |transaction| transaction.comment.clone()),
             currency,
             category_id,
+            expense_place_id,
             card_id,
             affects_deposit_rate: existing.is_some_and(|t| t.affects_deposit_rate),
         };
@@ -736,6 +819,17 @@ impl TransactionsPage {
         );
         let category_select = choice(Vec::new(), 0, window, cx);
         let card_select = choice(Vec::new(), 0, window, cx);
+        let expense_place_ids: Vec<Option<i64>> = std::iter::once(None)
+            .chain(self.expense_places.iter().map(|place| Some(place.id)))
+            .collect();
+        let expense_place_items = std::iter::once("Не указано".to_owned())
+            .chain(self.expense_places.iter().map(expense_place_label))
+            .collect();
+        let selected_place_index = expense_place_ids
+            .iter()
+            .position(|id| *id == expense_place_id)
+            .unwrap_or(0);
+        let expense_place_select = choice(expense_place_items, selected_place_index, window, cx);
 
         let subs = [
             cx.subscribe_in(&amount_input, window, |_, _, event: &InputEvent, _, cx| {
@@ -790,6 +884,24 @@ impl TransactionsPage {
                 },
             ),
             cx.subscribe_in(
+                &expense_place_select,
+                window,
+                |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                    let SelectEvent::Confirm(value) = event;
+                    if let (Some(form), Some(label)) = (this.form.as_mut(), value) {
+                        let labels: Vec<String> = std::iter::once("Не указано".to_owned())
+                            .chain(this.expense_places.iter().map(expense_place_label))
+                            .collect();
+                        form.expense_place_id = labels
+                            .iter()
+                            .position(|item| item == label.as_ref())
+                            .and_then(|position| form.expense_place_ids.get(position).copied())
+                            .flatten();
+                    }
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
                 &card_select,
                 window,
                 |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
@@ -823,6 +935,9 @@ impl TransactionsPage {
             category_ids: Vec::new(),
             category_id,
             category_select,
+            expense_place_ids,
+            expense_place_id,
+            expense_place_select,
             card_ids: Vec::new(),
             card_id,
             card_select,
@@ -914,6 +1029,7 @@ impl TransactionsPage {
                 comment: form.comment.read(cx).value().to_string(),
                 currency: form.currency,
                 category_id: form.category_id,
+                expense_place_id: form.expense_place_id,
                 card_id: form.card_id,
                 affects_deposit_rate: form.affects_deposit_rate,
             };
@@ -1013,7 +1129,7 @@ impl TransactionsPage {
             self.error("Выберите валюту", cx);
             return false;
         };
-        let result = finance_db::save_transaction_with_card_and_rate_effect(
+        let result = finance_db::save_transaction_with_card_and_rate_effect_and_place(
             &self.database,
             self.kind,
             form.id,
@@ -1024,6 +1140,7 @@ impl TransactionsPage {
             &comment,
             form.card_id,
             form.affects_deposit_rate,
+            form.expense_place_id,
         );
         match result {
             Ok(_) => {
@@ -1163,7 +1280,17 @@ impl TransactionsPage {
                             .placeholder("Валюта")
                             .small()
                             .into_any_element(),
-                    )),
+                    ))
+                    .when(self.kind == TransactionKind::Expense, |filters| {
+                        filters.child(filter(
+                            "Место траты",
+                            220.0,
+                            Select::new(&self.expense_place_filter_select)
+                                .placeholder("Место траты")
+                                .small()
+                                .into_any_element(),
+                        ))
+                    }),
             )
             .child(
                 div()
@@ -1244,6 +1371,12 @@ impl TransactionsPage {
                 }
             }));
         }
+        let expense_place_field = field(
+            "Место траты",
+            Select::new(&form.expense_place_select)
+                .placeholder("Не указано")
+                .into_any_element(),
+        );
 
         let mut fields = div()
             .flex()
@@ -1280,7 +1413,10 @@ impl TransactionsPage {
                             .placeholder("Выберите категорию")
                             .into_any_element(),
                     )))
-                    .child(cell(card_field)),
+                    .child(cell(card_field))
+                    .when(kind == TransactionKind::Expense, |row| {
+                        row.child(cell(expense_place_field))
+                    }),
             );
         match kind {
             TransactionKind::Income => {
@@ -1470,7 +1606,7 @@ impl TransactionsPage {
     }
 }
 
-const COLUMN_TITLES: [&str; 6] = [
+const INCOME_COLUMN_TITLES: [&str; 6] = [
     "Дата",
     "Категория",
     "Сумма",
@@ -1478,15 +1614,67 @@ const COLUMN_TITLES: [&str; 6] = [
     "Комментарии",
     "Действия",
 ];
+const EXPENSE_COLUMN_TITLES: [&str; 7] = [
+    "Дата",
+    "Категория",
+    "Сумма",
+    "Валюта",
+    "Место траты",
+    "Комментарии",
+    "Действия",
+];
 const ACTIONS_COLUMN_WIDTH: f32 = 160.0;
-const DEFAULT_COLUMN_WIDTHS: [f32; 6] = [115.0, 220.0, 135.0, 90.0, 320.0, ACTIONS_COLUMN_WIDTH];
+const EXPENSE_PLACE_COLUMN_WIDTH: f32 = 180.0;
+const DEFAULT_INCOME_COLUMN_WIDTHS: [f32; 6] =
+    [115.0, 220.0, 135.0, 90.0, 320.0, ACTIONS_COLUMN_WIDTH];
+const DEFAULT_EXPENSE_COLUMN_WIDTHS: [f32; 7] = [
+    115.0,
+    220.0,
+    135.0,
+    90.0,
+    EXPENSE_PLACE_COLUMN_WIDTH,
+    320.0,
+    ACTIONS_COLUMN_WIDTH,
+];
 const MIN_COLUMN_WIDTH: f32 = 60.0;
 const MAX_COLUMN_WIDTH: f32 = 1200.0;
 const COL_DATE: usize = 0;
 const COL_CATEGORY: usize = 1;
 const COL_AMOUNT: usize = 2;
-const COL_COMMENT: usize = 4;
-const COL_ACTIONS: usize = 5;
+const COL_CURRENCY: usize = 3;
+const COL_INCOME_COMMENT: usize = 4;
+const COL_INCOME_ACTIONS: usize = 5;
+const COL_EXPENSE_PLACE: usize = 4;
+const COL_EXPENSE_COMMENT: usize = 5;
+const COL_EXPENSE_ACTIONS: usize = 6;
+
+fn column_titles(kind: TransactionKind) -> &'static [&'static str] {
+    match kind {
+        TransactionKind::Income => &INCOME_COLUMN_TITLES,
+        TransactionKind::Expense => &EXPENSE_COLUMN_TITLES,
+    }
+}
+
+fn actions_column(kind: TransactionKind) -> usize {
+    match kind {
+        TransactionKind::Income => COL_INCOME_ACTIONS,
+        TransactionKind::Expense => COL_EXPENSE_ACTIONS,
+    }
+}
+
+fn comment_column(kind: TransactionKind) -> usize {
+    match kind {
+        TransactionKind::Income => COL_INCOME_COMMENT,
+        TransactionKind::Expense => COL_EXPENSE_COMMENT,
+    }
+}
+
+fn default_column_widths(kind: TransactionKind) -> Vec<f32> {
+    match kind {
+        TransactionKind::Income => DEFAULT_INCOME_COLUMN_WIDTHS.to_vec(),
+        TransactionKind::Expense => DEFAULT_EXPENSE_COLUMN_WIDTHS.to_vec(),
+    }
+}
 
 fn column_widths_key(kind: TransactionKind) -> &'static str {
     match kind {
@@ -1504,39 +1692,53 @@ fn format_column_widths(widths: &[f32]) -> String {
 }
 
 /// Разбирает сохранённые ширины; повреждённое значение отклоняется целиком.
-fn parse_column_widths(value: &str) -> Option<Vec<f32>> {
-    let widths = value
+fn parse_column_widths(value: &str, kind: TransactionKind) -> Option<Vec<f32>> {
+    let mut widths = value
         .split(',')
         .map(|part| part.trim().parse::<f32>().ok())
         .collect::<Option<Vec<_>>>()?;
-    (widths.len() == COLUMN_TITLES.len()
-        && widths.iter().all(|width| {
-            width.is_finite() && (MIN_COLUMN_WIDTH..=MAX_COLUMN_WIDTH).contains(width)
-        }))
-    .then_some(widths)
+    let valid_widths = widths
+        .iter()
+        .all(|width| width.is_finite() && (MIN_COLUMN_WIDTH..=MAX_COLUMN_WIDTH).contains(width));
+    if !valid_widths {
+        return None;
+    }
+    match kind {
+        TransactionKind::Income if widths.len() == INCOME_COLUMN_TITLES.len() => Some(widths),
+        TransactionKind::Expense if widths.len() == EXPENSE_COLUMN_TITLES.len() => Some(widths),
+        TransactionKind::Expense if widths.len() == INCOME_COLUMN_TITLES.len() => {
+            let comment_width = widths[COL_INCOME_COMMENT];
+            let actions_width = widths[COL_INCOME_ACTIONS];
+            widths.insert(COL_EXPENSE_PLACE, EXPENSE_PLACE_COLUMN_WIDTH);
+            widths[COL_EXPENSE_COMMENT] = comment_width;
+            widths[COL_EXPENSE_ACTIONS] = actions_width;
+            Some(widths)
+        }
+        _ => None,
+    }
 }
 
 /// Ширины из БД или значения по умолчанию; ошибка чтения или формата логируется и не прерывает запуск.
 fn load_column_widths(database: &Database, kind: TransactionKind) -> Vec<f32> {
     match finance_db::get_app_setting(database, column_widths_key(kind)) {
-        Ok(Some(value)) => parse_column_widths(&value)
-            .map(column_widths_with_fixed_actions)
+        Ok(Some(value)) => parse_column_widths(&value, kind)
+            .map(|widths| column_widths_with_fixed_actions(widths, kind))
             .unwrap_or_else(|| {
                 eprintln!(
                     "Некорректная сохранённая ширина колонок; использованы значения по умолчанию"
                 );
-                DEFAULT_COLUMN_WIDTHS.to_vec()
+                default_column_widths(kind)
             }),
-        Ok(None) => DEFAULT_COLUMN_WIDTHS.to_vec(),
+        Ok(None) => default_column_widths(kind),
         Err(error) => {
             eprintln!("Не удалось прочитать ширину колонок: {error}");
-            DEFAULT_COLUMN_WIDTHS.to_vec()
+            default_column_widths(kind)
         }
     }
 }
 
-fn column_widths_with_fixed_actions(mut widths: Vec<f32>) -> Vec<f32> {
-    if let Some(width) = widths.get_mut(COL_ACTIONS) {
+fn column_widths_with_fixed_actions(mut widths: Vec<f32>, kind: TransactionKind) -> Vec<f32> {
+    if let Some(width) = widths.get_mut(actions_column(kind)) {
         *width = ACTIONS_COLUMN_WIDTH;
     }
     widths
@@ -1577,17 +1779,19 @@ fn sort_transactions(rows: &mut [FinancialTransaction], sort: Option<(usize, Col
 /// Делегат `DataTable` для доходов и расходов: хранит строки, ширины и сортировку.
 pub(crate) struct TransactionsTable {
     page: WeakEntity<TransactionsPage>,
+    kind: TransactionKind,
     rows: Vec<FinancialTransaction>,
     widths: Vec<f32>,
     sort: Option<(usize, ColumnSort)>,
 }
 
 impl TransactionsTable {
-    fn new(page: WeakEntity<TransactionsPage>, widths: Vec<f32>) -> Self {
+    fn new(page: WeakEntity<TransactionsPage>, kind: TransactionKind, widths: Vec<f32>) -> Self {
         Self {
             page,
+            kind,
             rows: Vec::new(),
-            widths: column_widths_with_fixed_actions(widths),
+            widths: column_widths_with_fixed_actions(widths, kind),
             sort: None,
         }
     }
@@ -1599,14 +1803,14 @@ impl TransactionsTable {
 
     fn set_widths(&mut self, widths: &[f32]) {
         if widths.len() == self.widths.len() {
-            self.widths = column_widths_with_fixed_actions(widths.to_vec());
+            self.widths = column_widths_with_fixed_actions(widths.to_vec(), self.kind);
         }
     }
 }
 
 impl TableDelegate for TransactionsTable {
     fn columns_count(&self, _: &App) -> usize {
-        COLUMN_TITLES.len()
+        column_titles(self.kind).len()
     }
 
     fn rows_count(&self, _: &App) -> usize {
@@ -1620,18 +1824,21 @@ impl TableDelegate for TransactionsTable {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let border = cx.theme().border;
+        let titles = column_titles(self.kind);
+        let actions_column = actions_column(self.kind);
         div()
             .w_full()
             .h_full()
-            .when(col_ix > COL_DATE && col_ix < COL_ACTIONS, |cell| {
+            .when(col_ix > COL_DATE && col_ix < actions_column, |cell| {
                 cell.border_l_1().border_color(border)
             })
-            .child(COLUMN_TITLES[col_ix])
+            .child(titles[col_ix])
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
-        let is_actions = col_ix == COL_ACTIONS;
-        let column = Column::new(COLUMN_TITLES[col_ix], COLUMN_TITLES[col_ix])
+        let is_actions = col_ix == actions_column(self.kind);
+        let titles = column_titles(self.kind);
+        let column = Column::new(titles[col_ix], titles[col_ix])
             .width(px(self.widths[col_ix]))
             .min_width(px(if is_actions {
                 ACTIONS_COLUMN_WIDTH
@@ -1715,10 +1922,22 @@ impl TableDelegate for TransactionsTable {
                 .text_right()
                 .child(transaction.amount.to_string())
                 .into_any_element(),
-            3 => div()
+            COL_CURRENCY => div()
                 .child(transaction.currency.code().to_owned())
                 .into_any_element(),
-            COL_COMMENT => {
+            COL_EXPENSE_PLACE if self.kind == TransactionKind::Expense => {
+                let place_name = transaction
+                    .expense_place_name
+                    .clone()
+                    .unwrap_or_else(|| "—".to_owned());
+                div()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(place_name)
+                    .into_any_element()
+            }
+            column if column == comment_column(self.kind) => {
                 let comment = transaction.comment.clone();
                 if comment.is_empty() {
                     div().into_any_element()
@@ -1746,7 +1965,7 @@ impl TableDelegate for TransactionsTable {
                         .into_any_element()
                 }
             }
-            COL_ACTIONS => {
+            column if column == actions_column(self.kind) => {
                 let edit_page = self.page.clone();
                 let delete_page = self.page.clone();
                 let edit_target = transaction.clone();
@@ -1782,10 +2001,11 @@ impl TableDelegate for TransactionsTable {
             _ => div().into_any_element(),
         };
         let border = cx.theme().border;
+        let actions_column = actions_column(self.kind);
         div()
             .w_full()
             .h_full()
-            .when(col_ix > COL_DATE && col_ix < COL_ACTIONS, |cell| {
+            .when(col_ix > COL_DATE && col_ix < actions_column, |cell| {
                 cell.border_l_1().border_color(border)
             })
             .child(content)
@@ -1883,11 +2103,13 @@ mod tests {
     use super::{
         card_label, cards_for_bank, column_widths_with_fixed_actions, comment_preview,
         format_column_widths, parse_column_widths, sort_transactions, update_bank_filter_selection,
-        FormValues, ACTIONS_COLUMN_WIDTH, COL_ACTIONS,
+        FormValues, ACTIONS_COLUMN_WIDTH, COL_INCOME_ACTIONS,
     };
     use chrono::NaiveDate;
     use finance_core::FinancialTransaction;
-    use finance_core::{Currency, PaymentCardType, PaymentDocument, PaymentSystem};
+    use finance_core::{
+        Currency, PaymentCardType, PaymentDocument, PaymentSystem, TransactionKind,
+    };
     use gpui_kit::component::table::ColumnSort;
     use rust_decimal::Decimal;
 
@@ -2000,6 +2222,7 @@ mod tests {
             comment: "Зарплата".to_owned(),
             currency: None,
             category_id: Some(1),
+            expense_place_id: None,
             card_id: None,
             affects_deposit_rate: false,
         };
@@ -2015,6 +2238,7 @@ mod tests {
             comment: "Зарплата".to_owned(),
             currency: None,
             category_id: Some(1),
+            expense_place_id: None,
             card_id: None,
             affects_deposit_rate: false,
         };
@@ -2024,8 +2248,35 @@ mod tests {
             comment: "Зарплата".to_owned(),
             currency: None,
             category_id: Some(1),
+            expense_place_id: None,
             card_id: None,
             affects_deposit_rate: false,
+        };
+
+        assert!(edited.changed_from(&initial));
+    }
+
+    #[test]
+    fn form_values_detect_a_changed_expense_place() {
+        let initial = FormValues {
+            date: None,
+            amount: "100".to_owned(),
+            comment: String::new(),
+            currency: None,
+            category_id: Some(1),
+            expense_place_id: Some(2),
+            card_id: None,
+            affects_deposit_rate: false,
+        };
+        let edited = FormValues {
+            date: initial.date,
+            amount: initial.amount.clone(),
+            comment: initial.comment.clone(),
+            currency: initial.currency,
+            category_id: initial.category_id,
+            expense_place_id: None,
+            card_id: initial.card_id,
+            affects_deposit_rate: initial.affects_deposit_rate,
         };
 
         assert!(edited.changed_from(&initial));
@@ -2039,6 +2290,7 @@ mod tests {
             comment: "Зарплата".to_owned(),
             currency: None,
             category_id: Some(1),
+            expense_place_id: None,
             card_id: None,
             affects_deposit_rate: false,
         };
@@ -2048,6 +2300,7 @@ mod tests {
             comment: "Зарплата".to_owned(),
             currency: None,
             category_id: Some(1),
+            expense_place_id: None,
             card_id: None,
             affects_deposit_rate: false,
         };
@@ -2063,6 +2316,7 @@ mod tests {
             comment: "Зарплата".to_owned(),
             currency: None,
             category_id: Some(1),
+            expense_place_id: None,
             card_id: None,
             affects_deposit_rate: false,
         };
@@ -2072,6 +2326,7 @@ mod tests {
             comment: "Зарплата".to_owned(),
             currency: None,
             category_id: Some(1),
+            expense_place_id: None,
             card_id: None,
             affects_deposit_rate: false,
         };
@@ -2116,6 +2371,8 @@ mod tests {
             amount: amount.parse().unwrap(),
             currency: Currency::Rub,
             comment: String::new(),
+            expense_place_id: None,
+            expense_place_name: None,
             payment_document_id: None,
             affects_deposit_rate: false,
             payment_document_balance_applied: false,
@@ -2158,21 +2415,49 @@ mod tests {
     fn column_widths_round_trip_and_reject_corrupt_values() {
         let widths = [100.0, 200.0, 130.0, 90.0, 300.0, 180.0];
         let text = format_column_widths(&widths);
-        assert_eq!(parse_column_widths(&text).as_deref(), Some(&widths[..]));
-        assert_eq!(parse_column_widths("1,2,3"), None);
-        assert_eq!(parse_column_widths("100,200,x,90,300,180"), None);
-        assert_eq!(parse_column_widths("100,200,130,90,300,5000"), None);
-        assert_eq!(parse_column_widths("100,200,130,90,300,NaN"), None);
+        assert_eq!(
+            parse_column_widths(&text, TransactionKind::Income).as_deref(),
+            Some(&widths[..])
+        );
+        assert_eq!(parse_column_widths("1,2,3", TransactionKind::Income), None);
+        assert_eq!(
+            parse_column_widths("100,200,x,90,300,180", TransactionKind::Income),
+            None
+        );
+        assert_eq!(
+            parse_column_widths("100,200,130,90,300,5000", TransactionKind::Income),
+            None
+        );
+        assert_eq!(
+            parse_column_widths("100,200,130,90,300,NaN", TransactionKind::Income),
+            None
+        );
+    }
+
+    #[test]
+    fn expense_column_widths_migrate_legacy_comment_width() {
+        let legacy_widths = [100.0, 200.0, 130.0, 90.0, 300.0, 180.0];
+        let migrated = parse_column_widths(
+            &format_column_widths(&legacy_widths),
+            TransactionKind::Expense,
+        )
+        .expect("legacy expense column widths should migrate");
+
+        assert_eq!(migrated, [100.0, 200.0, 130.0, 90.0, 180.0, 300.0, 180.0]);
     }
 
     #[test]
     fn action_column_uses_fixed_width_in_saved_settings() {
         let saved_widths = vec![100.0, 200.0, 130.0, 90.0, 300.0, 190.0];
         let persisted = format_column_widths(&saved_widths);
-        let parsed = parse_column_widths(&persisted).expect("valid saved widths");
-        let widths = column_widths_with_fixed_actions(parsed);
+        let parsed =
+            parse_column_widths(&persisted, TransactionKind::Income).expect("valid saved widths");
+        let widths = column_widths_with_fixed_actions(parsed, TransactionKind::Income);
 
-        assert_eq!(&widths[..COL_ACTIONS], &saved_widths[..COL_ACTIONS]);
-        assert_eq!(widths[COL_ACTIONS], ACTIONS_COLUMN_WIDTH);
+        assert_eq!(
+            &widths[..COL_INCOME_ACTIONS],
+            &saved_widths[..COL_INCOME_ACTIONS]
+        );
+        assert_eq!(widths[COL_INCOME_ACTIONS], ACTIONS_COLUMN_WIDTH);
     }
 }

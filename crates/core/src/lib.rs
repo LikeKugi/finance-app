@@ -205,6 +205,8 @@ pub struct FinancialTransaction {
     pub amount: Decimal,
     pub currency: Currency,
     pub comment: String,
+    pub expense_place_id: Option<i64>,
+    pub expense_place_name: Option<String>,
     pub payment_document_id: Option<i64>,
     pub affects_deposit_rate: bool,
     pub payment_document_balance_applied: bool,

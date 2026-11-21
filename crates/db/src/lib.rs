@@ -102,6 +102,8 @@ pub enum DbError {
     InvalidAmount,
     #[error("Категория не найдена или неактивна")]
     CategoryUnavailable,
+    #[error("Место траты не найдено")]
+    ExpensePlaceUnavailable,
     #[error("Запись используется и не может быть удалена")]
     EntityInUse,
     #[error("Перемещение категории создаёт цикл")]
@@ -775,6 +777,37 @@ pub fn list_transactions_filtered(
     bank_id: Option<i64>,
     payment_document_id: Option<i64>,
 ) -> Result<Vec<FinancialTransaction>, DbError> {
+    list_transactions_filtered_by_place(
+        connection,
+        kind,
+        from,
+        to,
+        category_id,
+        currency,
+        search,
+        bank_id,
+        payment_document_id,
+        None,
+    )
+}
+
+/// Returns transactions filtered by the existing criteria and, for expenses, their place.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Extends the established transaction-list filters without changing the existing API"
+)]
+pub fn list_transactions_filtered_by_place(
+    connection: &Connection,
+    kind: TransactionKind,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+    category_id: Option<i64>,
+    currency: Option<Currency>,
+    search: &str,
+    bank_id: Option<i64>,
+    payment_document_id: Option<i64>,
+    expense_place_id: Option<i64>,
+) -> Result<Vec<FinancialTransaction>, DbError> {
     let (table, categories) = transaction_tables(kind);
     let (card_column, rate_effect_column, balance_applied_column) = match kind {
         TransactionKind::Income => ("t.payment_document_id", "0", "0"),
@@ -784,10 +817,21 @@ pub fn list_transactions_filtered(
             "t.payment_document_balance_applied",
         ),
     };
+    let (place_id_column, place_name_column, place_join, place_filter) = match kind {
+        TransactionKind::Income => ("NULL", "NULL", "", "AND ?7 IS NULL"),
+        TransactionKind::Expense => (
+            "t.expense_place_id",
+            "expense_places.name",
+            "LEFT JOIN expense_places ON expense_places.id = t.expense_place_id",
+            "AND (?7 IS NULL OR t.expense_place_id = ?7)",
+        ),
+    };
     let sql = format!(
         "SELECT t.id, t.date, t.category_id, c.name, t.amount, t.currency, t.comment,
-                {card_column}, {rate_effect_column}, {balance_applied_column}
+                {place_id_column}, {place_name_column}, {card_column},
+                {rate_effect_column}, {balance_applied_column}
          FROM {table} t JOIN {categories} c ON c.id = t.category_id
+         {place_join}
          WHERE (?1 IS NULL OR t.date >= ?1)
            AND (?2 IS NULL OR t.date <= ?2)
            AND (?3 IS NULL OR t.category_id = ?3)
@@ -797,6 +841,7 @@ pub fn list_transactions_filtered(
                WHERE document.id = t.payment_document_id AND document.bank_id = ?5
            ))
            AND (?6 IS NULL OR t.payment_document_id = ?6)
+           {place_filter}
          ORDER BY t.date DESC, t.id DESC"
     );
     let from = from.map(|date| date.format("%Y-%m-%d").to_string());
@@ -811,7 +856,8 @@ pub fn list_transactions_filtered(
                 category_id,
                 currency,
                 bank_id,
-                payment_document_id
+                payment_document_id,
+                expense_place_id
             ],
             |row| {
                 let date_text = row.get::<_, String>(1)?;
@@ -834,9 +880,11 @@ pub fn list_transactions_filtered(
                     amount,
                     currency,
                     comment: row.get(6)?,
-                    payment_document_id: row.get(7)?,
-                    affects_deposit_rate: row.get(8)?,
-                    payment_document_balance_applied: row.get(9)?,
+                    expense_place_id: row.get(7)?,
+                    expense_place_name: row.get(8)?,
+                    payment_document_id: row.get(9)?,
+                    affects_deposit_rate: row.get(10)?,
+                    payment_document_balance_applied: row.get(11)?,
                 })
             },
         )?
@@ -1117,8 +1165,76 @@ pub fn save_transaction_with_card_and_rate_effect(
     payment_document_id: Option<i64>,
     affects_deposit_rate: bool,
 ) -> Result<i64, DbError> {
+    save_transaction_impl(
+        connection,
+        kind,
+        id,
+        date,
+        category_id,
+        amount,
+        currency,
+        comment,
+        payment_document_id,
+        affects_deposit_rate,
+        None,
+    )
+}
+
+/// Saves a transaction with an optional expense place, card, and deposit-rate effect.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Extends the established transaction API with an optional expense place"
+)]
+pub fn save_transaction_with_card_and_rate_effect_and_place(
+    connection: &Connection,
+    kind: TransactionKind,
+    id: Option<i64>,
+    date: NaiveDate,
+    category_id: i64,
+    amount: Decimal,
+    currency: Currency,
+    comment: &str,
+    payment_document_id: Option<i64>,
+    affects_deposit_rate: bool,
+    expense_place_id: Option<i64>,
+) -> Result<i64, DbError> {
+    save_transaction_impl(
+        connection,
+        kind,
+        id,
+        date,
+        category_id,
+        amount,
+        currency,
+        comment,
+        payment_document_id,
+        affects_deposit_rate,
+        Some(expense_place_id),
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Shared implementation of transaction APIs"
+)]
+fn save_transaction_impl(
+    connection: &Connection,
+    kind: TransactionKind,
+    id: Option<i64>,
+    date: NaiveDate,
+    category_id: i64,
+    amount: Decimal,
+    currency: Currency,
+    comment: &str,
+    payment_document_id: Option<i64>,
+    affects_deposit_rate: bool,
+    place_update: Option<Option<i64>>,
+) -> Result<i64, DbError> {
     if amount <= Decimal::ZERO {
         return Err(DbError::InvalidAmount);
+    }
+    if kind == TransactionKind::Income && place_update.flatten().is_some() {
+        return Err(DbError::ExpensePlaceUnavailable);
     }
     if kind == TransactionKind::Income && affects_deposit_rate {
         return Err(DbError::ExpenseCardUnavailable);
@@ -1129,6 +1245,25 @@ pub fn save_transaction_with_card_and_rate_effect(
     let transaction =
         rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
     let (table, categories) = transaction_tables(kind);
+    let expense_place_id = match (place_update, kind, id) {
+        (Some(place_id), _, _) => place_id,
+        (None, TransactionKind::Expense, Some(id)) => transaction.query_row(
+            "SELECT expense_place_id FROM expenses WHERE id = ?1",
+            [id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?,
+        _ => None,
+    };
+    if let Some(place_id) = expense_place_id {
+        let place_exists = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM expense_places WHERE id = ?1)",
+            [place_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !place_exists {
+            return Err(DbError::ExpensePlaceUnavailable);
+        }
+    }
     let current_category = id
         .map(|id| {
             transaction
@@ -1296,7 +1431,8 @@ pub fn save_transaction_with_card_and_rate_effect(
                 &format!(
                     "UPDATE {table} SET date = ?1, category_id = ?2, amount = ?3,
                  currency = ?4, comment = ?5, payment_document_id = ?6,
-                 affects_deposit_rate = ?7, payment_document_balance_applied = ?8 WHERE id = ?9"
+                 affects_deposit_rate = ?7, payment_document_balance_applied = ?8,
+                 expense_place_id = ?9 WHERE id = ?10"
                 ),
                 params![
                     date,
@@ -1307,6 +1443,7 @@ pub fn save_transaction_with_card_and_rate_effect(
                     payment_document_id,
                     affects_deposit_rate,
                     payment_document_is_debit,
+                    expense_place_id,
                     id
                 ],
             )?
@@ -1326,8 +1463,9 @@ pub fn save_transaction_with_card_and_rate_effect(
             transaction.execute(
                 "INSERT INTO expenses (
                     date, category_id, amount, currency, comment,
-                    payment_document_id, affects_deposit_rate, payment_document_balance_applied
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    payment_document_id, affects_deposit_rate, payment_document_balance_applied,
+                    expense_place_id
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     date,
                     category_id,
@@ -1336,7 +1474,8 @@ pub fn save_transaction_with_card_and_rate_effect(
                     comment,
                     payment_document_id,
                     affects_deposit_rate,
-                    payment_document_is_debit
+                    payment_document_is_debit,
+                    expense_place_id
                 ],
             )?;
         }
@@ -2374,11 +2513,13 @@ mod tests {
         has_pending_database_import, initialize, list_currencies, list_expense_places,
         list_payment_documents, list_payment_documents_filtered, list_savings,
         list_savings_filtered, list_transaction_amounts, list_transaction_comments,
-        list_transactions, list_transactions_filtered, load_analysis_transactions,
-        load_analysis_transactions_by_category, restore_pending_database_import, save_bank,
-        save_category, save_expense_place, save_payment_document, save_savings, save_transaction,
-        save_transaction_with_card, set_app_setting, set_currency_exchange_rate,
-        set_primary_currency, stage_database_import, DbError, MIGRATIONS,
+        list_transactions, list_transactions_filtered, list_transactions_filtered_by_place,
+        load_analysis_transactions, load_analysis_transactions_by_category,
+        restore_pending_database_import, save_bank, save_category, save_expense_place,
+        save_payment_document, save_savings, save_transaction, save_transaction_with_card,
+        save_transaction_with_card_and_rate_effect_and_place, set_app_setting,
+        set_currency_exchange_rate, set_primary_currency, stage_database_import, DbError,
+        MIGRATIONS,
     };
 
     fn savings_details(bank_id: i64) -> SavingsDetails {
@@ -2458,6 +2599,22 @@ mod tests {
             first_card_id,
             second_card_id,
         )
+    }
+
+    fn expense_place_fixture() -> (tempfile::TempDir, Connection, i64, i64) {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let category_id = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Покупки",
+            None,
+            true,
+        )
+        .unwrap();
+        let place_id = save_expense_place(&connection, None, "Магазин у дома", None).unwrap();
+        (directory, connection, category_id, place_id)
     }
 
     fn create_legacy_database(path: &std::path::Path, version: i64) -> Connection {
@@ -4315,6 +4472,312 @@ mod tests {
         )
         .unwrap();
         assert!(mismatched_filters.is_empty());
+    }
+
+    #[test]
+    fn save_expense_with_place_persists_place_id_and_name() {
+        let (_directory, connection, category_id, place_id) = expense_place_fixture();
+        let date = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+
+        let id = save_transaction_with_card_and_rate_effect_and_place(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            date,
+            category_id,
+            Decimal::from(125),
+            Currency::Rub,
+            "Покупки",
+            None,
+            false,
+            Some(place_id),
+        )
+        .unwrap();
+        let transaction = list_transactions(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            None,
+            None,
+            None,
+            "",
+        )
+        .unwrap()
+        .into_iter()
+        .find(|transaction| transaction.id == id)
+        .unwrap();
+
+        assert_eq!(transaction.expense_place_id, Some(place_id));
+        assert_eq!(
+            transaction.expense_place_name.as_deref(),
+            Some("Магазин у дома")
+        );
+    }
+
+    #[test]
+    fn expense_place_updates_preserve_debit_card_balance_adjustments() {
+        let (_directory, connection, category_id, place_id) = expense_place_fixture();
+        let bank_id = save_bank(&connection, None, "Банк", "").unwrap();
+        let mut card_details = payment_document_details(bank_id);
+        card_details.currency = Some(Currency::Rub);
+        card_details.amount = Decimal::from(100);
+        let card_id = save_payment_document(&connection, None, &card_details).unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+
+        let id = save_transaction_with_card_and_rate_effect_and_place(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            date,
+            category_id,
+            Decimal::from(25),
+            Currency::Rub,
+            "Оплата картой",
+            Some(card_id),
+            false,
+            Some(place_id),
+        )
+        .unwrap();
+        let card_after_create = list_payment_documents(&connection, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|card| card.id == card_id)
+            .unwrap();
+        assert_eq!(card_after_create.amount, Decimal::from(75));
+
+        save_transaction_with_card_and_rate_effect_and_place(
+            &connection,
+            TransactionKind::Expense,
+            Some(id),
+            date,
+            category_id,
+            Decimal::from(40),
+            Currency::Rub,
+            "Исправленная оплата",
+            Some(card_id),
+            false,
+            None,
+        )
+        .unwrap();
+        let card_after_update = list_payment_documents(&connection, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|card| card.id == card_id)
+            .unwrap();
+
+        assert_eq!(card_after_update.amount, Decimal::from(60));
+
+        assert!(matches!(
+            save_transaction_with_card_and_rate_effect_and_place(
+                &connection,
+                TransactionKind::Expense,
+                Some(id),
+                date,
+                category_id,
+                Decimal::from(55),
+                Currency::Rub,
+                "Ошибка",
+                Some(card_id),
+                false,
+                Some(place_id + 1000),
+            ),
+            Err(DbError::ExpensePlaceUnavailable)
+        ));
+        let unchanged_card = list_payment_documents(&connection, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|card| card.id == card_id)
+            .unwrap();
+        let unchanged_expense = list_transactions(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            None,
+            None,
+            None,
+            "",
+        )
+        .unwrap()
+        .into_iter()
+        .find(|expense| expense.id == id)
+        .unwrap();
+        assert_eq!(unchanged_card.amount, Decimal::from(60));
+        assert_eq!(unchanged_expense.amount, Decimal::from(40));
+        assert_eq!(unchanged_expense.expense_place_id, None);
+    }
+
+    #[test]
+    fn old_transaction_api_preserves_place_and_extended_api_can_clear_it() {
+        let (_directory, connection, category_id, place_id) = expense_place_fixture();
+        let date = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        let id = save_transaction_with_card_and_rate_effect_and_place(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            date,
+            category_id,
+            Decimal::from(125),
+            Currency::Rub,
+            "Покупки",
+            None,
+            false,
+            Some(place_id),
+        )
+        .unwrap();
+
+        save_transaction(
+            &connection,
+            TransactionKind::Expense,
+            Some(id),
+            date,
+            category_id,
+            Decimal::from(150),
+            Currency::Rub,
+            "Исправлено",
+        )
+        .unwrap();
+        let after_legacy_update = list_transactions(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            None,
+            None,
+            None,
+            "",
+        )
+        .unwrap()
+        .into_iter()
+        .find(|transaction| transaction.id == id)
+        .unwrap();
+        assert_eq!(after_legacy_update.expense_place_id, Some(place_id));
+
+        let other_place_id = save_expense_place(&connection, None, "Кафе", None).unwrap();
+        save_transaction_with_card_and_rate_effect_and_place(
+            &connection,
+            TransactionKind::Expense,
+            Some(id),
+            date,
+            category_id,
+            Decimal::from(150),
+            Currency::Rub,
+            "Исправлено",
+            None,
+            false,
+            Some(other_place_id),
+        )
+        .unwrap();
+        let after_change = list_transactions(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            None,
+            None,
+            None,
+            "",
+        )
+        .unwrap()
+        .into_iter()
+        .find(|transaction| transaction.id == id)
+        .unwrap();
+        assert_eq!(after_change.expense_place_id, Some(other_place_id));
+        assert_eq!(after_change.expense_place_name.as_deref(), Some("Кафе"));
+
+        save_transaction_with_card_and_rate_effect_and_place(
+            &connection,
+            TransactionKind::Expense,
+            Some(id),
+            date,
+            category_id,
+            Decimal::from(150),
+            Currency::Rub,
+            "Исправлено",
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        let after_clear = list_transactions(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            None,
+            None,
+            None,
+            "",
+        )
+        .unwrap()
+        .into_iter()
+        .find(|transaction| transaction.id == id)
+        .unwrap();
+        assert_eq!(after_clear.expense_place_id, None);
+    }
+
+    #[test]
+    fn list_transactions_can_filter_expenses_by_place() {
+        let (_directory, connection, category_id, first_place_id) = expense_place_fixture();
+        let second_place_id = save_expense_place(&connection, None, "Кафе", None).unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        let first_id = save_transaction_with_card_and_rate_effect_and_place(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            date,
+            category_id,
+            Decimal::ONE,
+            Currency::Rub,
+            "Первая",
+            None,
+            false,
+            Some(first_place_id),
+        )
+        .unwrap();
+        save_transaction_with_card_and_rate_effect_and_place(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            date,
+            category_id,
+            Decimal::ONE,
+            Currency::Rub,
+            "Вторая",
+            None,
+            false,
+            Some(second_place_id),
+        )
+        .unwrap();
+        save_transaction(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            date,
+            category_id,
+            Decimal::ONE,
+            Currency::Rub,
+            "Без места",
+        )
+        .unwrap();
+
+        let filtered = list_transactions_filtered_by_place(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            None,
+            None,
+            None,
+            "",
+            None,
+            None,
+            Some(first_place_id),
+        )
+        .unwrap();
+
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|transaction| transaction.id)
+                .collect::<Vec<_>>(),
+            [first_id]
+        );
     }
 
     #[test]
