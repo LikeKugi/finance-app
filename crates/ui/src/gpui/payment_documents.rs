@@ -2,6 +2,7 @@
 //! фильтры, связи с накоплениями того же банка и постраничный вывод.
 //! Транзакционность связей и проверки банка остаются в `finance-db`.
 
+use std::cmp::Ordering;
 use std::rc::Rc;
 
 use chrono::NaiveDate;
@@ -15,26 +16,32 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::table::{
+    Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
+};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _, WindowExt as _,
 };
-use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 const DATE_FORMAT: &str = "%Y-%m-%d";
-const ROW_HEIGHT: f32 = 40.0;
 const ALL_LABEL: &str = "Все";
 const ALL_BANKS_LABEL: &str = "Все банки";
 const NO_CURRENCY_LABEL: &str = "валюта не указана";
 const RATE_WARNING: &str =
     "Условие сохраняется как возможность; приложение не подтверждает выполнение порога трат.";
-/// Фиксированные ширины колонок 0..=9; колонка «Связанные накопления» занимает остаток,
-/// «Действия» закреплены справа.
-const FIXED_COLUMN_WIDTHS: [f32; 10] = [
-    120.0, 105.0, 80.0, 70.0, 90.0, 60.0, 100.0, 65.0, 110.0, 90.0,
+const DEFAULT_COLUMN_WIDTHS: [f32; 12] = [
+    140.0, 120.0, 90.0, 110.0, 100.0, 120.0, 110.0, 100.0, 140.0, 110.0, 220.0, 190.0,
 ];
-const SAVINGS_COLUMN: usize = 10;
-const ACTIONS_COLUMN_WIDTH: f32 = 180.0;
+const MIN_COLUMN_WIDTH: f32 = 60.0;
+const MAX_COLUMN_WIDTH: f32 = 1200.0;
+const CARDS_COLUMN_WIDTHS_KEY: &str = "table_columns.payment_documents";
+const COL_NAME: usize = 0;
+const COL_BANK: usize = 1;
+const COL_SYSTEM: usize = 2;
+const COL_AMOUNT: usize = 4;
+const COL_SAVINGS: usize = 10;
+const COL_ACTIONS: usize = 11;
 const HEADERS: [&str; 12] = [
     "Название",
     "Банк",
@@ -234,6 +241,7 @@ pub(crate) struct PaymentDocumentsPage {
     database: Rc<Database>,
     banks: Vec<Bank>,
     entries: Vec<PaymentDocument>,
+    table: Entity<TableState<CardsTable>>,
     bank_filter: Option<i64>,
     currency_filter: Option<Currency>,
     card_type_filter: Option<PaymentCardType>,
@@ -315,10 +323,22 @@ impl PaymentDocumentsPage {
             },
         ));
 
+        let widths = load_column_widths(&database);
+        let table_delegate = CardsTable::new(cx.entity().downgrade(), widths);
+        let table = cx.new(|cx| TableState::new(table_delegate, window, cx).col_movable(false));
+        subscriptions.push(
+            cx.subscribe(&table, |this: &mut Self, _, event: &TableEvent, cx| {
+                if let TableEvent::ColumnWidthsChanged(widths) = event {
+                    this.save_column_widths(widths, cx);
+                }
+            }),
+        );
+
         let mut page = Self {
             database,
             banks: Vec::new(),
             entries: Vec::new(),
+            table,
             bank_filter: None,
             currency_filter: None,
             card_type_filter: None,
@@ -365,6 +385,19 @@ impl PaymentDocumentsPage {
         self.refresh(cx);
     }
 
+    fn save_column_widths(&mut self, widths: &[Pixels], cx: &mut Context<Self>) {
+        let widths: Vec<f32> = widths.iter().map(|width| f32::from(*width)).collect();
+        self.table
+            .update(cx, |table, _| table.delegate_mut().set_widths(&widths));
+        if let Err(error) = finance_db::set_app_setting(
+            &self.database,
+            CARDS_COLUMN_WIDTHS_KEY,
+            &format_column_widths(&widths),
+        ) {
+            self.error(format!("Не удалось сохранить ширину колонок: {error}"), cx);
+        }
+    }
+
     fn error(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
         self.message = Some((message.into(), true));
         cx.notify();
@@ -379,6 +412,10 @@ impl PaymentDocumentsPage {
             self.currency_filter,
         ) {
             Ok(entries) => {
+                self.table.update(cx, |table, cx| {
+                    table.delegate_mut().set_rows(entries.clone());
+                    cx.notify();
+                });
                 self.entries = entries;
                 if matches!(&self.message, Some((_, true))) {
                     self.message = None;
@@ -1015,192 +1052,273 @@ impl PaymentDocumentsPage {
             .into_any_element()
     }
 
-    fn render_table(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let border = cx.theme().border;
-        let stripe = cx.theme().muted;
-        let count = self.entries.len();
-        let header = div()
-            .flex()
-            .w_full()
-            .h(px(ROW_HEIGHT))
-            .items_center()
-            .border_1()
-            .border_color(border)
-            .font_weight(FontWeight::BOLD)
-            .children(
-                HEADERS
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, title)| table_cell(index, title.to_owned(), border)),
-            );
-        let body = if count == 0 {
-            div()
-                .w_full()
-                .p_4()
-                .child("Платёжных карт по выбранным условиям нет.")
-                .into_any_element()
-        } else {
-            uniform_list(
-                "cards-rows",
-                count,
-                cx.processor(move |page, range: std::ops::Range<usize>, _, cx| {
-                    range
-                        .map(|index| page.render_row(index, stripe, cx))
-                        .collect::<Vec<_>>()
-                }),
-            )
-            .flex_1()
-            .w_full()
-            .into_any_element()
-        };
+    fn render_table(&mut self, _: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex_1()
             .min_h_0()
+            .w_full()
             .flex()
             .flex_col()
-            .w_full()
-            .child(header)
-            .child(body)
-    }
-
-    fn render_row(
-        &mut self,
-        index: usize,
-        stripe: Hsla,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let document = self.entries[index].clone();
-        let border = cx.theme().border;
-        let id = document.id;
-        let values = [
-            document.name.clone().unwrap_or_default(),
-            document.bank_name.clone(),
-            document.payment_system.code().to_owned(),
-            document.card_type.title().to_owned(),
-            canonical_amount(document.amount),
-            document
-                .currency
-                .map_or(NO_CURRENCY_LABEL, Currency::code)
-                .to_owned(),
-            document
-                .due_date
-                .map_or_else(String::new, |d| d.format(DATE_FORMAT).to_string()),
-            document
-                .grace_period_days
-                .map_or_else(String::new, |d| d.to_string()),
-            if document.affects_deposit_rate {
-                "Условно повышает"
-            } else {
-                "Нет"
-            }
-            .to_owned(),
-            document
-                .min_monthly_spend
-                .map_or_else(String::new, canonical_amount),
-            document
-                .linked_savings
-                .iter()
-                .map(|s| {
-                    if s.is_active {
-                        s.title.clone()
-                    } else {
-                        format!("{} (неактивно)", s.title)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(", "),
-        ];
-        let edit_target = document.clone();
-        let delete_target = document;
-        div()
-            .id(("card-row", id as usize))
-            .flex()
-            .w_full()
-            .h(px(ROW_HEIGHT))
-            .items_center()
-            .border_l_1()
-            .border_r_1()
-            .border_b_1()
-            .border_color(border)
-            .when(index % 2 == 1, |row| row.bg(stripe))
-            .children(
-                values
-                    .into_iter()
-                    .enumerate()
-                    .map(|(column, value)| table_cell(column, value, border)),
-            )
+            .gap_1()
+            .child(format!("Всего записей: {}", self.entries.len()))
             .child(
                 div()
-                    .w(px(ACTIONS_COLUMN_WIDTH))
-                    .h_full()
+                    .flex_1()
+                    .min_h_0()
+                    .child(DataTable::new(&self.table).stripe(true).bordered(true)),
+            )
+    }
+}
+
+fn format_column_widths(widths: &[f32]) -> String {
+    widths
+        .iter()
+        .map(|width| width.round().to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn parse_column_widths(value: &str) -> Option<Vec<f32>> {
+    let widths = value
+        .split(',')
+        .map(|part| part.trim().parse::<f32>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    (widths.len() == HEADERS.len()
+        && widths.iter().all(|width| {
+            width.is_finite() && (MIN_COLUMN_WIDTH..=MAX_COLUMN_WIDTH).contains(width)
+        }))
+    .then_some(widths)
+}
+
+fn load_column_widths(database: &Database) -> Vec<f32> {
+    match finance_db::get_app_setting(database, CARDS_COLUMN_WIDTHS_KEY) {
+        Ok(Some(value)) => parse_column_widths(&value).unwrap_or_else(|| {
+            eprintln!(
+                "Некорректная сохранённая ширина колонок карт; использованы значения по умолчанию"
+            );
+            DEFAULT_COLUMN_WIDTHS.to_vec()
+        }),
+        Ok(None) => DEFAULT_COLUMN_WIDTHS.to_vec(),
+        Err(error) => {
+            eprintln!("Не удалось прочитать ширину колонок карт: {error}");
+            DEFAULT_COLUMN_WIDTHS.to_vec()
+        }
+    }
+}
+
+fn card_name_key(document: &PaymentDocument) -> String {
+    document.name.as_deref().unwrap_or_default().to_lowercase()
+}
+
+fn default_order(a: &PaymentDocument, b: &PaymentDocument) -> Ordering {
+    a.bank_name
+        .to_lowercase()
+        .cmp(&b.bank_name.to_lowercase())
+        .then_with(|| card_name_key(a).cmp(&card_name_key(b)))
+        .then(a.id.cmp(&b.id))
+}
+
+fn sort_cards(rows: &mut [PaymentDocument], sort: Option<(usize, ColumnSort)>) {
+    let Some((column, direction)) = sort else {
+        rows.sort_by(default_order);
+        return;
+    };
+    rows.sort_by(|a, b| {
+        let ordering = match column {
+            COL_NAME => card_name_key(a).cmp(&card_name_key(b)),
+            COL_BANK => a.bank_name.to_lowercase().cmp(&b.bank_name.to_lowercase()),
+            COL_SYSTEM => a
+                .payment_system
+                .code()
+                .to_lowercase()
+                .cmp(&b.payment_system.code().to_lowercase()),
+            COL_AMOUNT => a.amount.cmp(&b.amount),
+            _ => Ordering::Equal,
+        };
+        let ordering = if direction == ColumnSort::Descending {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+        ordering.then_with(|| default_order(a, b))
+    });
+}
+
+struct CardsTable {
+    page: WeakEntity<PaymentDocumentsPage>,
+    rows: Vec<PaymentDocument>,
+    widths: Vec<f32>,
+    sort: Option<(usize, ColumnSort)>,
+}
+
+impl CardsTable {
+    fn new(page: WeakEntity<PaymentDocumentsPage>, widths: Vec<f32>) -> Self {
+        Self {
+            page,
+            rows: Vec::new(),
+            widths,
+            sort: None,
+        }
+    }
+
+    fn set_rows(&mut self, rows: Vec<PaymentDocument>) {
+        self.rows = rows;
+        sort_cards(&mut self.rows, self.sort);
+    }
+
+    fn set_widths(&mut self, widths: &[f32]) {
+        if widths.len() == self.widths.len() {
+            self.widths = widths.to_vec();
+        }
+    }
+}
+
+impl TableDelegate for CardsTable {
+    fn columns_count(&self, _: &App) -> usize {
+        HEADERS.len()
+    }
+
+    fn rows_count(&self, _: &App) -> usize {
+        self.rows.len()
+    }
+
+    fn column(&self, col_ix: usize, _: &App) -> Column {
+        let column = Column::new(HEADERS[col_ix], HEADERS[col_ix])
+            .width(px(self.widths[col_ix]))
+            .min_width(px(MIN_COLUMN_WIDTH))
+            .max_width(px(MAX_COLUMN_WIDTH))
+            .resizable(true)
+            .movable(false);
+        let direction = match self.sort {
+            Some((sorted, direction)) if sorted == col_ix => direction,
+            _ => ColumnSort::Default,
+        };
+        match col_ix {
+            COL_NAME | COL_BANK | COL_SYSTEM | COL_AMOUNT => column.sort(direction),
+            _ => column,
+        }
+    }
+
+    fn perform_sort(
+        &mut self,
+        col_ix: usize,
+        sort: ColumnSort,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) {
+        self.sort = (sort != ColumnSort::Default).then_some((col_ix, sort));
+        sort_cards(&mut self.rows, self.sort);
+    }
+
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child("Платёжных карт по выбранным условиям нет.")
+    }
+
+    fn render_td(
+        &mut self,
+        row_ix: usize,
+        col_ix: usize,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let document = &self.rows[row_ix];
+        let text = |value: String| div().child(value).into_any_element();
+        match col_ix {
+            COL_NAME => text(document.name.clone().unwrap_or_default()),
+            COL_BANK => text(document.bank_name.clone()),
+            COL_SYSTEM => text(document.payment_system.code().to_owned()),
+            3 => text(document.card_type.title().to_owned()),
+            COL_AMOUNT => div()
+                .w_full()
+                .text_right()
+                .child(canonical_amount(document.amount))
+                .into_any_element(),
+            5 => text(
+                document
+                    .currency
+                    .map_or(NO_CURRENCY_LABEL, Currency::code)
+                    .to_owned(),
+            ),
+            6 => text(
+                document
+                    .due_date
+                    .map_or_else(String::new, |d| d.format(DATE_FORMAT).to_string()),
+            ),
+            7 => text(
+                document
+                    .grace_period_days
+                    .map_or_else(String::new, |d| d.to_string()),
+            ),
+            8 => text(
+                if document.affects_deposit_rate {
+                    "Условно повышает"
+                } else {
+                    "Нет"
+                }
+                .to_owned(),
+            ),
+            9 => text(
+                document
+                    .min_monthly_spend
+                    .map_or_else(String::new, canonical_amount),
+            ),
+            COL_SAVINGS => text(
+                document
+                    .linked_savings
+                    .iter()
+                    .map(|s| {
+                        if s.is_active {
+                            s.title.clone()
+                        } else {
+                            format!("{} (неактивно)", s.title)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            COL_ACTIONS => {
+                let id = document.id;
+                let edit_target = document.clone();
+                let delete_target = document.clone();
+                let edit_page = self.page.clone();
+                let delete_page = self.page.clone();
+                div()
                     .flex()
-                    .items_center()
-                    .border_l_1()
-                    .border_color(border)
                     .gap_1()
-                    .justify_end()
                     .child(
                         Button::new(("card-edit", id as usize))
                             .xsmall()
                             .label("Изменить")
-                            .on_click(cx.listener(move |page, _, window, cx| {
-                                page.open_form(Some(&edit_target), window, cx)
-                            })),
+                            .on_click(move |_, window, cx| {
+                                let _ = edit_page.update(cx, |page, cx| {
+                                    page.open_form(Some(&edit_target), window, cx)
+                                });
+                            }),
                     )
                     .child(
                         Button::new(("card-delete", id as usize))
                             .danger()
                             .xsmall()
                             .label("Удалить")
-                            .on_click(cx.listener(move |page, _, window, cx| {
-                                page.confirm_delete(&delete_target, window, cx)
-                            })),
-                    ),
-            )
-    }
-}
-
-fn cell(width: f32, text: String, border: Hsla, separator: bool) -> Div {
-    div()
-        .w(px(width))
-        .h_full()
-        .flex()
-        .items_center()
-        .when(separator, |cell| cell.border_l_1().border_color(border))
-        .px_2()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .child(text)
-}
-
-fn table_cell(index: usize, text: String, border: Hsla) -> Div {
-    match index {
-        0..=9 => cell(FIXED_COLUMN_WIDTHS[index], text, border, index > 0),
-        SAVINGS_COLUMN => div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .flex()
-            .items_center()
-            .border_l_1()
-            .border_color(border)
-            .px_2()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .child(text),
-        _ => div()
-            .w(px(ACTIONS_COLUMN_WIDTH))
-            .h_full()
-            .px_2()
-            .flex()
-            .items_center()
-            .border_l_1()
-            .border_color(border)
-            .justify_end()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .child(text),
+                            .on_click(move |_, window, cx| {
+                                let _ = delete_page.update(cx, |page, cx| {
+                                    page.confirm_delete(&delete_target, window, cx)
+                                });
+                            }),
+                    )
+                    .into_any_element()
+            }
+            _ => div().into_any_element(),
+        }
     }
 }
 
@@ -1271,9 +1389,12 @@ impl Render for PaymentDocumentsPage {
 
 #[cfg(test)]
 mod tests {
+    use gpui_kit::component::table::ColumnSort;
+
     use super::{
-        build_details, currency_from_row, currency_row, CardInput, Currency, Database,
-        PaymentCardType, PaymentDocument, PaymentSystem,
+        build_details, currency_from_row, currency_row, format_column_widths, parse_column_widths,
+        sort_cards, CardInput, Currency, Database, PaymentCardType, PaymentDocument, PaymentSystem,
+        COL_AMOUNT, COL_BANK, COL_NAME, COL_SYSTEM, DEFAULT_COLUMN_WIDTHS,
     };
 
     fn database_with_bank() -> Database {
@@ -1443,6 +1564,73 @@ mod tests {
         let details = build_details(&input).unwrap();
         assert_eq!(details.savings_ids, [3]);
         assert!(details.min_monthly_spend.is_some());
+    }
+
+    fn card(
+        id: i64,
+        name: &str,
+        bank: &str,
+        system: PaymentSystem,
+        amount: i64,
+    ) -> PaymentDocument {
+        PaymentDocument {
+            id,
+            name: Some(name.to_owned()),
+            bank_id: 1,
+            bank_name: bank.to_owned(),
+            payment_system: system,
+            card_type: PaymentCardType::Debit,
+            amount: rust_decimal::Decimal::from(amount),
+            currency: None,
+            due_date: None,
+            grace_period_days: None,
+            affects_deposit_rate: false,
+            min_monthly_spend: None,
+            linked_savings: Vec::new(),
+        }
+    }
+
+    fn sorted_ids(column: usize, direction: ColumnSort) -> Vec<i64> {
+        let mut rows = vec![
+            card(1, "Зарплатная", "Банк Бета", PaymentSystem::Mir, 20),
+            card(2, "Альфа", "Банк Альфа", PaymentSystem::Visa, 100),
+            card(3, "Гамма", "Банк Альфа", PaymentSystem::MasterCard, 3),
+        ];
+        sort_cards(&mut rows, Some((column, direction)));
+        rows.into_iter().map(|card| card.id).collect()
+    }
+
+    #[test]
+    fn card_sorting_covers_requested_columns_in_both_directions() {
+        for (column, asc, desc) in [
+            (COL_NAME, [2, 3, 1], [1, 3, 2]),
+            (COL_BANK, [2, 3, 1], [1, 2, 3]),
+            (COL_SYSTEM, [3, 1, 2], [2, 1, 3]),
+            (COL_AMOUNT, [3, 1, 2], [2, 1, 3]),
+        ] {
+            assert_eq!(
+                sorted_ids(column, ColumnSort::Ascending),
+                asc,
+                "asc {column}"
+            );
+            assert_eq!(
+                sorted_ids(column, ColumnSort::Descending),
+                desc,
+                "desc {column}"
+            );
+        }
+    }
+
+    #[test]
+    fn column_widths_round_trip_and_reject_invalid_values() {
+        let text = format_column_widths(&DEFAULT_COLUMN_WIDTHS);
+        assert_eq!(
+            parse_column_widths(&text),
+            Some(DEFAULT_COLUMN_WIDTHS.to_vec())
+        );
+        assert_eq!(parse_column_widths("100,200"), None);
+        assert_eq!(parse_column_widths(&text.replacen("140", "5", 1)), None);
+        assert_eq!(parse_column_widths(&text.replacen("140", "abc", 1)), None);
     }
 
     #[test]
