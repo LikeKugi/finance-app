@@ -8,8 +8,8 @@ use std::rc::Rc;
 
 use chrono::{Local, NaiveDate};
 use finance_core::{
-    summarize_analysis, AnalysisCategoryTotal, AnalysisSummary, AnalysisTotal, Category, Currency,
-    TransactionKind,
+    summarize_analysis, summarize_transaction_balance, AnalysisCategoryTotal, AnalysisSummary,
+    AnalysisTotal, Category, Currency, TransactionAmount, TransactionBalanceError, TransactionKind,
 };
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -1086,6 +1086,7 @@ impl AnalysisPage {
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let border = cx.theme().border;
+        let danger = cx.theme().danger;
         let notes = div()
             .flex()
             .flex_col()
@@ -1105,7 +1106,9 @@ impl AnalysisPage {
             .border_color(border)
             .pt_2()
             .when_some(self.tracker.current_report(), |footer, summary| {
-                footer.child(Self::render_pie_charts(summary))
+                footer
+                    .child(render_balance_summary(summary, danger))
+                    .child(Self::render_pie_charts(summary))
             })
             .child(notes)
     }
@@ -1170,18 +1173,65 @@ fn category_tree_labels(categories: &[Category]) -> Vec<(i64, String)> {
     super::support::category_tree_labels(categories)
 }
 
+fn analysis_balance_lines(
+    summary: &AnalysisSummary,
+) -> Result<Vec<String>, TransactionBalanceError> {
+    let transactions = summary
+        .totals
+        .iter()
+        .map(|total| TransactionAmount {
+            kind: total.kind,
+            amount: total.amount,
+            currency: total.currency,
+        })
+        .collect::<Vec<_>>();
+    let balances = summarize_transaction_balance(&transactions)?;
+
+    Ok(balances
+        .into_iter()
+        .filter(|balance| {
+            summary
+                .totals
+                .iter()
+                .any(|total| total.currency == balance.currency)
+        })
+        .map(|balance| {
+            format!(
+                "{} — Доходы: {}; Расходы: {}; Сальдо: {}",
+                balance.currency.code(),
+                balance.income,
+                balance.expenses,
+                balance.balance
+            )
+        })
+        .collect())
+}
+
+fn render_balance_summary(summary: &AnalysisSummary, danger: Hsla) -> Div {
+    match analysis_balance_lines(summary) {
+        Ok(lines) => div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .children(lines.into_iter().map(|line| div().child(line))),
+        Err(error) => div()
+            .text_color(danger)
+            .child(format!("Не удалось рассчитать сальдо: {error}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Глоб-импорт `gpui_kit::*` затеняет атрибут `#[test]`, поэтому имена импортируются явно.
     use super::{
-        parse_filters, pie_chart_slices, pie_slice_points, sort_analysis_categories,
-        AnalysisFilters, AnalysisTable, CategoryPicker, RequestTracker, COL_AMOUNT, COL_CATEGORY,
-        COL_SHARE, COL_TRANSACTION_COUNT,
+        analysis_balance_lines, parse_filters, pie_chart_slices, pie_slice_points,
+        sort_analysis_categories, AnalysisFilters, AnalysisTable, CategoryPicker, RequestTracker,
+        COL_AMOUNT, COL_CATEGORY, COL_SHARE, COL_TRANSACTION_COUNT,
     };
     use chrono::NaiveDate;
     use finance_core::{
         summarize_analysis, AnalysisCategoryTotal, AnalysisSummary, AnalysisTotal,
-        AnalysisTransaction, Category, Currency, TransactionKind,
+        AnalysisTransaction, Category, Currency, TransactionBalanceError, TransactionKind,
     };
     use rust_decimal::Decimal;
 
@@ -1290,6 +1340,107 @@ mod tests {
             categories: Vec::new(),
             totals: Vec::new(),
         }
+    }
+
+    #[test]
+    fn analysis_balance_lines_show_each_currency_and_negative_balance_separately() {
+        let summary = AnalysisSummary {
+            categories: Vec::new(),
+            totals: vec![
+                AnalysisTotal {
+                    kind: TransactionKind::Income,
+                    currency: Currency::Rub,
+                    amount: Decimal::new(10_050, 2),
+                    transaction_count: 1,
+                },
+                AnalysisTotal {
+                    kind: TransactionKind::Expense,
+                    currency: Currency::Rub,
+                    amount: Decimal::from(125),
+                    transaction_count: 1,
+                },
+                AnalysisTotal {
+                    kind: TransactionKind::Income,
+                    currency: Currency::Usd,
+                    amount: Decimal::from(35),
+                    transaction_count: 1,
+                },
+                AnalysisTotal {
+                    kind: TransactionKind::Expense,
+                    currency: Currency::Usd,
+                    amount: Decimal::new(1_225, 2),
+                    transaction_count: 1,
+                },
+            ],
+        };
+
+        assert_eq!(
+            analysis_balance_lines(&summary),
+            Ok(vec![
+                "RUB — Доходы: 100.50; Расходы: 125; Сальдо: -24.50".to_owned(),
+                "USD — Доходы: 35; Расходы: 12.25; Сальдо: 22.75".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn analysis_balance_lines_use_zero_for_missing_transaction_kind() {
+        let summary = AnalysisSummary {
+            categories: Vec::new(),
+            totals: vec![
+                AnalysisTotal {
+                    kind: TransactionKind::Income,
+                    currency: Currency::Rub,
+                    amount: Decimal::from(17),
+                    transaction_count: 1,
+                },
+                AnalysisTotal {
+                    kind: TransactionKind::Expense,
+                    currency: Currency::Usd,
+                    amount: Decimal::from(5),
+                    transaction_count: 1,
+                },
+            ],
+        };
+
+        assert_eq!(
+            analysis_balance_lines(&summary),
+            Ok(vec![
+                "RUB — Доходы: 17; Расходы: 0; Сальдо: 17".to_owned(),
+                "USD — Доходы: 0; Расходы: 5; Сальдо: -5".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn analysis_balance_lines_are_empty_when_report_has_no_transactions() {
+        assert_eq!(analysis_balance_lines(&empty_summary()), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn analysis_balance_lines_return_calculation_errors() {
+        let summary = AnalysisSummary {
+            categories: Vec::new(),
+            totals: vec![
+                AnalysisTotal {
+                    kind: TransactionKind::Income,
+                    currency: Currency::Rub,
+                    amount: Decimal::MAX,
+                    transaction_count: 1,
+                },
+                AnalysisTotal {
+                    kind: TransactionKind::Income,
+                    currency: Currency::Rub,
+                    amount: Decimal::ONE,
+                    transaction_count: 1,
+                },
+            ],
+        };
+
+        assert_eq!(
+            analysis_balance_lines(&summary),
+            Err(TransactionBalanceError::Overflow)
+        );
     }
 
     #[test]
