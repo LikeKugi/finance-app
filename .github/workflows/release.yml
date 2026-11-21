@@ -20,6 +20,21 @@ jobs:
       - name: Set up Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Verify release tag matches Cargo version
+        shell: pwsh
+        run: |
+          $metadata = cargo +stable metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
+          $packages = @($metadata.packages | Where-Object { $_.name -eq 'finance-app' })
+          if ($packages.Count -ne 1) {
+            throw "Expected exactly one finance-app package in Cargo metadata"
+          }
+
+          $version = $packages[0].version
+          if ($env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Release tag $($env:GITHUB_REF_NAME) must match Cargo version v$version"
+          }
+          "FINANCE_APP_VERSION=$version" >> $env:GITHUB_ENV
+
       - name: Locate DirectX shader compiler
         shell: pwsh
         run: |
@@ -40,6 +55,25 @@ jobs:
 
       - name: Build debug executable
         run: cargo +stable build -p finance-app --locked
+
+      - name: Verify Windows executable version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expected = [version]"$($env:FINANCE_APP_VERSION).0"
+          $versionInfo = (Get-Item 'target/release/finance-app.exe').VersionInfo
+          if ($versionInfo.FileVersion -ne $env:FINANCE_APP_VERSION -or
+              $versionInfo.ProductVersion -ne $env:FINANCE_APP_VERSION -or
+              $versionInfo.FileMajorPart -ne $expected.Major -or
+              $versionInfo.FileMinorPart -ne $expected.Minor -or
+              $versionInfo.FileBuildPart -ne $expected.Build -or
+              $versionInfo.FilePrivatePart -ne 0 -or
+              $versionInfo.ProductMajorPart -ne $expected.Major -or
+              $versionInfo.ProductMinorPart -ne $expected.Minor -or
+              $versionInfo.ProductBuildPart -ne $expected.Build -or
+              $versionInfo.ProductPrivatePart -ne 0) {
+            throw "Windows VERSIONINFO does not match Cargo version $($env:FINANCE_APP_VERSION)"
+          }
 
       - name: Verify Windows PE subsystems
         shell: pwsh
@@ -111,6 +145,22 @@ jobs:
       - name: Set up Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Verify release tag matches Cargo version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cargo +stable metadata --no-deps --format-version 1 --locked |
+            python3 -c 'import json, sys; print(next(package["version"] for package in json.load(sys.stdin)["packages"] if package["name"] == "finance-app"))')"
+          if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){2}$ ]]; then
+            printf 'Cargo app version must be MAJOR.MINOR.PATCH; got %s\n' "$version" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            printf 'Release tag %s must match Cargo app version v%s\n' "$GITHUB_REF_NAME" "$version" >&2
+            exit 1
+          fi
+          echo "FINANCE_APP_VERSION=$version" >> "$GITHUB_ENV"
+
       - name: Build release executable
         run: cargo +stable build -p finance-app --release --locked
 
@@ -120,11 +170,7 @@ jobs:
           set -euo pipefail
 
           architecture="${{ matrix.architecture }}"
-          version="${GITHUB_REF_NAME#v}"
-          if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){2}$ ]]; then
-            printf 'Release tag must be vMAJOR.MINOR.PATCH; got %s\n' "$GITHUB_REF_NAME" >&2
-            exit 1
-          fi
+          version="$FINANCE_APP_VERSION"
 
           bundle="dist/FinanceApp.app"
           archive="dist/finance-app-macos-${architecture}.zip"
@@ -155,6 +201,7 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$unpacked_plist")" = app.finance.financeapp
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$unpacked_plist")" = APPL
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$unpacked_plist")" = "$version"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$unpacked_plist")" = "$version"
           test "$(lipo -archs "$unpacked_bundle/Contents/MacOS/finance-app")" = "$architecture"
 
       - name: Upload macOS app archive

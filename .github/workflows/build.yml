@@ -19,6 +19,17 @@ jobs:
       - name: Set up Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Read app version from Cargo metadata
+        shell: pwsh
+        run: |
+          $metadata = cargo +stable metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
+          $packages = @($metadata.packages | Where-Object { $_.name -eq 'finance-app' })
+          if ($packages.Count -ne 1) {
+            throw "Expected exactly one finance-app package in Cargo metadata"
+          }
+
+          "FINANCE_APP_VERSION=$($packages[0].version)" >> $env:GITHUB_ENV
+
       - name: Locate DirectX shader compiler
         shell: pwsh
         run: |
@@ -36,6 +47,25 @@ jobs:
 
       - name: Build release executable
         run: cargo +stable build -p finance-app --release --locked
+
+      - name: Verify Windows executable version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expected = [version]"$($env:FINANCE_APP_VERSION).0"
+          $versionInfo = (Get-Item 'target/release/finance-app.exe').VersionInfo
+          if ($versionInfo.FileVersion -ne $env:FINANCE_APP_VERSION -or
+              $versionInfo.ProductVersion -ne $env:FINANCE_APP_VERSION -or
+              $versionInfo.FileMajorPart -ne $expected.Major -or
+              $versionInfo.FileMinorPart -ne $expected.Minor -or
+              $versionInfo.FileBuildPart -ne $expected.Build -or
+              $versionInfo.FilePrivatePart -ne 0 -or
+              $versionInfo.ProductMajorPart -ne $expected.Major -or
+              $versionInfo.ProductMinorPart -ne $expected.Minor -or
+              $versionInfo.ProductBuildPart -ne $expected.Build -or
+              $versionInfo.ProductPrivatePart -ne 0) {
+            throw "Windows VERSIONINFO does not match Cargo version $($env:FINANCE_APP_VERSION)"
+          }
 
       - name: Upload Windows executable
         uses: actions/upload-artifact@v4
@@ -62,17 +92,43 @@ jobs:
       - name: Set up Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Read app version from Cargo metadata
+        shell: bash
+        run: |
+          version="$(cargo +stable metadata --no-deps --format-version 1 --locked |
+            python3 -c 'import json, sys; print(next(package["version"] for package in json.load(sys.stdin)["packages"] if package["name"] == "finance-app"))')"
+          echo "FINANCE_APP_VERSION=$version" >> "$GITHUB_ENV"
+
       - name: Build release executable
         run: cargo +stable build -p finance-app --release --locked
 
-      - name: Package executable
+      - name: Package and verify macOS app
         run: |
-          mkdir -p dist
-          tar -czf "dist/finance-app-macos-${{ matrix.architecture }}.tar.gz" -C target/release finance-app
+          set -euo pipefail
+
+          architecture="${{ matrix.architecture }}"
+          version="$FINANCE_APP_VERSION"
+          bundle="dist/FinanceApp.app"
+          archive="dist/finance-app-macos-${architecture}.zip"
+          mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
+          install -m 755 target/release/finance-app "$bundle/Contents/MacOS/finance-app"
+          cp crates/app/Info.plist "$bundle/Contents/Info.plist"
+          cp assets/icons/icon.icns "$bundle/Contents/Resources/icon.icns"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$bundle/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$bundle/Contents/Info.plist"
+
+          plutil -lint "$bundle/Contents/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$bundle/Contents/Info.plist")" = "$version"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$bundle/Contents/Info.plist")" = "$version"
+          test -x "$bundle/Contents/MacOS/finance-app"
+          test -s "$bundle/Contents/Resources/icon.icns"
+          test "$(uname -m)" = "$architecture"
+          test "$(lipo -archs "$bundle/Contents/MacOS/finance-app")" = "$architecture"
+          ditto -c -k --sequesterRsrc --keepParent "$bundle" "$archive"
 
       - name: Upload macOS archive
         uses: actions/upload-artifact@v4
         with:
           name: finance-app-macos-${{ matrix.architecture }}
-          path: dist/finance-app-macos-${{ matrix.architecture }}.tar.gz
+          path: dist/finance-app-macos-${{ matrix.architecture }}.zip
           if-no-files-found: error

@@ -50,9 +50,11 @@ cargo +stable build --workspace --release
 
 #### GitHub Actions
 
-The workflow in `.github/workflows/build.yml` builds release artifacts on every push and pull request, and can also be started manually from the repository's **Actions** tab. It produces separate downloadable artifacts for Windows x64, macOS Apple Silicon (`arm64`), and macOS Intel (`x86_64`).
+The app version is defined once in `crates/app/Cargo.toml`. Windows executable metadata and both macOS bundle version fields are generated or populated from that version; tagged releases are rejected unless the tag matches it.
 
-For user-facing downloads, push a trusted version tag in the form `vMAJOR.MINOR.PATCH`, such as `v0.1.0`. The separate `.github/workflows/release.yml` builds and publishes a GitHub Release containing `finance-app.exe` for Windows x64, `finance-app-macos-arm64.zip`, and `finance-app-macos-x86_64.zip`. The ordinary build workflow remains independent and continues to provide CI artifacts.
+The workflow in `.github/workflows/build.yml` builds release artifacts on every push and pull request, and can also be started manually from the repository's **Actions** tab. It produces separate downloadable artifacts for Windows x64, macOS Apple Silicon (`arm64`), and macOS Intel (`x86_64`), with each macOS ZIP containing a versioned `FinanceApp.app` bundle.
+
+For user-facing downloads, push a trusted version tag in the form `vMAJOR.MINOR.PATCH`. The separate `.github/workflows/release.yml` builds and publishes a GitHub Release containing `finance-app.exe` for Windows x64, `finance-app-macos-arm64.zip`, and `finance-app-macos-x86_64.zip`. The ordinary build workflow remains independent and continues to provide CI artifacts.
 
 On Windows, download `finance-app.exe` from the GitHub Release and launch it directly; the release executable uses the GUI subsystem and does not open a terminal window. On macOS, download the ZIP matching the Mac's architecture, extract it, then open `FinanceApp.app` from Finder. Each archive contains one standalone `.app` bundle with its executable and icon.
 
