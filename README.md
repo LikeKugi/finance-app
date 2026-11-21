@@ -2,7 +2,7 @@
 
 FinanceApp is a local desktop application for personal and family finance management. The current implementation provides a native Russian-language window, local SQLite persistence, and functional income, expense, analysis, directory, savings, and payment document modules.
 
-The `Главная` start page opens on launch. It has no data table of its own: it embeds two compact forms for adding an income and an expense (large amount input with arithmetic expressions and an icon-only Check save button; small currency, category, card, and, for expenses, place selects), alongside short descriptions of the Income, Expenses, and Directories pages and links to every page. Records are saved with the current date and an empty comment; the date is shown near the amount. It deliberately shows no totals or balances because the formulas for "On hand" and "Balance" are not defined. Transfers are created from the Transfers page.
+The `Главная` start page opens on launch. It has no data table of its own: one centered vertical form titled `Добавление` creates an income or an expense without switching tabs or opening a modal dialog. A large amount input accepts arithmetic expressions; a large green `Добавить` button with a `CircleCheck` icon saves the record; a segmented `Доход / Расход` control keeps exactly one type active. Below it are small currency, category, card (`Зачислить на карту`), and, for expenses, place selects. Records are saved with the current date and an empty comment; the date is shown near the amount. It deliberately shows no totals or balances because the formulas for "On hand" and "Balance" are not defined. Transfers are created from the Transfers page.
 
 ## Workspace
 

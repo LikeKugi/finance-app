@@ -9,10 +9,12 @@ use finance_core::{
     TransactionKind,
 };
 use finance_db::Database;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonGroup, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, IconName, IndexPath, Selectable as _, Sizable as _,
+};
 use gpui_kit::*;
 
 use super::support::{
@@ -25,6 +27,7 @@ type Choice = Entity<SelectState<Vec<SharedString>>>;
 const NO_CARD_LABEL: &str = "Без карты";
 const NO_PLACE_LABEL: &str = "Не указано";
 const AMOUNT_PLACEHOLDER: &str = "например: 100 + 20 - 5 * 2 / 4";
+const CARD_FIELD_LABEL: &str = "Зачислить на карту";
 
 fn choice(
     items: Vec<String>,
@@ -49,11 +52,12 @@ fn can_save(category_id: Option<i64>, currency: Option<Currency>, has_category: 
     has_category && category_id.is_some() && currency.is_some()
 }
 
-/// Подпись селекта карты зависит от смысла операции.
-pub(crate) fn card_field_label(kind: TransactionKind) -> &'static str {
-    match kind {
-        TransactionKind::Income => "Зачислить на карту",
-        TransactionKind::Expense => "Оплачено картой",
+/// Тип операции выбирается ровно одной кнопкой сегментированной группы.
+fn selected_kind(selected: &[usize]) -> Option<TransactionKind> {
+    match selected {
+        [0] => Some(TransactionKind::Income),
+        [1] => Some(TransactionKind::Expense),
+        _ => None,
     }
 }
 
@@ -81,12 +85,7 @@ pub(crate) struct QuickTransactionForm {
 }
 
 impl QuickTransactionForm {
-    pub(crate) fn new(
-        database: Rc<Database>,
-        kind: TransactionKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub(crate) fn new(database: Rc<Database>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let amount_input = cx.new(|cx| InputState::new(window, cx).placeholder(AMOUNT_PLACEHOLDER));
         let currency_select = choice(
             Currency::ALL.iter().map(|c| c.code().to_owned()).collect(),
@@ -172,7 +171,7 @@ impl QuickTransactionForm {
 
         Self {
             database,
-            kind,
+            kind: TransactionKind::Income,
             amount: amount_input,
             currency: Some(Currency::Rub),
             currency_select,
@@ -192,6 +191,19 @@ impl QuickTransactionForm {
             saved: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Переключает тип операции; доступна только одна активная кнопка.
+    fn set_kind(&mut self, kind: TransactionKind, window: &mut Window, cx: &mut Context<Self>) {
+        if self.kind == kind {
+            return;
+        }
+        self.kind = kind;
+        self.category_id = None;
+        self.card_id = None;
+        self.error = None;
+        self.saved = None;
+        self.reload(window, cx);
     }
 
     /// Обновляет справочники при активации вкладки «Главная», не на кадре отрисовки.
@@ -221,6 +233,7 @@ impl QuickTransactionForm {
         self.rebuild_category_select(window, cx);
         self.rebuild_place_select(window, cx);
         self.rebuild_card_select(window, cx);
+        cx.notify();
     }
 
     fn fail(&mut self, message: String, cx: &mut Context<Self>) {
@@ -378,14 +391,6 @@ impl Render for QuickTransactionForm {
         let total = (!amount_text.trim().is_empty())
             .then(|| parse_amount_expression(&amount_text).map_err(|error| error.to_string()));
         let has_category = !self.category_ids.is_empty();
-        let title = match self.kind {
-            TransactionKind::Income => "Добавление дохода",
-            TransactionKind::Expense => "Добавление расхода",
-        };
-        let save_id = match self.kind {
-            TransactionKind::Income => "quick-income-save",
-            TransactionKind::Expense => "quick-expense-save",
-        };
         let field = |label: &'static str, control: AnyElement| {
             div()
                 .flex()
@@ -396,7 +401,7 @@ impl Render for QuickTransactionForm {
         };
 
         let mut root = div()
-            .w(px(600.0))
+            .w(px(480.0))
             .flex()
             .flex_col()
             .gap_3()
@@ -408,66 +413,75 @@ impl Render for QuickTransactionForm {
                 div()
                     .text_size(px(18.0))
                     .font_weight(FontWeight::BOLD)
-                    .child(title),
+                    .child("Добавление"),
             );
 
-        root = root.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(Input::new(&self.amount).large().into_any_element())
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(quick_form_date_caption(Local::now().date_naive())),
-                        ),
-                )
-                .child(
-                    Button::new(save_id)
-                        .large()
-                        .outline()
-                        .success()
-                        .icon(IconName::Check)
-                        .disabled(!can_save(self.category_id, self.currency, has_category))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.save(window, cx);
-                        })),
-                ),
-        );
+        root = root
+            .child(Input::new(&self.amount).large().w_full().into_any_element())
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(quick_form_date_caption(Local::now().date_naive())),
+            )
+            .child(
+                Button::new("quick-add")
+                    .large()
+                    .success()
+                    .label("Добавить")
+                    .icon(IconName::CircleCheck)
+                    .w_full()
+                    .disabled(!can_save(self.category_id, self.currency, has_category))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.save(window, cx);
+                    })),
+            )
+            .child(
+                ButtonGroup::new("quick-kind")
+                    .large()
+                    .outline()
+                    .w_full()
+                    .justify_center()
+                    .child(
+                        Button::new("quick-kind-income")
+                            .label("Доход")
+                            .selected(self.kind == TransactionKind::Income),
+                    )
+                    .child(
+                        Button::new("quick-kind-expense")
+                            .label("Расход")
+                            .selected(self.kind == TransactionKind::Expense),
+                    )
+                    .on_click(cx.listener(|this, selected: &Vec<usize>, window, cx| {
+                        if let Some(kind) = selected_kind(selected) {
+                            this.set_kind(kind, window, cx);
+                        }
+                    })),
+            );
 
         let mut selects = div()
             .flex()
-            .flex_wrap()
-            .items_end()
+            .flex_col()
             .gap_2()
             .child(field(
                 "Валюта",
                 Select::new(&self.currency_select)
                     .xsmall()
-                    .w(px(72.0))
+                    .w(px(120.0))
                     .into_any_element(),
             ))
             .child(field(
                 "Категория",
                 Select::new(&self.category_select)
                     .xsmall()
-                    .w(px(180.0))
+                    .w(px(240.0))
                     .into_any_element(),
             ))
             .child(field(
-                card_field_label(self.kind),
+                CARD_FIELD_LABEL,
                 Select::new(&self.card_select)
                     .xsmall()
-                    .w(px(160.0))
+                    .w(px(240.0))
                     .into_any_element(),
             ));
         if self.kind == TransactionKind::Expense {
@@ -475,7 +489,7 @@ impl Render for QuickTransactionForm {
                 "Место траты",
                 Select::new(&self.place_select)
                     .xsmall()
-                    .w(px(150.0))
+                    .w(px(240.0))
                     .into_any_element(),
             ));
         }
@@ -515,19 +529,23 @@ impl Render for QuickTransactionForm {
 
 #[cfg(test)]
 mod tests {
-    use super::{can_save, card_field_label, optional_id_by_label, NO_CARD_LABEL, NO_PLACE_LABEL};
+    use super::{
+        can_save, optional_id_by_label, selected_kind, CARD_FIELD_LABEL, NO_CARD_LABEL,
+        NO_PLACE_LABEL,
+    };
     use finance_core::{parse_amount_expression, Currency, TransactionKind};
 
     #[test]
-    fn card_field_label_follows_operation_kind() {
-        assert_eq!(
-            card_field_label(TransactionKind::Income),
-            "Зачислить на карту"
-        );
-        assert_eq!(
-            card_field_label(TransactionKind::Expense),
-            "Оплачено картой"
-        );
+    fn card_field_label_is_shared_for_both_operations() {
+        assert_eq!(CARD_FIELD_LABEL, "Зачислить на карту");
+    }
+
+    #[test]
+    fn only_one_operation_kind_can_be_selected() {
+        assert_eq!(selected_kind(&[0]), Some(TransactionKind::Income));
+        assert_eq!(selected_kind(&[1]), Some(TransactionKind::Expense));
+        assert_eq!(selected_kind(&[]), None);
+        assert_eq!(selected_kind(&[0, 1]), None);
     }
 
     #[test]

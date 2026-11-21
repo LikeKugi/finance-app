@@ -62,8 +62,7 @@ impl PageTab {
 
 struct AppShell {
     active: PageTab,
-    income_form: Entity<QuickTransactionForm>,
-    expense_form: Entity<QuickTransactionForm>,
+    quick_form: Entity<QuickTransactionForm>,
     income: Entity<TransactionsPage>,
     expenses: Entity<TransactionsPage>,
     directories: Entity<DirectoriesPage>,
@@ -79,9 +78,7 @@ impl AppShell {
         self.active = tab;
         match tab {
             PageTab::Home => {
-                self.income_form
-                    .update(cx, |form, cx| form.reload(window, cx));
-                self.expense_form
+                self.quick_form
                     .update(cx, |form, cx| form.reload(window, cx));
             }
             PageTab::Income => self.income.update(cx, |page, cx| page.reload(window, cx)),
@@ -168,11 +165,10 @@ impl AppShell {
         );
         root.child(
             div()
+                .w_full()
                 .flex()
-                .flex_wrap()
-                .gap_4()
-                .child(self.income_form.clone().into_any_element())
-                .child(self.expense_form.clone().into_any_element()),
+                .justify_center()
+                .child(self.quick_form.clone().into_any_element()),
         )
         .child(self.render_home_section("Разделы", described_sections(), cx))
         .child(self.render_home_section("Все страницы", all_page_links(), cx))
@@ -231,19 +227,9 @@ pub fn run(database: Database, database_path: PathBuf, app_version: &'static str
             };
             let database = Rc::new(database);
             open_window(options, cx, move |window, cx| {
-                let income_form = cx.new(|cx| {
-                    QuickTransactionForm::new(database.clone(), TransactionKind::Income, window, cx)
-                });
-                let expense_form = cx.new(|cx| {
-                    QuickTransactionForm::new(
-                        database.clone(),
-                        TransactionKind::Expense,
-                        window,
-                        cx,
-                    )
-                });
-                income_form.update(cx, |form, cx| form.reload(window, cx));
-                expense_form.update(cx, |form, cx| form.reload(window, cx));
+                let quick_form =
+                    cx.new(|cx| QuickTransactionForm::new(database.clone(), window, cx));
+                quick_form.update(cx, |form, cx| form.reload(window, cx));
                 let income = cx.new(|cx| {
                     TransactionsPage::new(database.clone(), TransactionKind::Income, window, cx)
                 });
@@ -267,8 +253,7 @@ pub fn run(database: Database, database_path: PathBuf, app_version: &'static str
                 });
                 cx.new(|_| AppShell {
                     active: PageTab::Home,
-                    income_form,
-                    expense_form,
+                    quick_form,
                     income,
                     expenses,
                     directories,
