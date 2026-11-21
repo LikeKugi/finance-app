@@ -29,9 +29,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
-use super::support::category_tree_labels;
 use super::support::{
-    collect_category_descendants, comment_suggestions, DIVISION_ROUNDING_WARNING,
+    card_label, category_tree_labels, collect_category_descendants, comment_suggestions,
+    eligible_cards, expense_place_label, DIVISION_ROUNDING_WARNING,
 };
 use super::support::{date_period_range, DatePeriod, DatePeriodRange};
 
@@ -67,46 +67,11 @@ fn period_dates(
     })
 }
 
-fn card_label(card: &PaymentDocument) -> String {
-    let card_type = match card.card_type {
-        PaymentCardType::Debit => "дебетовая",
-        PaymentCardType::Credit => "кредитная",
-    };
-    let details = format!(
-        "{} — {} #{} ({card_type}, {})",
-        card.bank_name,
-        card.payment_system.code(),
-        card.id,
-        card.currency.map_or("валюта не указана", Currency::code)
-    );
-    match card
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-    {
-        Some(name) => format!("{name} — {details}"),
-        None => details,
-    }
-}
-
-/// Карты, доступные для выбора при данной валюте операции.
-fn eligible_cards(cards: &[PaymentDocument], currency: Option<Currency>) -> Vec<&PaymentDocument> {
-    cards
-        .iter()
-        .filter(|card| card.currency.is_some() && card.currency == currency)
-        .collect()
-}
-
 fn cards_for_bank(cards: &[PaymentDocument], bank_id: Option<i64>) -> Vec<&PaymentDocument> {
     cards
         .iter()
         .filter(|card| bank_id.is_none_or(|bank_id| card.bank_id == bank_id))
         .collect()
-}
-
-fn expense_place_label(place: &ExpensePlace) -> String {
-    format!("{} · #{}", place.name, place.id)
 }
 
 fn update_bank_filter_selection(
@@ -398,11 +363,6 @@ impl TransactionsPage {
         }
         self.reload_categories(window, cx);
         self.refresh(cx);
-    }
-
-    /// Открывает форму нового дохода или расхода со страницы «Главная».
-    pub(crate) fn create_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_form(None, window, cx);
     }
 
     fn currency_filter_labels() -> Vec<String> {
@@ -2111,10 +2071,11 @@ impl Render for TransactionsPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        card_label, cards_for_bank, column_widths_with_fixed_actions, comment_preview,
-        format_column_widths, parse_column_widths, sort_transactions, update_bank_filter_selection,
-        FormValues, ACTIONS_COLUMN_WIDTH, COL_INCOME_ACTIONS,
+        cards_for_bank, column_widths_with_fixed_actions, comment_preview, format_column_widths,
+        parse_column_widths, sort_transactions, update_bank_filter_selection, FormValues,
+        ACTIONS_COLUMN_WIDTH, COL_INCOME_ACTIONS,
     };
+    use crate::gpui::support::card_label;
     use chrono::NaiveDate;
     use finance_core::FinancialTransaction;
     use finance_core::{

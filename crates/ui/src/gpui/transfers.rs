@@ -551,14 +551,6 @@ impl TransfersPage {
         self.refresh(cx);
     }
 
-    /// Открывает форму нового перевода со страницы «Главная», обновив счета.
-    pub(crate) fn create_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.reload_accounts(window, cx);
-        if can_create_transfer(&self.cards, &self.savings) {
-            self.begin_new(window, cx);
-        }
-    }
-
     fn reload_accounts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match finance_db::list_payment_documents(&self.database, None, None, None) {
             Ok(cards) => self.cards = cards,

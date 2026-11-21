@@ -6,17 +6,16 @@ use finance_db::Database;
 
 use super::analysis::AnalysisPage;
 use super::directories::DirectoriesPage;
-use super::home::{
-    all_page_links, described_sections, home_action_tab, quick_actions, HomeAction, HomeLink,
-};
+use super::home::{all_page_links, described_sections, home_action_tab, HomeAction, HomeLink};
 use super::payment_documents::PaymentDocumentsPage;
+use super::quick_forms::QuickTransactionForm;
 use super::savings::SavingsPage;
 use super::settings::SettingsPage;
 use super::transactions::TransactionsPage;
-use super::transfers::{can_create_transfer, TransfersPage};
+use super::transfers::TransfersPage;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _};
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 
 /// Вкладки приложения; порядок и названия как в прежнем интерфейсе.
@@ -62,10 +61,9 @@ impl PageTab {
 }
 
 struct AppShell {
-    database: Rc<Database>,
-    transfer_available: bool,
-    home_message: Option<String>,
     active: PageTab,
+    income_form: Entity<QuickTransactionForm>,
+    expense_form: Entity<QuickTransactionForm>,
     income: Entity<TransactionsPage>,
     expenses: Entity<TransactionsPage>,
     directories: Entity<DirectoriesPage>,
@@ -77,29 +75,15 @@ struct AppShell {
 }
 
 impl AppShell {
-    /// Проверка счетов для быстрого действия «Добавить перевод»: вызывается
-    /// при открытии «Главной», но не на кадре отрисовки.
-    fn refresh_transfer_availability(&mut self) {
-        match (
-            finance_db::list_payment_documents(&self.database, None, None, None),
-            finance_db::list_savings(&self.database, None, None, ""),
-        ) {
-            (Ok(cards), Ok(savings)) => {
-                self.transfer_available = can_create_transfer(&cards, &savings);
-                self.home_message = None;
-            }
-            (Err(error), _) | (_, Err(error)) => {
-                self.home_message = Some(format!(
-                    "Не удалось проверить доступность переводов: {error}"
-                ));
-            }
-        }
-    }
-
     fn activate(&mut self, tab: PageTab, window: &mut Window, cx: &mut Context<Self>) {
         self.active = tab;
         match tab {
-            PageTab::Home => self.refresh_transfer_availability(),
+            PageTab::Home => {
+                self.income_form
+                    .update(cx, |form, cx| form.reload(window, cx));
+                self.expense_form
+                    .update(cx, |form, cx| form.reload(window, cx));
+            }
             PageTab::Income => self.income.update(cx, |page, cx| page.reload(window, cx)),
             PageTab::Expenses => self.expenses.update(cx, |page, cx| page.reload(window, cx)),
             PageTab::Directories => self.directories.update(cx, |page, cx| page.reload(cx)),
@@ -117,21 +101,6 @@ impl AppShell {
 
     fn run_home_action(&mut self, action: HomeAction, window: &mut Window, cx: &mut Context<Self>) {
         self.activate(home_action_tab(action), window, cx);
-        match action {
-            HomeAction::NewIncome => {
-                let income = self.income.clone();
-                income.update(cx, |page, cx| page.create_new(window, cx));
-            }
-            HomeAction::NewExpense => {
-                let expenses = self.expenses.clone();
-                expenses.update(cx, |page, cx| page.create_new(window, cx));
-            }
-            HomeAction::NewTransfer if self.transfer_available => {
-                let transfers = self.transfers.clone();
-                transfers.update(cx, |page, cx| page.create_new(window, cx));
-            }
-            _ => {}
-        }
         cx.notify();
     }
 
@@ -182,9 +151,7 @@ impl AppShell {
             .into_any_element()
     }
 
-    fn render_home(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let transfer_available = self.transfer_available;
-        let message = self.home_message.clone();
+    fn render_home(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut root = div()
             .id("home-page")
             .size_full()
@@ -199,32 +166,13 @@ impl AppShell {
                 .font_weight(FontWeight::BOLD)
                 .child("Главная"),
         );
-        if let Some(message) = message {
-            root = root.child(div().text_color(cx.theme().danger).child(message));
-        }
         root.child(
-            div()
-                .text_size(px(18.0))
-                .font_weight(FontWeight::BOLD)
-                .child("Быстрые действия"),
-        )
-        .child(
             div()
                 .flex()
                 .flex_wrap()
-                .gap_3()
-                .children(quick_actions().map(|action| {
-                    let selected = action.action;
-                    Button::new(format!("home-action-{}", action.label))
-                        .primary()
-                        .large()
-                        .label(action.label)
-                        .icon(IconName::Plus)
-                        .disabled(selected == HomeAction::NewTransfer && !transfer_available)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.run_home_action(selected, window, cx);
-                        }))
-                })),
+                .gap_4()
+                .child(self.income_form.clone().into_any_element())
+                .child(self.expense_form.clone().into_any_element()),
         )
         .child(self.render_home_section("Разделы", described_sections(), cx))
         .child(self.render_home_section("Все страницы", all_page_links(), cx))
@@ -283,13 +231,19 @@ pub fn run(database: Database, database_path: PathBuf, app_version: &'static str
             };
             let database = Rc::new(database);
             open_window(options, cx, move |window, cx| {
-                let transfer_available = matches!(
-                    (
-                        finance_db::list_payment_documents(&database, None, None, None),
-                        finance_db::list_savings(&database, None, None, ""),
-                    ),
-                    (Ok(cards), Ok(savings)) if can_create_transfer(&cards, &savings)
-                );
+                let income_form = cx.new(|cx| {
+                    QuickTransactionForm::new(database.clone(), TransactionKind::Income, window, cx)
+                });
+                let expense_form = cx.new(|cx| {
+                    QuickTransactionForm::new(
+                        database.clone(),
+                        TransactionKind::Expense,
+                        window,
+                        cx,
+                    )
+                });
+                income_form.update(cx, |form, cx| form.reload(window, cx));
+                expense_form.update(cx, |form, cx| form.reload(window, cx));
                 let income = cx.new(|cx| {
                     TransactionsPage::new(database.clone(), TransactionKind::Income, window, cx)
                 });
@@ -312,10 +266,9 @@ pub fn run(database: Database, database_path: PathBuf, app_version: &'static str
                     )
                 });
                 cx.new(|_| AppShell {
-                    database: database.clone(),
-                    transfer_available,
-                    home_message: None,
                     active: PageTab::Home,
+                    income_form,
+                    expense_form,
                     income,
                     expenses,
                     directories,
@@ -332,9 +285,6 @@ pub fn run(database: Database, database_path: PathBuf, app_version: &'static str
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::assets::{Assets, IconName};
-    use gpui_kit::AssetSource;
-
     use super::PageTab;
 
     #[test]
@@ -346,15 +296,5 @@ mod tests {
         for tab in PageTab::ALL {
             assert!(titles.insert(tab.title()), "дубликат названия вкладки");
         }
-    }
-
-    #[test]
-    fn bundled_plus_icon_is_available() {
-        let icon_path = IconName::Plus.path();
-        let icon = Assets
-            .load(icon_path.as_ref())
-            .expect("ошибка чтения встроенного значка Plus");
-
-        assert!(icon.is_some(), "встроенный значок Plus отсутствует");
     }
 }

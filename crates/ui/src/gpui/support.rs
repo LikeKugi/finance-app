@@ -3,7 +3,9 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{Datelike, Days, Months, NaiveDate};
-use finance_core::{Category, CurrencyDefinition};
+use finance_core::{
+    Category, Currency, CurrencyDefinition, ExpensePlace, PaymentCardType, PaymentDocument,
+};
 use rust_decimal::RoundingStrategy;
 
 pub(crate) const DIVISION_ROUNDING_WARNING: &str = "Деление округляется до 2 знаков после запятой; погрешность может накапливаться при нескольких делениях.";
@@ -218,6 +220,50 @@ pub(crate) fn collect_category_descendants(categories: &[Category], root_id: i64
     result
 }
 
+/// Подпись карты с банком, системой, номером, типом и валютой.
+pub(crate) fn card_label(card: &PaymentDocument) -> String {
+    let card_type = match card.card_type {
+        PaymentCardType::Debit => "дебетовая",
+        PaymentCardType::Credit => "кредитная",
+    };
+    let details = format!(
+        "{} — {} #{} ({card_type}, {})",
+        card.bank_name,
+        card.payment_system.code(),
+        card.id,
+        card.currency.map_or("валюта не указана", Currency::code)
+    );
+    match card
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        Some(name) => format!("{name} — {details}"),
+        None => details,
+    }
+}
+
+/// Карты, доступные для выбора при данной валюте операции.
+pub(crate) fn eligible_cards(
+    cards: &[PaymentDocument],
+    currency: Option<Currency>,
+) -> Vec<&PaymentDocument> {
+    cards
+        .iter()
+        .filter(|card| card.currency.is_some() && card.currency == currency)
+        .collect()
+}
+
+pub(crate) fn expense_place_label(place: &ExpensePlace) -> String {
+    format!("{} · #{}", place.name, place.id)
+}
+
+/// Пояснение к полю суммы компактной формы: дата записи без поля выбора даты.
+pub(crate) fn quick_form_date_caption(date: NaiveDate) -> String {
+    format!("Дата: сегодня ({})", date.format("%d.%m.%Y"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +271,61 @@ mod tests {
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(year, month, day).expect("valid test date")
+    }
+
+    fn payment_document(id: i64, currency: Option<Currency>) -> PaymentDocument {
+        PaymentDocument {
+            id,
+            name: None,
+            bank_id: 1,
+            bank_name: "Альфа-Банк".to_owned(),
+            payment_system: finance_core::PaymentSystem::Mir,
+            card_type: PaymentCardType::Debit,
+            amount: Decimal::ONE,
+            currency,
+            due_date: None,
+            grace_period_days: None,
+            affects_deposit_rate: false,
+            min_monthly_spend: None,
+            linked_savings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn quick_form_date_caption_shows_the_actual_date() {
+        assert_eq!(
+            quick_form_date_caption(date(2026, 11, 21)),
+            "Дата: сегодня (21.11.2026)"
+        );
+    }
+
+    #[test]
+    fn eligible_cards_keep_only_the_matching_currency() {
+        let rub = payment_document(1, Some(Currency::Rub));
+        let usd = payment_document(2, Some(Currency::Usd));
+        let unknown = payment_document(3, None);
+        let cards = [rub, usd, unknown];
+
+        let ids: Vec<i64> = eligible_cards(&cards, Some(Currency::Rub))
+            .into_iter()
+            .map(|card| card.id)
+            .collect();
+        assert_eq!(ids, vec![1]);
+        assert!(eligible_cards(&cards, None).is_empty());
+    }
+
+    #[test]
+    fn expense_place_label_includes_id_and_card_label_includes_currency() {
+        let place = ExpensePlace {
+            id: 4,
+            name: "Магазин".to_owned(),
+            comment: None,
+        };
+        assert_eq!(expense_place_label(&place), "Магазин · #4");
+        assert_eq!(
+            card_label(&payment_document(5, Some(Currency::Usd))),
+            "Альфа-Банк — MIR #5 (дебетовая, USD)"
+        );
     }
 
     #[test]
