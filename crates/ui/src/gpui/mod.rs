@@ -8,5 +8,6 @@ mod settings;
 mod shell;
 mod support;
 mod transactions;
+mod transfers;
 
 pub use shell::run;

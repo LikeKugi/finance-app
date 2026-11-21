@@ -10,6 +10,7 @@ use super::payment_documents::PaymentDocumentsPage;
 use super::savings::SavingsPage;
 use super::settings::SettingsPage;
 use super::transactions::TransactionsPage;
+use super::transfers::TransfersPage;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
@@ -20,6 +21,7 @@ pub(crate) enum PageTab {
     Income,
     Expenses,
     Savings,
+    Transfers,
     PaymentDocuments,
     Analysis,
     Directories,
@@ -27,10 +29,11 @@ pub(crate) enum PageTab {
 }
 
 impl PageTab {
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::Income,
         Self::Expenses,
         Self::Savings,
+        Self::Transfers,
         Self::PaymentDocuments,
         Self::Analysis,
         Self::Directories,
@@ -42,6 +45,7 @@ impl PageTab {
             Self::Income => "Доходы",
             Self::Expenses => "Расходы",
             Self::Savings => "Накопления",
+            Self::Transfers => "Переводы",
             Self::PaymentDocuments => "Платёжные карты",
             Self::Analysis => "Анализ",
             Self::Directories => "Справочники",
@@ -56,6 +60,7 @@ struct AppShell {
     expenses: Entity<TransactionsPage>,
     directories: Entity<DirectoriesPage>,
     savings: Entity<SavingsPage>,
+    transfers: Entity<TransfersPage>,
     payment_documents: Entity<PaymentDocumentsPage>,
     analysis: Entity<AnalysisPage>,
     settings: Entity<SettingsPage>,
@@ -79,6 +84,9 @@ impl Render for AppShell {
                         PageTab::Expenses => this.expenses.update(cx, |p, cx| p.reload(window, cx)),
                         PageTab::Directories => this.directories.update(cx, |p, cx| p.reload(cx)),
                         PageTab::Savings => this.savings.update(cx, |p, cx| p.reload(window, cx)),
+                        PageTab::Transfers => {
+                            this.transfers.update(cx, |p, cx| p.reload(window, cx))
+                        }
                         PageTab::PaymentDocuments => this
                             .payment_documents
                             .update(cx, |p, cx| p.reload(window, cx)),
@@ -102,6 +110,7 @@ impl Render for AppShell {
                 PageTab::Expenses => self.expenses.clone().into_any_element(),
                 PageTab::Directories => self.directories.clone().into_any_element(),
                 PageTab::Savings => self.savings.clone().into_any_element(),
+                PageTab::Transfers => self.transfers.clone().into_any_element(),
                 PageTab::PaymentDocuments => self.payment_documents.clone().into_any_element(),
                 PageTab::Analysis => self.analysis.clone().into_any_element(),
                 PageTab::Settings => self.settings.clone().into_any_element(),
@@ -128,6 +137,7 @@ pub fn run(database: Database, database_path: PathBuf, app_version: &'static str
                 });
                 let directories = cx.new(|cx| DirectoriesPage::new(database.clone(), cx));
                 let savings = cx.new(|cx| SavingsPage::new(database.clone(), window, cx));
+                let transfers = cx.new(|cx| TransfersPage::new(database.clone(), window, cx));
                 let payment_documents =
                     cx.new(|cx| PaymentDocumentsPage::new(database.clone(), window, cx));
                 let analysis = cx.new(|cx| AnalysisPage::new(database.clone(), window, cx));
@@ -146,6 +156,7 @@ pub fn run(database: Database, database_path: PathBuf, app_version: &'static str
                     expenses,
                     directories,
                     savings,
+                    transfers,
                     payment_documents,
                     analysis,
                     settings,

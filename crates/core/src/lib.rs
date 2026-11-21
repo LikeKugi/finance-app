@@ -844,6 +844,24 @@ pub enum DomainError {
     InvalidPaymentRateCondition,
     #[error("Связанные накопления не должны повторяться")]
     DuplicatePaymentDocumentSavings,
+    #[error("Неизвестный тип операции перевода: {0}")]
+    UnknownTransferOperationType(String),
+    #[error("Неизвестная сторона перевода: {0}")]
+    UnknownTransferEndpoint(String),
+    #[error("Неверное направление перевода для выбранного типа операции")]
+    InvalidTransferDirection,
+    #[error("Валюта перевода должна совпадать с валютой обоих счетов")]
+    TransferCurrencyMismatch,
+    #[error("Источник и получатель перевода должны быть разными счетами")]
+    TransferSameAccount,
+    #[error("Кредитные карты не участвуют в переводах: их лимит не является денежными средствами")]
+    TransferCreditCardForbidden,
+    #[error("Валюта счёта не указана; перевод возможен только при явно совпадающей валюте")]
+    TransferAccountCurrencyMissing,
+    #[error("Неактивное накопление нельзя выбрать для нового перевода")]
+    TransferSavingsInactive,
+    #[error("Комментарий перевода слишком длинный")]
+    InvalidTransferComment,
 }
 
 pub fn validate_payment_document(
@@ -1052,6 +1070,265 @@ pub fn canonical_amount(amount: Decimal) -> String {
     amount.normalize().to_string()
 }
 
+/// Максимальная длина комментария перевода, включая пробелы.
+pub const MAX_TRANSFER_COMMENT_LENGTH: usize = 500;
+
+/// Тип операции страницы «Переводы».
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferOperationType {
+    TopUp,
+    Transfer,
+    Withdrawal,
+}
+
+impl TransferOperationType {
+    pub const ALL: [Self; 3] = [Self::TopUp, Self::Transfer, Self::Withdrawal];
+
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::TopUp => "top_up",
+            Self::Transfer => "transfer",
+            Self::Withdrawal => "withdrawal",
+        }
+    }
+
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::TopUp => "Пополнение",
+            Self::Transfer => "Перевод",
+            Self::Withdrawal => "Снятие наличных",
+        }
+    }
+
+    /// Проверяет, допустимо ли направление для этого типа операции.
+    pub const fn allows(self, source: &TransferEndpoint, destination: &TransferEndpoint) -> bool {
+        match self {
+            Self::TopUp => {
+                matches!(source, TransferEndpoint::External)
+                    && matches!(
+                        destination,
+                        TransferEndpoint::Card(_) | TransferEndpoint::Savings(_)
+                    )
+            }
+            Self::Transfer => {
+                matches!(
+                    source,
+                    TransferEndpoint::Card(_) | TransferEndpoint::Savings(_)
+                ) && matches!(
+                    destination,
+                    TransferEndpoint::Card(_) | TransferEndpoint::Savings(_)
+                )
+            }
+            Self::Withdrawal => {
+                matches!(
+                    source,
+                    TransferEndpoint::Card(_) | TransferEndpoint::Savings(_)
+                ) && matches!(destination, TransferEndpoint::Cash)
+            }
+        }
+    }
+}
+
+impl FromStr for TransferOperationType {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "top_up" => Ok(Self::TopUp),
+            "transfer" => Ok(Self::Transfer),
+            "withdrawal" => Ok(Self::Withdrawal),
+            other => Err(DomainError::UnknownTransferOperationType(other.to_owned())),
+        }
+    }
+}
+
+impl std::fmt::Display for TransferOperationType {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.title())
+    }
+}
+
+/// Сторона перевода. `External` и `Cash` не являются учитываемыми счетами.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferEndpoint {
+    External,
+    Cash,
+    Card(i64),
+    Savings(i64),
+}
+
+impl TransferEndpoint {
+    pub const fn kind_code(self) -> &'static str {
+        match self {
+            Self::External => "external",
+            Self::Cash => "cash",
+            Self::Card(_) => "card",
+            Self::Savings(_) => "savings",
+        }
+    }
+
+    pub const fn payment_document_id(self) -> Option<i64> {
+        match self {
+            Self::Card(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    pub const fn savings_id(self) -> Option<i64> {
+        match self {
+            Self::Savings(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Собирает сторону из кода и идентификаторов, прочитанных из SQL.
+    pub fn from_code(
+        kind: &str,
+        card_id: Option<i64>,
+        savings_id: Option<i64>,
+    ) -> Result<Self, DomainError> {
+        match kind {
+            "external" => Ok(Self::External),
+            "cash" => Ok(Self::Cash),
+            "card" => card_id
+                .map(Self::Card)
+                .ok_or_else(|| DomainError::UnknownTransferEndpoint(kind.to_owned())),
+            "savings" => savings_id
+                .map(Self::Savings)
+                .ok_or_else(|| DomainError::UnknownTransferEndpoint(kind.to_owned())),
+            other => Err(DomainError::UnknownTransferEndpoint(other.to_owned())),
+        }
+    }
+}
+
+impl FromStr for TransferEndpoint {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (kind, id) = value.split_once(':').unwrap_or((value, ""));
+        match kind {
+            "external" => Ok(Self::External),
+            "cash" => Ok(Self::Cash),
+            "card" | "savings" => {
+                let id = id
+                    .parse::<i64>()
+                    .map_err(|_| DomainError::UnknownTransferEndpoint(value.to_owned()))?;
+                if id <= 0 {
+                    return Err(DomainError::UnknownTransferEndpoint(value.to_owned()));
+                }
+                if kind == "card" {
+                    Ok(Self::Card(id))
+                } else {
+                    Ok(Self::Savings(id))
+                }
+            }
+            other => Err(DomainError::UnknownTransferEndpoint(other.to_owned())),
+        }
+    }
+}
+
+impl std::fmt::Display for TransferEndpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::External => formatter.write_str("external"),
+            Self::Cash => formatter.write_str("cash"),
+            Self::Card(id) => write!(formatter, "card:{id}"),
+            Self::Savings(id) => write!(formatter, "savings:{id}"),
+        }
+    }
+}
+
+/// Проверяет валюту учитываемого счёта перед переводом.
+pub fn validate_transfer_account_currency(
+    account_currency: Option<Currency>,
+    operation_currency: Currency,
+) -> Result<(), DomainError> {
+    match account_currency {
+        None => Err(DomainError::TransferAccountCurrencyMissing),
+        Some(currency) if currency != operation_currency => {
+            Err(DomainError::TransferCurrencyMismatch)
+        }
+        Some(_) => Ok(()),
+    }
+}
+
+/// Кредитные карты не могут участвовать в переводах.
+pub fn validate_transfer_card_type(card_type: PaymentCardType) -> Result<(), DomainError> {
+    match card_type {
+        PaymentCardType::Debit => Ok(()),
+        PaymentCardType::Credit => Err(DomainError::TransferCreditCardForbidden),
+    }
+}
+
+/// Неактивные накопления сохраняются в истории, но недоступны для новых операций.
+pub fn validate_transfer_savings_active(is_active: bool) -> Result<(), DomainError> {
+    if is_active {
+        Ok(())
+    } else {
+        Err(DomainError::TransferSavingsInactive)
+    }
+}
+
+/// Параметры операции «Переводы» без технического идентификатора записи.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferDetails {
+    pub operation_date: NaiveDate,
+    pub operation_type: TransferOperationType,
+    pub source: TransferEndpoint,
+    pub destination: TransferEndpoint,
+    pub amount: Decimal,
+    pub currency: Currency,
+    pub comment: Option<String>,
+}
+
+impl TransferDetails {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        validate_transfer(
+            self.operation_type,
+            &self.source,
+            &self.destination,
+            self.amount,
+            self.comment.as_deref(),
+        )
+    }
+}
+
+/// Запись журнала переводов.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferRecord {
+    pub id: i64,
+    pub operation_date: NaiveDate,
+    pub operation_type: TransferOperationType,
+    pub source: TransferEndpoint,
+    pub destination: TransferEndpoint,
+    pub amount: Decimal,
+    pub currency: Currency,
+    pub comment: Option<String>,
+}
+
+/// Чистая валидация операции; проверки, требующие БД, выполняются в `finance-db`.
+pub fn validate_transfer(
+    operation_type: TransferOperationType,
+    source: &TransferEndpoint,
+    destination: &TransferEndpoint,
+    amount: Decimal,
+    comment: Option<&str>,
+) -> Result<(), DomainError> {
+    if amount <= Decimal::ZERO {
+        return Err(DomainError::InvalidAmount);
+    }
+    if !operation_type.allows(source, destination) {
+        return Err(DomainError::InvalidTransferDirection);
+    }
+    if source == destination {
+        return Err(DomainError::TransferSameAccount);
+    }
+    if comment.is_some_and(|text| text.chars().count() > MAX_TRANSFER_COMMENT_LENGTH) {
+        return Err(DomainError::InvalidTransferComment);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
@@ -1061,8 +1338,10 @@ mod tests {
     use super::{
         canonical_amount, parse_amount, parse_amount_expression, parse_non_negative_decimal,
         rebase_exchange_rate, validate_currency_code, validate_exchange_rate,
-        validate_payment_document, validate_savings, DomainError, InterestDestination,
-        PaymentCardType, PaymentDocumentDetails, PaymentSystem, SavingsTerm,
+        validate_payment_document, validate_savings, validate_transfer_account_currency,
+        validate_transfer_card_type, validate_transfer_savings_active, Currency, DomainError,
+        InterestDestination, PaymentCardType, PaymentDocumentDetails, PaymentSystem, SavingsTerm,
+        TransferDetails, TransferEndpoint, TransferOperationType, MAX_TRANSFER_COMMENT_LENGTH,
     };
 
     #[test]
@@ -1440,5 +1719,120 @@ mod tests {
             ),
             Err(DomainError::DuplicatePaymentDocumentSavings)
         );
+    }
+
+    #[test]
+    fn transfer_operation_codes_roundtrip() {
+        for operation in TransferOperationType::ALL {
+            assert_eq!(operation.to_string(), operation.title());
+            assert_eq!(
+                operation.code().parse::<TransferOperationType>(),
+                Ok(operation)
+            );
+        }
+        assert_eq!(
+            "other".parse::<TransferOperationType>(),
+            Err(DomainError::UnknownTransferOperationType(
+                "other".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn transfer_endpoint_codes_roundtrip() {
+        let endpoints = [
+            TransferEndpoint::External,
+            TransferEndpoint::Cash,
+            TransferEndpoint::Card(12),
+            TransferEndpoint::Savings(34),
+        ];
+        for endpoint in endpoints {
+            let code = endpoint.to_string();
+            assert_eq!(code.parse::<TransferEndpoint>(), Ok(endpoint));
+            assert_eq!(
+                TransferEndpoint::from_code(
+                    endpoint.kind_code(),
+                    endpoint.payment_document_id(),
+                    endpoint.savings_id()
+                ),
+                Ok(endpoint)
+            );
+        }
+        assert_eq!(
+            "card:0".parse::<TransferEndpoint>(),
+            Err(DomainError::UnknownTransferEndpoint("card:0".to_owned()))
+        );
+    }
+
+    #[test]
+    fn transfer_validation_rejects_invalid_amount_direction_and_self_transfer() {
+        let date = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        let valid = TransferDetails {
+            operation_date: date,
+            operation_type: TransferOperationType::Transfer,
+            source: TransferEndpoint::Card(1),
+            destination: TransferEndpoint::Savings(2),
+            amount: Decimal::new(125, 2),
+            currency: Currency::Rub,
+            comment: None,
+        };
+        assert_eq!(valid.validate(), Ok(()));
+
+        let mut invalid = valid.clone();
+        invalid.amount = Decimal::ZERO;
+        assert_eq!(invalid.validate(), Err(DomainError::InvalidAmount));
+
+        invalid = valid.clone();
+        invalid.destination = TransferEndpoint::External;
+        assert_eq!(
+            invalid.validate(),
+            Err(DomainError::InvalidTransferDirection)
+        );
+
+        invalid = valid.clone();
+        invalid.destination = TransferEndpoint::Card(1);
+        assert_eq!(invalid.validate(), Err(DomainError::TransferSameAccount));
+
+        invalid = valid.clone();
+        invalid.comment = Some("x".repeat(MAX_TRANSFER_COMMENT_LENGTH + 1));
+        assert_eq!(invalid.validate(), Err(DomainError::InvalidTransferComment));
+    }
+
+    #[test]
+    fn transfer_account_validation_requires_explicit_and_matching_currency() {
+        assert_eq!(
+            validate_transfer_account_currency(None, Currency::Rub),
+            Err(DomainError::TransferAccountCurrencyMissing)
+        );
+        assert_eq!(
+            validate_transfer_account_currency(Some(Currency::Usd), Currency::Rub),
+            Err(DomainError::TransferCurrencyMismatch)
+        );
+        assert_eq!(
+            validate_transfer_account_currency(Some(Currency::Rub), Currency::Rub),
+            Ok(())
+        );
+        assert_eq!(
+            validate_transfer_card_type(PaymentCardType::Credit),
+            Err(DomainError::TransferCreditCardForbidden)
+        );
+        assert_eq!(validate_transfer_card_type(PaymentCardType::Debit), Ok(()));
+        assert_eq!(
+            validate_transfer_savings_active(false),
+            Err(DomainError::TransferSavingsInactive)
+        );
+        assert_eq!(validate_transfer_savings_active(true), Ok(()));
+    }
+
+    #[test]
+    fn transfer_validation_accepts_only_declared_directions() {
+        assert!(TransferOperationType::TopUp
+            .allows(&TransferEndpoint::External, &TransferEndpoint::Card(1)));
+        assert!(!TransferOperationType::TopUp
+            .allows(&TransferEndpoint::Card(1), &TransferEndpoint::Cash));
+        assert!(TransferOperationType::Withdrawal
+            .allows(&TransferEndpoint::Savings(1), &TransferEndpoint::Cash));
+        assert!(!TransferOperationType::Withdrawal
+            .allows(&TransferEndpoint::Savings(1), &TransferEndpoint::Card(2)));
     }
 }

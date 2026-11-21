@@ -4,13 +4,14 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, Utc};
 use finance_core::{
     canonical_amount, rebase_exchange_rate, validate_currency_code, validate_exchange_rate,
     AnalysisTransaction, Bank, Category, Currency, CurrencyDefinition, ExpensePlace,
     FinancialTransaction, InterestDestination, LinkedSavingsAccount, PaymentCardType,
     PaymentDocument, PaymentDocumentDetails, PaymentSystem, SavingsAccount, SavingsDetails,
-    SavingsTerm, TransactionAmount, TransactionKind,
+    SavingsTerm, TransactionAmount, TransactionKind, TransferDetails, TransferEndpoint,
+    TransferOperationType, TransferRecord,
 };
 use rusqlite::backup::Backup;
 use rusqlite::{
@@ -63,6 +64,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 11,
         sql: include_str!("../migrations/V11__expense_places_and_card_names.sql"),
+    },
+    Migration {
+        version: 12,
+        sql: include_str!("../migrations/V12__transfers.sql"),
     },
 ];
 
@@ -150,6 +155,20 @@ pub enum DbError {
     PrimaryCurrencyRateImmutable,
     #[error("В базе данных должна быть ровно одна основная валюта")]
     InvalidPrimaryCurrencyConfiguration,
+    #[error("Недостаточно средств на счёте для перевода")]
+    InsufficientFunds,
+    #[error("Не удалось точно рассчитать остаток счёта при переводе: переполнение или недостаточная точность")]
+    TransferOverflow,
+    #[error("Валюта перевода не совпадает с валютой счёта")]
+    TransferCurrencyMismatch,
+    #[error("Кредитные карты не участвуют в переводах")]
+    TransferCreditCardForbidden,
+    #[error("Источник и получатель перевода должны быть разными счетами")]
+    TransferSameAccount,
+    #[error("Счёт используется в переводах и не может быть удалён или изменён")]
+    TransferAccountInUse,
+    #[error("Неактивное накопление нельзя выбрать для перевода")]
+    TransferSavingsInactive,
     #[error(transparent)]
     Domain(#[from] finance_core::DomainError),
 }
@@ -2515,32 +2534,489 @@ fn backup_before_migration(
     Ok(())
 }
 
+const TRANSFER_SELECT: &str = "SELECT t.id, t.operation_date, t.operation_type,
+        t.source_kind, t.source_payment_document_id, t.source_savings_id,
+        t.destination_kind, t.destination_payment_document_id, t.destination_savings_id,
+        t.amount, t.currency, t.comment
+ FROM transfers AS t";
+
+fn parse_transfer_row(row: &rusqlite::Row<'_>) -> Result<TransferRecord, rusqlite::Error> {
+    let date_text: String = row.get(1)?;
+    let operation_date = NaiveDate::parse_from_str(&date_text, "%Y-%m-%d").map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
+    })?;
+    let operation_type_text: String = row.get(2)?;
+    let operation_type = operation_type_text
+        .parse::<TransferOperationType>()
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+        })?;
+    let source_kind: String = row.get(3)?;
+    let source_card: Option<i64> = row.get(4)?;
+    let source_savings: Option<i64> = row.get(5)?;
+    let source = TransferEndpoint::from_code(&source_kind, source_card, source_savings).map_err(
+        |error| rusqlite::Error::FromSqlConversionFailure(3, Type::Text, Box::new(error)),
+    )?;
+    let destination_kind: String = row.get(6)?;
+    let destination_card: Option<i64> = row.get(7)?;
+    let destination_savings: Option<i64> = row.get(8)?;
+    let destination =
+        TransferEndpoint::from_code(&destination_kind, destination_card, destination_savings)
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(6, Type::Text, Box::new(error))
+            })?;
+    let currency_text: String = row.get(10)?;
+    let currency = currency_text.parse::<Currency>().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(10, Type::Text, Box::new(error))
+    })?;
+    Ok(TransferRecord {
+        id: row.get(0)?,
+        operation_date,
+        operation_type,
+        source,
+        destination,
+        amount: parse_decimal_text(row.get(9)?, 9)?,
+        currency,
+        comment: row.get(11)?,
+    })
+}
+
+fn load_transfer(connection: &Connection, id: i64) -> Result<TransferRecord, DbError> {
+    let query = format!("{TRANSFER_SELECT} WHERE t.id = ?1");
+    Ok(connection.query_row(&query, [id], parse_transfer_row)?)
+}
+
+fn normalized_transfer_comment(comment: Option<&str>) -> Option<String> {
+    comment
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
+fn validate_transfer_endpoint(
+    connection: &Connection,
+    endpoint: &TransferEndpoint,
+    currency: Currency,
+    require_active_savings: bool,
+) -> Result<(), DbError> {
+    match endpoint {
+        TransferEndpoint::External | TransferEndpoint::Cash => Ok(()),
+        TransferEndpoint::Card(id) => {
+            let (card_type_text, currency_text): (String, Option<String>) = connection.query_row(
+                "SELECT card_type, currency FROM payment_documents WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let card_type = card_type_text.parse::<PaymentCardType>()?;
+            finance_core::validate_transfer_card_type(card_type)?;
+            let account_currency = currency_text
+                .as_deref()
+                .map(str::parse::<Currency>)
+                .transpose()?;
+            finance_core::validate_transfer_account_currency(account_currency, currency)?;
+            Ok(())
+        }
+        TransferEndpoint::Savings(id) => {
+            let (is_active, currency_text): (bool, Option<String>) = connection.query_row(
+                "SELECT is_active, currency FROM savings WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if require_active_savings {
+                finance_core::validate_transfer_savings_active(is_active)?;
+            }
+            let account_currency = currency_text
+                .as_deref()
+                .map(str::parse::<Currency>)
+                .transpose()?;
+            finance_core::validate_transfer_account_currency(account_currency, currency)?;
+            Ok(())
+        }
+    }
+}
+
+fn adjust_savings_balance(connection: &Connection, id: i64, delta: Decimal) -> Result<(), DbError> {
+    let text: String =
+        connection.query_row("SELECT amount FROM savings WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })?;
+    let balance = parse_decimal_text(text, 0)?;
+    let updated = balance
+        .checked_add(delta)
+        .ok_or(DbError::TransferOverflow)?;
+    if updated.checked_sub(delta) != Some(balance) || updated.checked_sub(balance) != Some(delta) {
+        return Err(DbError::TransferOverflow);
+    }
+    if updated <= Decimal::ZERO {
+        return Err(DbError::InsufficientFunds);
+    }
+    connection.execute(
+        "UPDATE savings SET amount = ?1 WHERE id = ?2",
+        params![canonical_amount(updated), id],
+    )?;
+    Ok(())
+}
+
+fn map_transfer_card_error(error: DbError) -> DbError {
+    match error {
+        DbError::InsufficientCardBalance => DbError::InsufficientFunds,
+        DbError::CardBalanceOverflow => DbError::TransferOverflow,
+        other => other,
+    }
+}
+
+fn apply_transfer_legs(
+    connection: &Connection,
+    source: TransferEndpoint,
+    destination: TransferEndpoint,
+    amount: Decimal,
+    direction: Decimal,
+) -> Result<(), DbError> {
+    let credit = amount
+        .checked_mul(direction)
+        .ok_or(DbError::TransferOverflow)?;
+    let debit = Decimal::ZERO
+        .checked_sub(credit)
+        .ok_or(DbError::TransferOverflow)?;
+    match source {
+        TransferEndpoint::Card(id) => {
+            adjust_card_balance(connection, id, debit).map_err(map_transfer_card_error)?;
+        }
+        TransferEndpoint::Savings(id) => adjust_savings_balance(connection, id, debit)?,
+        TransferEndpoint::External | TransferEndpoint::Cash => {}
+    }
+    match destination {
+        TransferEndpoint::Card(id) => {
+            adjust_card_balance(connection, id, credit).map_err(map_transfer_card_error)?;
+        }
+        TransferEndpoint::Savings(id) => adjust_savings_balance(connection, id, credit)?,
+        TransferEndpoint::External | TransferEndpoint::Cash => {}
+    }
+    Ok(())
+}
+
+/// Atomic transfer save with exact balance changes on both participating accounts.
+pub fn save_transfer(
+    connection: &Connection,
+    id: Option<i64>,
+    transfer: &TransferDetails,
+) -> Result<i64, DbError> {
+    transfer.validate()?;
+    let transaction =
+        rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    validate_transfer_endpoint(&transaction, &transfer.source, transfer.currency, true)?;
+    validate_transfer_endpoint(&transaction, &transfer.destination, transfer.currency, true)?;
+
+    let saved_id = if let Some(id) = id {
+        let previous = load_transfer(&transaction, id)?;
+        apply_transfer_legs(
+            &transaction,
+            previous.source,
+            previous.destination,
+            previous.amount,
+            Decimal::NEGATIVE_ONE,
+        )?;
+        let changed = transaction.execute(
+            "UPDATE transfers
+             SET operation_date = ?1, operation_type = ?2, source_kind = ?3,
+                 source_payment_document_id = ?4, source_savings_id = ?5,
+                 destination_kind = ?6, destination_payment_document_id = ?7,
+                 destination_savings_id = ?8, amount = ?9, currency = ?10, comment = ?11
+             WHERE id = ?12",
+            params![
+                transfer.operation_date.format("%Y-%m-%d").to_string(),
+                transfer.operation_type.code(),
+                transfer.source.kind_code(),
+                transfer.source.payment_document_id(),
+                transfer.source.savings_id(),
+                transfer.destination.kind_code(),
+                transfer.destination.payment_document_id(),
+                transfer.destination.savings_id(),
+                canonical_amount(transfer.amount),
+                transfer.currency.code(),
+                normalized_transfer_comment(transfer.comment.as_deref()),
+                id,
+            ],
+        )?;
+        if changed == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows.into());
+        }
+        id
+    } else {
+        transaction.execute(
+            "INSERT INTO transfers (
+                 operation_date, operation_type, source_kind, source_payment_document_id,
+                 source_savings_id, destination_kind, destination_payment_document_id,
+                 destination_savings_id, amount, currency, comment, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                transfer.operation_date.format("%Y-%m-%d").to_string(),
+                transfer.operation_type.code(),
+                transfer.source.kind_code(),
+                transfer.source.payment_document_id(),
+                transfer.source.savings_id(),
+                transfer.destination.kind_code(),
+                transfer.destination.payment_document_id(),
+                transfer.destination.savings_id(),
+                canonical_amount(transfer.amount),
+                transfer.currency.code(),
+                normalized_transfer_comment(transfer.comment.as_deref()),
+                Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
+            ],
+        )?;
+        transaction.last_insert_rowid()
+    };
+
+    apply_transfer_legs(
+        &transaction,
+        transfer.source,
+        transfer.destination,
+        transfer.amount,
+        Decimal::ONE,
+    )?;
+    transaction.commit()?;
+    Ok(saved_id)
+}
+
+/// Deletes a transfer and reverses both balance legs atomically.
+pub fn delete_transfer(connection: &Connection, id: i64) -> Result<(), DbError> {
+    let transaction =
+        rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    let record = load_transfer(&transaction, id)?;
+    apply_transfer_legs(
+        &transaction,
+        record.source,
+        record.destination,
+        record.amount,
+        Decimal::NEGATIVE_ONE,
+    )?;
+    let deleted = transaction.execute("DELETE FROM transfers WHERE id = ?1", [id])?;
+    if deleted == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows.into());
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Lists transfers; date boundaries are inclusive. All filters are combined with AND.
+#[allow(clippy::too_many_arguments)]
+pub fn list_transfers_filtered(
+    connection: &Connection,
+    date_from: Option<NaiveDate>,
+    date_to: Option<NaiveDate>,
+    operation_type: Option<TransferOperationType>,
+    source: Option<TransferEndpoint>,
+    destination: Option<TransferEndpoint>,
+    currency: Option<Currency>,
+    search: &str,
+) -> Result<Vec<TransferRecord>, DbError> {
+    let query = format!(
+        "{TRANSFER_SELECT}
+         LEFT JOIN payment_documents AS source_card
+            ON source_card.id = t.source_payment_document_id
+         LEFT JOIN savings AS source_savings
+            ON source_savings.id = t.source_savings_id
+         LEFT JOIN payment_documents AS destination_card
+            ON destination_card.id = t.destination_payment_document_id
+         LEFT JOIN savings AS destination_savings
+            ON destination_savings.id = t.destination_savings_id
+         WHERE (?1 IS NULL OR date(t.operation_date) >= date(?1))
+           AND (?2 IS NULL OR date(t.operation_date) <= date(?2))
+           AND (?3 IS NULL OR t.operation_type = ?3)
+           AND (?4 IS NULL OR t.source_kind = ?4)
+           AND (?5 IS NULL OR t.source_payment_document_id = ?5)
+           AND (?6 IS NULL OR t.source_savings_id = ?6)
+           AND (?7 IS NULL OR t.destination_kind = ?7)
+           AND (?8 IS NULL OR t.destination_payment_document_id = ?8)
+           AND (?9 IS NULL OR t.destination_savings_id = ?9)
+           AND (?10 IS NULL OR t.currency = ?10)
+           AND (
+               ?11 IS NULL
+               OR instr(coalesce(t.comment, '') || ' ' || coalesce(source_card.name, '')
+                        || ' ' || coalesce(source_savings.title, '') || ' '
+                        || coalesce(destination_card.name, '') || ' '
+                        || coalesce(destination_savings.title, ''), ?11) > 0
+               OR instr(coalesce(t.comment, '') || ' ' || coalesce(source_card.name, '')
+                        || ' ' || coalesce(source_savings.title, '') || ' '
+                        || coalesce(destination_card.name, '') || ' '
+                        || coalesce(destination_savings.title, ''), ?12) > 0
+               OR instr(coalesce(t.comment, '') || ' ' || coalesce(source_card.name, '')
+                        || ' ' || coalesce(source_savings.title, '') || ' '
+                        || coalesce(destination_card.name, '') || ' '
+                        || coalesce(destination_savings.title, ''), ?13) > 0
+           )
+         ORDER BY t.operation_date DESC, t.id DESC"
+    );
+    let search = search.trim();
+    let search_lower = search.to_lowercase();
+    let search_upper = search.to_uppercase();
+    let mut statement = connection.prepare(&query)?;
+    let rows = statement.query_map(
+        params![
+            date_from.map(|date| date.format("%Y-%m-%d").to_string()),
+            date_to.map(|date| date.format("%Y-%m-%d").to_string()),
+            operation_type.map(TransferOperationType::code),
+            source.map(TransferEndpoint::kind_code),
+            source.and_then(TransferEndpoint::payment_document_id),
+            source.and_then(TransferEndpoint::savings_id),
+            destination.map(TransferEndpoint::kind_code),
+            destination.and_then(TransferEndpoint::payment_document_id),
+            destination.and_then(TransferEndpoint::savings_id),
+            currency.map(Currency::code),
+            (!search.is_empty()).then_some(search),
+            (!search_lower.is_empty()).then_some(search_lower.as_str()),
+            (!search_upper.is_empty()).then_some(search_upper.as_str()),
+        ],
+        parse_transfer_row,
+    )?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
     use finance_core::{
         summarize_analysis, Currency, CurrencyDefinition, DomainError, ExpensePlace,
         InterestDestination, PaymentCardType, PaymentDocumentDetails, PaymentSystem,
-        SavingsDetails, SavingsTerm, TransactionKind,
+        SavingsDetails, SavingsTerm, TransactionKind, TransferDetails, TransferEndpoint,
+        TransferOperationType,
     };
-    use rusqlite::{Connection, OpenFlags};
+    use rusqlite::{params, Connection, OpenFlags};
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
     use super::{
         add_currency, delete_bank, delete_category, delete_currency, delete_expense_place,
-        delete_payment_document, delete_savings, export_database_backup_from_path, get_app_setting,
-        has_pending_database_import, initialize, list_currencies, list_expense_places,
-        list_payment_documents, list_payment_documents_filtered, list_savings,
+        delete_payment_document, delete_savings, delete_transfer, export_database_backup_from_path,
+        get_app_setting, has_pending_database_import, initialize, list_currencies,
+        list_expense_places, list_payment_documents, list_payment_documents_filtered, list_savings,
         list_savings_filtered, list_transaction_amounts, list_transaction_comments,
         list_transactions, list_transactions_filtered, list_transactions_filtered_by_place,
-        load_analysis_transactions, load_analysis_transactions_by_category,
-        restore_pending_database_import, save_bank, save_category, save_expense_place,
-        save_payment_document, save_savings, save_transaction, save_transaction_with_card,
-        save_transaction_with_card_and_rate_effect_and_place, set_app_setting,
-        set_currency_exchange_rate, set_primary_currency, stage_database_import, DbError,
-        MIGRATIONS,
+        list_transfers_filtered, load_analysis_transactions,
+        load_analysis_transactions_by_category, restore_pending_database_import, save_bank,
+        save_category, save_expense_place, save_payment_document, save_savings, save_transaction,
+        save_transaction_with_card, save_transaction_with_card_and_rate_effect_and_place,
+        save_transfer, set_app_setting, set_currency_exchange_rate, set_primary_currency,
+        stage_database_import, DbError, MIGRATIONS,
     };
+
+    fn transfer_fixture() -> (tempfile::TempDir, Connection, i64, i64, i64) {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let bank_id = save_bank(&connection, None, "Банк переводов", "").unwrap();
+
+        let mut first_card = payment_document_details(bank_id);
+        first_card.name = Some("Карта источник".to_owned());
+        first_card.amount = Decimal::from_str("1000.5").unwrap();
+        first_card.currency = Some(Currency::Rub);
+        let first_card_id = save_payment_document(&connection, None, &first_card).unwrap();
+
+        let mut second_card = payment_document_details(bank_id);
+        second_card.name = Some("Карта получатель".to_owned());
+        second_card.amount = Decimal::from_str("100.25").unwrap();
+        second_card.currency = Some(Currency::Rub);
+        let second_card_id = save_payment_document(&connection, None, &second_card).unwrap();
+
+        let mut account = savings_details(bank_id);
+        account.title = "Накопление для переводов".to_owned();
+        account.amount = Decimal::from_str("500.75").unwrap();
+        account.currency = Some(Currency::Rub);
+        account.term_type = SavingsTerm::Unlimited;
+        account.term_end_date = None;
+        let savings_id = save_savings(&connection, None, &account).unwrap();
+
+        (
+            directory,
+            connection,
+            first_card_id,
+            second_card_id,
+            savings_id,
+        )
+    }
+
+    fn card_balance(connection: &Connection, id: i64) -> String {
+        connection
+            .query_row(
+                "SELECT amount FROM payment_documents WHERE id = ?1",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+    }
+
+    fn savings_balance(connection: &Connection, id: i64) -> String {
+        connection
+            .query_row("SELECT amount FROM savings WHERE id = ?1", [id], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap()
+    }
+
+    fn transfer_details(
+        operation_type: TransferOperationType,
+        source: TransferEndpoint,
+        destination: TransferEndpoint,
+        amount: &str,
+    ) -> TransferDetails {
+        TransferDetails {
+            operation_date: NaiveDate::from_ymd_opt(2026, 11, 21).unwrap(),
+            operation_type,
+            source,
+            destination,
+            amount: Decimal::from_str(amount).unwrap(),
+            currency: Currency::Rub,
+            comment: Some("  перевод  ".to_owned()),
+        }
+    }
+
+    #[test]
+    fn v12_migration_creates_transfer_schema() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let version: i64 = connection
+            .query_row("SELECT max(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.last().unwrap().version);
+        let triggers: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'transfers_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(triggers, 8);
+    }
+
+    #[test]
+    fn transfer_top_up_and_delete_change_only_the_destination_balance() {
+        let (_directory, connection, card_id, _, _) = transfer_fixture();
+        let details = transfer_details(
+            TransferOperationType::TopUp,
+            TransferEndpoint::External,
+            TransferEndpoint::Card(card_id),
+            "12.34567890123456789012",
+        );
+        let id = save_transfer(&connection, None, &details).unwrap();
+
+        assert_eq!(
+            card_balance(&connection, card_id),
+            "1012.84567890123456789012"
+        );
+        let records =
+            list_transfers_filtered(&connection, None, None, None, None, None, None, "").unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].comment.as_deref(), Some("перевод"));
+
+        delete_transfer(&connection, id).unwrap();
+        assert_eq!(card_balance(&connection, card_id), "1000.5");
+        assert!(
+            list_transfers_filtered(&connection, None, None, None, None, None, None, "")
+                .unwrap()
+                .is_empty()
+        );
+    }
 
     fn savings_details(bank_id: i64) -> SavingsDetails {
         SavingsDetails {
@@ -2696,7 +3172,7 @@ mod tests {
                         )
                         .unwrap();
                 }
-                4..=10 => {}
+                4..=11 => {}
                 _ => unreachable!(),
             }
         }
@@ -2713,7 +3189,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v11-")
+                    .starts_with("data.before-migration-v12-")
             })
             .count()
     }
@@ -2815,7 +3291,7 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap();
-            assert_eq!(latest_version, 11);
+            assert_eq!(latest_version, MIGRATIONS.last().unwrap().version);
 
             let income_count = connection
                 .query_row("SELECT COUNT(*) FROM incomes", [], |row| {
@@ -2960,7 +3436,7 @@ mod tests {
                     entry
                         .file_name()
                         .to_string_lossy()
-                        .starts_with("data.before-migration-v11-")
+                        .starts_with("data.before-migration-v12-")
                 })
                 .expect("upgrade should create a backup")
                 .path();
@@ -3302,7 +3778,7 @@ mod tests {
                 row.get::<_, i64>(0)
             })
             .unwrap();
-        assert_eq!(schema_version, 11);
+        assert_eq!(schema_version, MIGRATIONS.last().unwrap().version);
     }
 
     #[test]
@@ -3320,7 +3796,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v11-")
+                    .starts_with("data.before-migration-v12-")
             })
             .map(|entry| Connection::open(entry.path()).unwrap())
             .map(|backup| {
@@ -3352,7 +3828,7 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
             .unwrap();
 
-        assert_eq!(migration_count, 11);
+        assert_eq!(migration_count, MIGRATIONS.len() as i64);
         assert_eq!(foreign_keys_enabled, 1);
     }
 
@@ -5260,7 +5736,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .contains("before-migration-v11")
+                    .contains("before-migration-v12")
             })
             .count();
 
@@ -5513,7 +5989,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v11-")
+                    .starts_with("data.before-migration-v12-")
             })
             .expect("upgrade from V4 should create a backup")
             .path();
@@ -5525,7 +6001,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(savings_dates, (None, None));
-        assert_eq!(migration_version, 11);
+        assert_eq!(migration_version, MIGRATIONS.last().unwrap().version);
         assert_eq!(backup_version, 4);
     }
 
@@ -6329,5 +6805,448 @@ mod tests {
             })
             .unwrap();
         assert_eq!(imported_version, MIGRATIONS.last().unwrap().version);
+    }
+
+    #[test]
+    fn transfer_between_accounts_preserves_total_with_exact_decimal_values() {
+        let (_directory, connection, first_card, second_card, savings_id) = transfer_fixture();
+        let total_before = Decimal::from_str("1000.5").unwrap()
+            + Decimal::from_str("100.25").unwrap()
+            + Decimal::from_str("500.75").unwrap();
+
+        let first = transfer_details(
+            TransferOperationType::Transfer,
+            TransferEndpoint::Card(first_card),
+            TransferEndpoint::Savings(savings_id),
+            "12.34567890123456789012",
+        );
+        save_transfer(&connection, None, &first).unwrap();
+        let second = transfer_details(
+            TransferOperationType::Transfer,
+            TransferEndpoint::Savings(savings_id),
+            TransferEndpoint::Card(second_card),
+            "0.00000000000000000001",
+        );
+        save_transfer(&connection, None, &second).unwrap();
+
+        let total_after = Decimal::from_str(&card_balance(&connection, first_card)).unwrap()
+            + Decimal::from_str(&card_balance(&connection, second_card)).unwrap()
+            + Decimal::from_str(&savings_balance(&connection, savings_id)).unwrap();
+        assert_eq!(total_after, total_before);
+        assert_eq!(
+            savings_balance(&connection, savings_id),
+            "513.09567890123456789011"
+        );
+        assert_eq!(
+            card_balance(&connection, second_card),
+            "100.25000000000000000001"
+        );
+    }
+
+    #[test]
+    fn insufficient_funds_rejects_transfer_without_changing_any_balance() {
+        let (_directory, connection, first_card, second_card, savings_id) = transfer_fixture();
+        let details = transfer_details(
+            TransferOperationType::Transfer,
+            TransferEndpoint::Card(first_card),
+            TransferEndpoint::Card(second_card),
+            "2000",
+        );
+
+        assert!(matches!(
+            save_transfer(&connection, None, &details),
+            Err(DbError::InsufficientFunds)
+        ));
+        assert_eq!(card_balance(&connection, first_card), "1000.5");
+        assert_eq!(card_balance(&connection, second_card), "100.25");
+        assert_eq!(savings_balance(&connection, savings_id), "500.75");
+
+        let savings_details = transfer_details(
+            TransferOperationType::Withdrawal,
+            TransferEndpoint::Savings(savings_id),
+            TransferEndpoint::Cash,
+            "500.76",
+        );
+        assert!(matches!(
+            save_transfer(&connection, None, &savings_details),
+            Err(DbError::InsufficientFunds)
+        ));
+        assert_eq!(savings_balance(&connection, savings_id), "500.75");
+    }
+
+    #[test]
+    fn editing_transfer_reverses_old_legs_and_applies_new_ones_exactly() {
+        let (_directory, connection, first_card, second_card, _) = transfer_fixture();
+        let original = transfer_details(
+            TransferOperationType::Transfer,
+            TransferEndpoint::Card(first_card),
+            TransferEndpoint::Card(second_card),
+            "100.1234567890123456789",
+        );
+        let id = save_transfer(&connection, None, &original).unwrap();
+
+        let mut updated = original.clone();
+        updated.amount = Decimal::from_str("250.99999999999999999999").unwrap();
+        save_transfer(&connection, Some(id), &updated).unwrap();
+
+        assert_eq!(
+            card_balance(&connection, first_card),
+            "749.50000000000000000001"
+        );
+        assert_eq!(
+            card_balance(&connection, second_card),
+            "351.24999999999999999999"
+        );
+        let records =
+            list_transfers_filtered(&connection, None, None, None, None, None, None, "").unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].amount, updated.amount);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_transfer_sql(
+        connection: &Connection,
+        operation_type: &str,
+        source_kind: &str,
+        source_card: Option<i64>,
+        source_savings: Option<i64>,
+        destination_kind: &str,
+        destination_card: Option<i64>,
+        destination_savings: Option<i64>,
+        currency: &str,
+    ) -> Result<(), rusqlite::Error> {
+        connection
+            .execute(
+                "INSERT INTO transfers (
+                    operation_date, operation_type, source_kind, source_payment_document_id,
+                    source_savings_id, destination_kind, destination_payment_document_id,
+                    destination_savings_id, amount, currency, comment, created_at
+                 ) VALUES ('2026-11-21', ?1, ?2, ?3, ?4, ?5, ?6, ?7, '1', ?8, NULL, 'now')",
+                params![
+                    operation_type,
+                    source_kind,
+                    source_card,
+                    source_savings,
+                    destination_kind,
+                    destination_card,
+                    destination_savings,
+                    currency
+                ],
+            )
+            .map(|_| ())
+    }
+
+    #[test]
+    fn direct_sql_transfer_insert_is_protected_by_database_constraints() {
+        let (_directory, connection, first_card, second_card, savings_id) = transfer_fixture();
+        let bank_id: i64 = connection
+            .query_row(
+                "SELECT bank_id FROM payment_documents WHERE id = ?1",
+                [first_card],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut credit_card = payment_document_details(bank_id);
+        credit_card.card_type = PaymentCardType::Credit;
+        credit_card.amount = Decimal::ONE;
+        credit_card.currency = Some(Currency::Rub);
+        credit_card.due_date = NaiveDate::from_ymd_opt(2026, 12, 1);
+        credit_card.grace_period_days = Some(0);
+        let credit_card_id = save_payment_document(&connection, None, &credit_card).unwrap();
+
+        assert!(insert_transfer_sql(
+            &connection,
+            "transfer",
+            "card",
+            Some(credit_card_id),
+            None,
+            "card",
+            Some(second_card),
+            None,
+            "RUB"
+        )
+        .is_err());
+        assert!(insert_transfer_sql(
+            &connection,
+            "transfer",
+            "card",
+            Some(first_card),
+            None,
+            "card",
+            Some(second_card),
+            None,
+            "USD"
+        )
+        .is_err());
+        assert!(insert_transfer_sql(
+            &connection,
+            "transfer",
+            "card",
+            Some(first_card),
+            None,
+            "card",
+            Some(first_card),
+            None,
+            "RUB"
+        )
+        .is_err());
+        assert!(insert_transfer_sql(
+            &connection,
+            "transfer",
+            "card",
+            Some(first_card),
+            None,
+            "savings",
+            None,
+            Some(savings_id),
+            "RUB"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn transfer_history_protects_accounts_from_deletion_and_unsafe_changes() {
+        let (_directory, connection, first_card, second_card, savings_id) = transfer_fixture();
+        let details = transfer_details(
+            TransferOperationType::Transfer,
+            TransferEndpoint::Card(first_card),
+            TransferEndpoint::Savings(savings_id),
+            "10",
+        );
+        save_transfer(&connection, None, &details).unwrap();
+
+        assert!(delete_payment_document(&connection, first_card).is_err());
+        assert!(delete_savings(&connection, savings_id).is_err());
+        assert!(connection
+            .execute(
+                "UPDATE payment_documents SET card_type = 'credit' WHERE id = ?1",
+                [first_card]
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "UPDATE payment_documents SET currency = 'USD' WHERE id = ?1",
+                [first_card]
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "UPDATE savings SET currency = 'USD' WHERE id = ?1",
+                [savings_id]
+            )
+            .is_err());
+        assert_eq!(card_balance(&connection, second_card), "100.25");
+    }
+
+    #[test]
+    fn list_transfers_filtered_combines_all_conditions_with_inclusive_dates() {
+        let (_directory, connection, first_card, _, savings_id) = transfer_fixture();
+        let bank_id: i64 = connection
+            .query_row(
+                "SELECT bank_id FROM payment_documents WHERE id = ?1",
+                [first_card],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut dollar_card = payment_document_details(bank_id);
+        dollar_card.name = Some("Валютная карта".to_owned());
+        dollar_card.amount = Decimal::from_str("100").unwrap();
+        dollar_card.currency = Some(Currency::Usd);
+        let dollar_card_id = save_payment_document(&connection, None, &dollar_card).unwrap();
+
+        let mut top_up = transfer_details(
+            TransferOperationType::TopUp,
+            TransferEndpoint::External,
+            TransferEndpoint::Card(first_card),
+            "10",
+        );
+        top_up.operation_date = NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
+        top_up.comment = Some("Пополнение карты".to_owned());
+        save_transfer(&connection, None, &top_up).unwrap();
+
+        let mut transfer = transfer_details(
+            TransferOperationType::Transfer,
+            TransferEndpoint::Card(first_card),
+            TransferEndpoint::Savings(savings_id),
+            "5",
+        );
+        transfer.operation_date = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        transfer.comment = Some("Перевод на вклад".to_owned());
+        let transfer_id = save_transfer(&connection, None, &transfer).unwrap();
+
+        let mut dollar_top_up = transfer_details(
+            TransferOperationType::TopUp,
+            TransferEndpoint::External,
+            TransferEndpoint::Card(dollar_card_id),
+            "7",
+        );
+        dollar_top_up.operation_date = NaiveDate::from_ymd_opt(2026, 11, 22).unwrap();
+        dollar_top_up.currency = Currency::Usd;
+        dollar_top_up.comment = Some("Доллары".to_owned());
+        save_transfer(&connection, None, &dollar_top_up).unwrap();
+
+        let all =
+            list_transfers_filtered(&connection, None, None, None, None, None, None, "").unwrap();
+        assert_eq!(all.len(), 3);
+        let one_day = list_transfers_filtered(
+            &connection,
+            NaiveDate::from_ymd_opt(2026, 11, 21),
+            NaiveDate::from_ymd_opt(2026, 11, 21),
+            None,
+            None,
+            None,
+            None,
+            "",
+        )
+        .unwrap();
+        assert_eq!(one_day[0].operation_type, TransferOperationType::Transfer);
+        let by_type = list_transfers_filtered(
+            &connection,
+            None,
+            None,
+            Some(TransferOperationType::Transfer),
+            None,
+            None,
+            None,
+            "",
+        )
+        .unwrap();
+        assert_eq!(by_type.len(), 1);
+        let by_source = list_transfers_filtered(
+            &connection,
+            None,
+            None,
+            None,
+            Some(TransferEndpoint::External),
+            None,
+            None,
+            "",
+        )
+        .unwrap();
+        assert_eq!(by_source.len(), 2);
+        let by_destination = list_transfers_filtered(
+            &connection,
+            None,
+            None,
+            None,
+            None,
+            Some(TransferEndpoint::Savings(savings_id)),
+            None,
+            "",
+        )
+        .unwrap();
+        assert_eq!(by_destination.len(), 1);
+        let by_currency = list_transfers_filtered(
+            &connection,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Currency::Usd),
+            "",
+        )
+        .unwrap();
+        assert_eq!(by_currency.len(), 1);
+        assert_eq!(by_currency[0].amount, Decimal::from_str("7").unwrap());
+        let by_search =
+            list_transfers_filtered(&connection, None, None, None, None, None, None, "ВКЛАД")
+                .unwrap();
+        assert_eq!(by_search.len(), 1);
+        assert_eq!(by_search[0].id, transfer_id);
+    }
+
+    #[test]
+    fn inactive_savings_remain_in_history_but_are_rejected_for_new_transfers() {
+        let (_directory, connection, first_card, _, savings_id) = transfer_fixture();
+        let details = transfer_details(
+            TransferOperationType::Transfer,
+            TransferEndpoint::Card(first_card),
+            TransferEndpoint::Savings(savings_id),
+            "10",
+        );
+        save_transfer(&connection, None, &details).unwrap();
+
+        let account = list_savings(&connection, None, None, "")
+            .unwrap()
+            .into_iter()
+            .find(|account| account.id == savings_id)
+            .unwrap();
+        let mut updated = savings_details(account.bank_id);
+        updated.title = account.title;
+        updated.amount = account.amount;
+        updated.currency = account.currency;
+        updated.base_rate = account.base_rate;
+        updated.rate_after_threshold = account.rate_after_threshold;
+        updated.threshold_amount = account.threshold_amount;
+        updated.opened_date = account.opened_date;
+        updated.interest_accrual_date = account.interest_accrual_date;
+        updated.term_type = account.term_type;
+        updated.term_end_date = account.term_end_date;
+        updated.interest_destination = account.interest_destination;
+        updated.is_active = false;
+        save_savings(&connection, Some(account.id), &updated).unwrap();
+
+        assert_eq!(
+            list_transfers_filtered(&connection, None, None, None, None, None, None, "")
+                .unwrap()
+                .len(),
+            1
+        );
+        let rejected = transfer_details(
+            TransferOperationType::Transfer,
+            TransferEndpoint::Card(first_card),
+            TransferEndpoint::Savings(savings_id),
+            "1",
+        );
+        assert!(matches!(
+            save_transfer(&connection, None, &rejected),
+            Err(DbError::Domain(DomainError::TransferSavingsInactive))
+        ));
+    }
+
+    #[test]
+    fn upgrading_from_v11_creates_transfer_schema_without_losing_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        drop(create_legacy_database(&database_path, 11));
+
+        let connection = initialize(&database_path).unwrap();
+        let version: i64 = connection
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 12);
+        let transfer_table: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'transfers'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(transfer_table, 1);
+        assert_eq!(
+            get_app_setting(&connection, "theme").unwrap(),
+            Some("dark".to_owned())
+        );
+    }
+
+    #[test]
+    fn transfers_do_not_create_income_or_expense_report_rows() {
+        let (directory, connection, first_card, _, savings_id) = transfer_fixture();
+        let details = transfer_details(
+            TransferOperationType::Transfer,
+            TransferEndpoint::Card(first_card),
+            TransferEndpoint::Savings(savings_id),
+            "10",
+        );
+        save_transfer(&connection, None, &details).unwrap();
+        drop(connection);
+
+        let transactions =
+            load_analysis_transactions(&directory.path().join("data.db"), None, None, None)
+                .unwrap();
+        assert!(transactions.is_empty());
     }
 }

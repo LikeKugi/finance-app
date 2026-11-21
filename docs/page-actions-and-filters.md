@@ -91,6 +91,15 @@ Shared compact DatePicker controls retain previous/next-month arrow navigation a
 - Currency options are `Все`, `RUB`, and `USD`; selecting a currency and clicking `Применить` filters the full combination of selected conditions. A currency-specific selection excludes cards with unknown currency.
 - The `×` control clears the currency filter and immediately reloads using the other conditions. `Сбросить фильтры` clears all four filters and reloads the full list.
 
+### Transfers
+
+- The header shows the title on the left and Large `Добавить перевод` (Plus, Primary) and `Обновить` (Replace, Secondary) actions on the right. Add is disabled until at least one debit card or active savings account with an explicit currency exists; refresh reloads accounts and the journal without changing filters, sort, or saved column widths.
+- Filters appear above the balance summary and the journal in a wrapping layout: `Поиск`, date range (`С`/`По`), `Тип операции`, `Источник`, `Назначение`, and `Валюта`. Editing a control only changes its pending value; the full set is applied by `Применить` or Enter in search. Each populated filter has an `×` that clears only that filter and immediately reloads. `Сбросить фильтры` is disabled when no filter is active. Conditions combine with AND; date boundaries are inclusive. Empty results show a dedicated message.
+- Source and destination filters accept `Все`, external funds, cash, every card, and every savings account, including accounts that are no longer eligible for new transfers so historical records remain reachable.
+- The balance summary keeps RUB and USD separate, shows card and savings totals individually, and omits credit-card limits and accounts with unknown currency. A footnote explains that top-up and withdrawal do not create income or expense records and that the sum of balances can therefore differ from the Analysis report.
+- The add/edit form is an 800 pt modal dialog with `Дата`, `Тип операции`, `Откуда`, `Куда`, `Сумма`, `Валюта`, and `Комментарий`; dependent endpoint fields change with operation type and currency. Only Сохранить and Отмена are used, validation errors stay next to the form, and cancelling with unsaved changes asks for confirmation. Warnings explain that a top-up creates no income, that withdrawal removes money from tracked balances, and that early withdrawal from a limited-term savings account may have bank-specific conditions.
+- Deletion asks for confirmation showing date, amount, and both endpoints. Table actions require a row and the journal is never reloaded on every render frame.
+
 ## Shared Header Pattern for Pages and Sections
 
 Use the same header layout on every page and section:

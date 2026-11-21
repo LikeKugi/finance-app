@@ -87,3 +87,11 @@ rustup run stable cargo run -p finance-app
 ```
 
 On Windows, the database is stored at `%APPDATA%\FinanceApp\data.db` and logs are written under `%APPDATA%\FinanceApp\logs`. Other operating systems use their standard user configuration directory.
+
+## Transfers
+
+The `Переводы` tab maintains a journal of account-balance changes: top-up, transfer between own accounts (card ↔ card, card ↔ savings, savings ↔ savings), and cash withdrawal. Saving or deleting a transfer adjusts the exact decimal balances of both participating accounts atomically; an edit first reverses the previous operation. Insufficient funds abort the whole operation.
+
+Top-ups and withdrawals do not create income or expense records. The balance summary is therefore allowed to differ from the transactional `Анализ` report; the page states this explicitly. Only operations with the same explicitly configured currency are possible (RUB ↔ RUB or USD ↔ USD), and RUB and USD totals are never combined. Credit cards cannot participate because their amount is a credit limit. Inactive savings remain in journal history but cannot be selected for a new transfer.
+
+Known limitations: no cross-currency conversion, no cash wallet or initial balances, no credit-card debt repayment, and no export of transfers outside a full database backup.
