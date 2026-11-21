@@ -22,7 +22,8 @@ Shared compact DatePicker controls retain previous/next-month arrow navigation a
 
 ### Income and Expenses
 
-- The Income table fills the available page width and orders columns as `Дата`, `Категория`, `Сумма`, `Валюта`, `Комментарии`, and `Действия`. The Comments column expands into the remaining width, while Actions stays at the far right, and Expenses uses the same layout.
+- The Income table fills the available page width and orders columns as `Дата`, `Категория`, `Сумма`, `Валюта`, `Комментарии`, and `Действия`. The Comments column expands into the remaining width, while Actions stays pinned at the far right with a fixed 160 px width and centered buttons; Expenses uses the same layout. See [`table-settings.md`](table-settings.md) for the column-width setting.
+- Both tables show an outer border and internal vertical and horizontal borders for the headers and all rows. The Actions column retains the table component's divider while pinned during horizontal scrolling.
 - Income and Expenses comment cells show the first 25 characters of the first line; longer or multiline comments end with an ellipsis. Clicking a non-empty comment opens a dialog with the full original text.
 - Income filters appear above the table and wrap onto additional lines when they do not fit; horizontal scrolling is not used. Controls are Small, each control has a label above it, and Search has a Search icon suffix. Expenses uses the same presentation.
 - The filter order is `Поиск`, `Период`, start date (`С`), end date (`По`), category, bank, payment card, and currency.

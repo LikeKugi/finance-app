@@ -20,7 +20,7 @@ use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{
-    Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
+    Column, ColumnFixed, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
 };
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _, WindowExt as _,
@@ -401,7 +401,9 @@ impl TransactionsPage {
     }
 
     fn save_column_widths(&mut self, widths: &[Pixels], cx: &mut Context<Self>) {
-        let widths: Vec<f32> = widths.iter().map(|width| f32::from(*width)).collect();
+        let widths = column_widths_with_fixed_actions(
+            widths.iter().map(|width| f32::from(*width)).collect(),
+        );
         self.table
             .update(cx, |table, _| table.delegate_mut().set_widths(&widths));
         if let Err(error) = finance_db::set_app_setting(
@@ -1476,7 +1478,8 @@ const COLUMN_TITLES: [&str; 6] = [
     "Комментарии",
     "Действия",
 ];
-const DEFAULT_COLUMN_WIDTHS: [f32; 6] = [115.0, 220.0, 135.0, 90.0, 320.0, 180.0];
+const ACTIONS_COLUMN_WIDTH: f32 = 160.0;
+const DEFAULT_COLUMN_WIDTHS: [f32; 6] = [115.0, 220.0, 135.0, 90.0, 320.0, ACTIONS_COLUMN_WIDTH];
 const MIN_COLUMN_WIDTH: f32 = 60.0;
 const MAX_COLUMN_WIDTH: f32 = 1200.0;
 const COL_DATE: usize = 0;
@@ -1516,18 +1519,27 @@ fn parse_column_widths(value: &str) -> Option<Vec<f32>> {
 /// Ширины из БД или значения по умолчанию; ошибка чтения или формата логируется и не прерывает запуск.
 fn load_column_widths(database: &Database, kind: TransactionKind) -> Vec<f32> {
     match finance_db::get_app_setting(database, column_widths_key(kind)) {
-        Ok(Some(value)) => parse_column_widths(&value).unwrap_or_else(|| {
-            eprintln!(
-                "Некорректная сохранённая ширина колонок; использованы значения по умолчанию"
-            );
-            DEFAULT_COLUMN_WIDTHS.to_vec()
-        }),
+        Ok(Some(value)) => parse_column_widths(&value)
+            .map(column_widths_with_fixed_actions)
+            .unwrap_or_else(|| {
+                eprintln!(
+                    "Некорректная сохранённая ширина колонок; использованы значения по умолчанию"
+                );
+                DEFAULT_COLUMN_WIDTHS.to_vec()
+            }),
         Ok(None) => DEFAULT_COLUMN_WIDTHS.to_vec(),
         Err(error) => {
             eprintln!("Не удалось прочитать ширину колонок: {error}");
             DEFAULT_COLUMN_WIDTHS.to_vec()
         }
     }
+}
+
+fn column_widths_with_fixed_actions(mut widths: Vec<f32>) -> Vec<f32> {
+    if let Some(width) = widths.get_mut(COL_ACTIONS) {
+        *width = ACTIONS_COLUMN_WIDTH;
+    }
+    widths
 }
 
 fn default_order(a: &FinancialTransaction, b: &FinancialTransaction) -> std::cmp::Ordering {
@@ -1575,7 +1587,7 @@ impl TransactionsTable {
         Self {
             page,
             rows: Vec::new(),
-            widths,
+            widths: column_widths_with_fixed_actions(widths),
             sort: None,
         }
     }
@@ -1587,7 +1599,7 @@ impl TransactionsTable {
 
     fn set_widths(&mut self, widths: &[f32]) {
         if widths.len() == self.widths.len() {
-            self.widths = widths.to_vec();
+            self.widths = column_widths_with_fixed_actions(widths.to_vec());
         }
     }
 }
@@ -1601,13 +1613,43 @@ impl TableDelegate for TransactionsTable {
         self.rows.len()
     }
 
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let border = cx.theme().border;
+        div()
+            .w_full()
+            .h_full()
+            .when(col_ix > COL_DATE && col_ix < COL_ACTIONS, |cell| {
+                cell.border_l_1().border_color(border)
+            })
+            .child(COLUMN_TITLES[col_ix])
+    }
+
     fn column(&self, col_ix: usize, _: &App) -> Column {
+        let is_actions = col_ix == COL_ACTIONS;
         let column = Column::new(COLUMN_TITLES[col_ix], COLUMN_TITLES[col_ix])
             .width(px(self.widths[col_ix]))
-            .min_width(px(MIN_COLUMN_WIDTH))
-            .max_width(px(MAX_COLUMN_WIDTH))
-            .resizable(true)
+            .min_width(px(if is_actions {
+                ACTIONS_COLUMN_WIDTH
+            } else {
+                MIN_COLUMN_WIDTH
+            }))
+            .max_width(px(if is_actions {
+                ACTIONS_COLUMN_WIDTH
+            } else {
+                MAX_COLUMN_WIDTH
+            }))
+            .resizable(!is_actions)
             .movable(false);
+        let column = if is_actions {
+            column.fixed(ColumnFixed::Right)
+        } else {
+            column
+        };
         let column = match col_ix {
             COL_DATE | COL_CATEGORY | COL_AMOUNT => {
                 let direction = match self.sort {
@@ -1654,11 +1696,11 @@ impl TableDelegate for TransactionsTable {
         row_ix: usize,
         col_ix: usize,
         _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let transaction = &self.rows[row_ix];
         let id = transaction.id;
-        match col_ix {
+        let content = match col_ix {
             COL_DATE => div()
                 .child(transaction.date.format("%d.%m.%Y").to_string())
                 .into_any_element(),
@@ -1679,29 +1721,30 @@ impl TableDelegate for TransactionsTable {
             COL_COMMENT => {
                 let comment = transaction.comment.clone();
                 if comment.is_empty() {
-                    return div().into_any_element();
+                    div().into_any_element()
+                } else {
+                    div()
+                        .id(("transaction-comment", id as usize))
+                        .w_full()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .cursor_pointer()
+                        .child(comment_preview(&comment))
+                        .on_click(move |_, window, cx| {
+                            let comment = comment.clone();
+                            window.open_dialog(cx, move |dialog: Dialog, _, _| {
+                                dialog.title("Комментарий").centered().child(
+                                    div()
+                                        .id("transaction-comment-dialog-body")
+                                        .max_h(px(420.0))
+                                        .overflow_y_scroll()
+                                        .overflow_x_scroll()
+                                        .child(comment.clone()),
+                                )
+                            });
+                        })
+                        .into_any_element()
                 }
-                div()
-                    .id(("transaction-comment", id as usize))
-                    .w_full()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .cursor_pointer()
-                    .child(comment_preview(&comment))
-                    .on_click(move |_, window, cx| {
-                        let comment = comment.clone();
-                        window.open_dialog(cx, move |dialog: Dialog, _, _| {
-                            dialog.title("Комментарий").centered().child(
-                                div()
-                                    .id("transaction-comment-dialog-body")
-                                    .max_h(px(420.0))
-                                    .overflow_y_scroll()
-                                    .overflow_x_scroll()
-                                    .child(comment.clone()),
-                            )
-                        });
-                    })
-                    .into_any_element()
             }
             COL_ACTIONS => {
                 let edit_page = self.page.clone();
@@ -1710,6 +1753,8 @@ impl TableDelegate for TransactionsTable {
                 let delete_target = transaction.clone();
                 div()
                     .flex()
+                    .w_full()
+                    .justify_center()
                     .gap_1()
                     .child(
                         Button::new(("edit", id as usize))
@@ -1735,7 +1780,16 @@ impl TableDelegate for TransactionsTable {
                     .into_any_element()
             }
             _ => div().into_any_element(),
-        }
+        };
+        let border = cx.theme().border;
+        div()
+            .w_full()
+            .h_full()
+            .when(col_ix > COL_DATE && col_ix < COL_ACTIONS, |cell| {
+                cell.border_l_1().border_color(border)
+            })
+            .child(content)
+            .into_any_element()
     }
 }
 
@@ -1827,8 +1881,9 @@ impl Render for TransactionsPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        card_label, cards_for_bank, comment_preview, format_column_widths, parse_column_widths,
-        sort_transactions, update_bank_filter_selection, FormValues,
+        card_label, cards_for_bank, column_widths_with_fixed_actions, comment_preview,
+        format_column_widths, parse_column_widths, sort_transactions, update_bank_filter_selection,
+        FormValues, ACTIONS_COLUMN_WIDTH, COL_ACTIONS,
     };
     use chrono::NaiveDate;
     use finance_core::FinancialTransaction;
@@ -2108,5 +2163,16 @@ mod tests {
         assert_eq!(parse_column_widths("100,200,x,90,300,180"), None);
         assert_eq!(parse_column_widths("100,200,130,90,300,5000"), None);
         assert_eq!(parse_column_widths("100,200,130,90,300,NaN"), None);
+    }
+
+    #[test]
+    fn action_column_uses_fixed_width_in_saved_settings() {
+        let saved_widths = vec![100.0, 200.0, 130.0, 90.0, 300.0, 190.0];
+        let persisted = format_column_widths(&saved_widths);
+        let parsed = parse_column_widths(&persisted).expect("valid saved widths");
+        let widths = column_widths_with_fixed_actions(parsed);
+
+        assert_eq!(&widths[..COL_ACTIONS], &saved_widths[..COL_ACTIONS]);
+        assert_eq!(widths[COL_ACTIONS], ACTIONS_COLUMN_WIDTH);
     }
 }
