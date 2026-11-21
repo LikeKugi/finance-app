@@ -19,7 +19,7 @@ use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{
-    Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
+    Column, ColumnFixed, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
 };
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _, WindowExt as _,
@@ -48,8 +48,9 @@ const COLUMN_HEADINGS: [&str; 13] = [
     "Действия",
 ];
 const DEFAULT_COLUMN_WIDTHS: [f32; 13] = [
-    85.0, 120.0, 90.0, 70.0, 80.0, 170.0, 90.0, 95.0, 115.0, 105.0, 120.0, 85.0, 145.0,
+    85.0, 120.0, 90.0, 70.0, 80.0, 170.0, 90.0, 95.0, 115.0, 105.0, 120.0, 85.0, 160.0,
 ];
+const ACTIONS_COLUMN_WIDTH: f32 = 160.0;
 const MIN_COLUMN_WIDTH: f32 = 60.0;
 const MAX_COLUMN_WIDTH: f32 = 1200.0;
 const SAVINGS_COLUMN_WIDTHS_KEY: &str = "table_columns.savings.v2";
@@ -445,7 +446,9 @@ impl SavingsPage {
     }
 
     fn save_column_widths(&mut self, widths: &[Pixels], cx: &mut Context<Self>) {
-        let widths: Vec<f32> = widths.iter().map(|width| f32::from(*width)).collect();
+        let widths = column_widths_with_fixed_actions(
+            widths.iter().map(|width| f32::from(*width)).collect(),
+        );
         self.table
             .update(cx, |table, _| table.delegate_mut().set_widths(&widths));
         if let Err(error) = finance_db::set_app_setting(
@@ -1226,15 +1229,24 @@ fn parse_column_widths(value: &str) -> Option<Vec<f32>> {
 fn parse_legacy_column_widths(value: &str) -> Option<Vec<f32>> {
     let mut widths = parse_column_widths(value)?;
     widths.swap(COL_OPENED_DATE, COL_TERM);
-    Some(widths)
+    Some(column_widths_with_fixed_actions(widths))
+}
+
+fn column_widths_with_fixed_actions(mut widths: Vec<f32>) -> Vec<f32> {
+    if let Some(width) = widths.get_mut(COL_ACTIONS) {
+        *width = ACTIONS_COLUMN_WIDTH;
+    }
+    widths
 }
 
 fn load_column_widths(database: &Database) -> Vec<f32> {
     match finance_db::get_app_setting(database, column_widths_key()) {
-        Ok(Some(value)) => parse_column_widths(&value).unwrap_or_else(|| {
-            eprintln!("Некорректная сохранённая ширина колонок накоплений; использованы значения по умолчанию");
-            DEFAULT_COLUMN_WIDTHS.to_vec()
-        }),
+        Ok(Some(value)) => parse_column_widths(&value)
+            .map(column_widths_with_fixed_actions)
+            .unwrap_or_else(|| {
+                eprintln!("Некорректная сохранённая ширина колонок накоплений; использованы значения по умолчанию");
+                DEFAULT_COLUMN_WIDTHS.to_vec()
+            }),
         Ok(None) => match finance_db::get_app_setting(database, LEGACY_SAVINGS_COLUMN_WIDTHS_KEY) {
             Ok(Some(value)) => parse_legacy_column_widths(&value).unwrap_or_else(|| {
                 eprintln!(
@@ -1311,7 +1323,7 @@ impl SavingsTable {
         Self {
             page,
             rows: Vec::new(),
-            widths,
+            widths: column_widths_with_fixed_actions(widths),
             sort: None,
         }
     }
@@ -1323,7 +1335,7 @@ impl SavingsTable {
 
     fn set_widths(&mut self, widths: &[f32]) {
         if widths.len() == self.widths.len() {
-            self.widths = widths.to_vec();
+            self.widths = column_widths_with_fixed_actions(widths.to_vec());
         }
     }
 }
@@ -1337,13 +1349,41 @@ impl TableDelegate for SavingsTable {
         self.rows.len()
     }
 
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let border = cx.theme().border;
+        div()
+            .w_full()
+            .h_full()
+            .when(col_ix > 0, |cell| cell.border_l_1().border_color(border))
+            .child(COLUMN_HEADINGS[col_ix])
+    }
+
     fn column(&self, col_ix: usize, _: &App) -> Column {
+        let is_actions = col_ix == COL_ACTIONS;
         let column = Column::new(COLUMN_HEADINGS[col_ix], COLUMN_HEADINGS[col_ix])
             .width(px(self.widths[col_ix]))
-            .min_width(px(MIN_COLUMN_WIDTH))
-            .max_width(px(MAX_COLUMN_WIDTH))
-            .resizable(true)
+            .min_width(px(if is_actions {
+                ACTIONS_COLUMN_WIDTH
+            } else {
+                MIN_COLUMN_WIDTH
+            }))
+            .max_width(px(if is_actions {
+                ACTIONS_COLUMN_WIDTH
+            } else {
+                MAX_COLUMN_WIDTH
+            }))
+            .resizable(!is_actions)
             .movable(false);
+        let column = if is_actions {
+            column.fixed(ColumnFixed::Right)
+        } else {
+            column
+        };
         let direction = match self.sort {
             Some((sorted, direction)) if sorted == col_ix => direction,
             _ => ColumnSort::Default,
@@ -1390,7 +1430,7 @@ impl TableDelegate for SavingsTable {
         row_ix: usize,
         col_ix: usize,
         _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let account = &self.rows[row_ix];
         let dash = || "—".to_owned();
@@ -1399,7 +1439,7 @@ impl TableDelegate for SavingsTable {
             (SavingsTerm::Limited, None) => "Дата не задана".to_owned(),
             (SavingsTerm::Unlimited, _) => "Бессрочный".to_owned(),
         };
-        match col_ix {
+        let content = match col_ix {
             COL_BANK => div().child(account.bank_name.clone()).into_any_element(),
             COL_TITLE => div().child(account.title.clone()).into_any_element(),
             COL_AMOUNT => div()
@@ -1455,6 +1495,8 @@ impl TableDelegate for SavingsTable {
                 let delete_page = self.page.clone();
                 div()
                     .flex()
+                    .w_full()
+                    .justify_center()
                     .gap_1()
                     .child(
                         Button::new(("edit", id as usize))
@@ -1479,7 +1521,14 @@ impl TableDelegate for SavingsTable {
                     .into_any_element()
             }
             _ => div().into_any_element(),
-        }
+        };
+        let border = cx.theme().border;
+        div()
+            .w_full()
+            .h_full()
+            .when(col_ix > 0, |cell| cell.border_l_1().border_color(border))
+            .child(content)
+            .into_any_element()
     }
 }
 
@@ -1556,9 +1605,10 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::{
-        column_widths_key, destination_filter_labels, filter_savings, format_column_widths,
-        load_column_widths, parse_column_widths, parse_legacy_column_widths, sort_savings,
-        term_filter_labels, SavingsForm, COLUMN_HEADINGS, COL_AMOUNT, COL_BANK, COL_BASE_RATE,
+        column_widths_key, column_widths_with_fixed_actions, destination_filter_labels,
+        filter_savings, format_column_widths, load_column_widths, parse_column_widths,
+        parse_legacy_column_widths, sort_savings, term_filter_labels, SavingsForm,
+        ACTIONS_COLUMN_WIDTH, COLUMN_HEADINGS, COL_ACTIONS, COL_AMOUNT, COL_BANK, COL_BASE_RATE,
         COL_OPENED_DATE, COL_RATE_AFTER_THRESHOLD, COL_TERM, COL_THRESHOLD, COL_TITLE,
         DEFAULT_COLUMN_WIDTHS, LEGACY_SAVINGS_COLUMN_WIDTHS_KEY,
     };
@@ -1827,6 +1877,7 @@ mod tests {
         let database = filtered_database();
         let mut widths = DEFAULT_COLUMN_WIDTHS;
         widths[1] = 245.0;
+        widths[COL_ACTIONS] = 235.0;
         finance_db::set_app_setting(
             &database,
             column_widths_key(),
@@ -1834,6 +1885,7 @@ mod tests {
         )
         .expect("column widths should be stored");
 
+        widths[COL_ACTIONS] = ACTIONS_COLUMN_WIDTH;
         assert_eq!(load_column_widths(&database), widths);
     }
 
@@ -1843,6 +1895,7 @@ mod tests {
         let mut legacy_widths = DEFAULT_COLUMN_WIDTHS;
         legacy_widths[COL_OPENED_DATE] = 125.0;
         legacy_widths[COL_TERM] = 235.0;
+        legacy_widths[COL_ACTIONS] = 220.0;
         finance_db::set_app_setting(
             &database,
             LEGACY_SAVINGS_COLUMN_WIDTHS_KEY,
@@ -1852,11 +1905,24 @@ mod tests {
 
         let mut expected = legacy_widths;
         expected.swap(COL_OPENED_DATE, COL_TERM);
+        expected[COL_ACTIONS] = ACTIONS_COLUMN_WIDTH;
         assert_eq!(
             parse_legacy_column_widths(&format_column_widths(&legacy_widths)),
             Some(expected.to_vec())
         );
         assert_eq!(load_column_widths(&database), expected);
+    }
+
+    #[test]
+    fn changing_savings_column_widths_keeps_actions_fixed_and_other_widths() {
+        let mut widths = DEFAULT_COLUMN_WIDTHS.to_vec();
+        widths[COL_TITLE] = 275.0;
+        widths[COL_ACTIONS] = 230.0;
+
+        let widths = column_widths_with_fixed_actions(widths);
+
+        assert_eq!(widths[COL_TITLE], 275.0);
+        assert_eq!(widths[COL_ACTIONS], ACTIONS_COLUMN_WIDTH);
     }
 
     #[test]
