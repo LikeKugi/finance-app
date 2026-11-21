@@ -138,6 +138,12 @@ fn eligible_savings(
         .collect()
 }
 
+/// Достаточно ли счетов для создания перевода: кредитные карты и счета
+/// без явно заданной валюты не участвуют.
+pub(crate) fn can_create_transfer(cards: &[PaymentDocument], savings: &[SavingsAccount]) -> bool {
+    !eligible_cards(cards, None).is_empty() || !eligible_savings(savings, None).is_empty()
+}
+
 fn endpoint_label(
     endpoint: TransferEndpoint,
     cards: &[PaymentDocument],
@@ -543,6 +549,14 @@ impl TransfersPage {
     pub(crate) fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reload_accounts(window, cx);
         self.refresh(cx);
+    }
+
+    /// Открывает форму нового перевода со страницы «Главная», обновив счета.
+    pub(crate) fn create_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reload_accounts(window, cx);
+        if can_create_transfer(&self.cards, &self.savings) {
+            self.begin_new(window, cx);
+        }
     }
 
     fn reload_accounts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1811,8 +1825,7 @@ impl Render for TransfersPage {
         let success = cx.theme().success;
         let warning = cx.theme().warning;
         let muted = cx.theme().muted_foreground;
-        let has_accounts = !eligible_cards(&self.cards, None).is_empty()
-            || !eligible_savings(&self.savings, None).is_empty();
+        let has_accounts = can_create_transfer(&self.cards, &self.savings);
         let mut root = div().size_full().flex().flex_col().gap_2().p_3();
         root = root.child(
             div()
@@ -1926,6 +1939,45 @@ mod tests {
             interest_destination: InterestDestination::Reinvest,
             is_active,
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn transfer_creation_requires_an_eligible_account() {
+        assert!(!can_create_transfer(&[], &[]));
+        assert!(!can_create_transfer(
+            &[card(1, PaymentCardType::Credit, Some(Currency::Rub))],
+            &[]
+        ));
+        assert!(!can_create_transfer(
+            &[card(2, PaymentCardType::Debit, None)],
+            &[]
+        ));
+        assert!(!can_create_transfer(
+            &[],
+            &[account(
+                3,
+                Some(Currency::Rub),
+                false,
+                SavingsTerm::Unlimited
+            )]
+        ));
+        assert!(!can_create_transfer(
+            &[],
+            &[account(4, None, true, SavingsTerm::Unlimited)]
+        ));
+        assert!(can_create_transfer(
+            &[card(5, PaymentCardType::Debit, Some(Currency::Rub))],
+            &[]
+        ));
+        assert!(can_create_transfer(
+            &[],
+            &[account(
+                6,
+                Some(Currency::Usd),
+                true,
+                SavingsTerm::Unlimited
+            )]
+        ));
     }
 
     #[::core::prelude::v1::test]

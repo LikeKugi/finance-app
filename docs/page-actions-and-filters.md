@@ -16,6 +16,10 @@ On Savings, refresh also reloads the bank list and results with the current filt
 
 On Savings, Add is disabled when there are no banks and explains that a bank must first be added in Directories.
 
+## Start Page «Главная»
+
+The start page has no page-level action buttons. Its quick actions — `Добавить доход`, `Добавить расход`, and `Добавить перевод` — switch to the corresponding tab and open that page's existing add form; a transfer action is disabled with an explanation when no eligible account exists. Descriptions of Income, Expenses, and Directories, plus the list of all pages, are links styled as text; every link only switches tabs and never modifies data. The page shows no records, totals, or balances and reads the database only when activated to determine transfer availability.
+
 ## Current Filter Behavior
 
 Shared compact DatePicker controls retain previous/next-month arrow navigation and also let users choose a month and edit the year separately. Changing the displayed month or year does not change the date value until a day is selected; each page still applies that value according to its filter behavior below.

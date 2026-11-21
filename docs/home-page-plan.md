@@ -1,6 +1,6 @@
 # План: стартовая страница «Главная»
 
-Статус: план, реализация не начата. Описание опирается на фактическое состояние репозитория (`crates/ui/src/gpui/shell.rs`, `transactions.rs`, `transfers.rs`, `settings.rs`, `docs/architecture.md`, `docs/page-actions-and-filters.md`, `docs/decisions.md`).
+Статус: реализовано (код, тесты и документация обновлены). Описание опирается на фактическое состояние репозитория (`crates/ui/src/gpui/shell.rs`, `transactions.rs`, `transfers.rs`, `settings.rs`, `docs/architecture.md`, `docs/page-actions-and-filters.md`, `docs/decisions.md`).
 
 ## 1. Назначение
 

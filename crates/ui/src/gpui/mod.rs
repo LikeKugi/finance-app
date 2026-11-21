@@ -2,6 +2,7 @@
 
 mod analysis;
 mod directories;
+mod home;
 mod payment_documents;
 mod savings;
 mod settings;

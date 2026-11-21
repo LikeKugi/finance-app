@@ -400,6 +400,11 @@ impl TransactionsPage {
         self.refresh(cx);
     }
 
+    /// Открывает форму нового дохода или расхода со страницы «Главная».
+    pub(crate) fn create_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_form(None, window, cx);
+    }
+
     fn currency_filter_labels() -> Vec<String> {
         std::iter::once(NONE_LABEL.to_owned())
             .chain(Currency::ALL.into_iter().map(|c| c.code().to_owned()))
