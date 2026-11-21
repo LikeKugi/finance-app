@@ -60,6 +60,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 10,
         sql: include_str!("../migrations/V10__expense_card_balances.sql"),
     },
+    Migration {
+        version: 11,
+        sql: include_str!("../migrations/V11__expense_places_and_card_names.sql"),
+    },
 ];
 
 struct Migration {
@@ -2369,14 +2373,14 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v10-")
+                    .starts_with("data.before-migration-v11-")
             })
             .count()
     }
 
     #[test]
     fn initialize_migrates_supported_versions_and_preserves_backup_and_data() {
-        for version in 1..=8 {
+        for version in 1..=10 {
             let directory = tempfile::tempdir().unwrap();
             let database_path = directory.path().join("data.db");
             drop(create_legacy_database(&database_path, version));
@@ -2387,7 +2391,7 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap();
-            assert_eq!(latest_version, 10);
+            assert_eq!(latest_version, 11);
 
             let income_count = connection
                 .query_row("SELECT COUNT(*) FROM incomes", [], |row| {
@@ -2471,7 +2475,7 @@ mod tests {
                 let expense_card_state = connection
                     .query_row(
                         "SELECT payment_document_id, affects_deposit_rate,
-                                payment_document_balance_applied
+                                payment_document_balance_applied, expense_place_id
                          FROM expenses WHERE id = 1",
                         [],
                         |row| {
@@ -2479,11 +2483,12 @@ mod tests {
                                 row.get::<_, Option<i64>>(0)?,
                                 row.get::<_, bool>(1)?,
                                 row.get::<_, bool>(2)?,
+                                row.get::<_, Option<i64>>(3)?,
                             ))
                         },
                     )
                     .unwrap();
-                assert_eq!(expense_card_state, (None, false, false));
+                assert_eq!(expense_card_state, (None, false, false, None));
             }
 
             let savings_count = connection
@@ -2531,7 +2536,7 @@ mod tests {
                     entry
                         .file_name()
                         .to_string_lossy()
-                        .starts_with("data.before-migration-v10-")
+                        .starts_with("data.before-migration-v11-")
                 })
                 .expect("upgrade should create a backup")
                 .path();
@@ -2572,6 +2577,105 @@ mod tests {
             drop(initialize(&database_path).unwrap());
             assert_eq!(migration_backup_count(directory.path()), 1);
         }
+    }
+
+    #[test]
+    fn migration_v11_supports_optional_payment_document_names_and_expense_places() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let connection = initialize(&database_path).unwrap();
+
+        let bank_id = save_bank(&connection, None, "Банк", "").unwrap();
+        let card_id =
+            save_payment_document(&connection, None, &payment_document_details(bank_id)).unwrap();
+        let card_name = connection
+            .query_row(
+                "SELECT name FROM payment_documents WHERE id = ?1",
+                [card_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap();
+        assert_eq!(card_name, None);
+
+        connection
+            .execute(
+                "UPDATE payment_documents SET name = 'Основная карта' WHERE id = ?1",
+                [card_id],
+            )
+            .unwrap();
+        let named_card = connection
+            .query_row(
+                "SELECT name FROM payment_documents WHERE id = ?1",
+                [card_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap();
+        assert_eq!(named_card.as_deref(), Some("Основная карта"));
+        assert!(connection
+            .execute(
+                "UPDATE payment_documents SET name = '  ' WHERE id = ?1",
+                [card_id],
+            )
+            .is_err());
+
+        let category_id = connection
+            .execute(
+                "INSERT INTO expense_categories (name) VALUES ('Продукты')",
+                [],
+            )
+            .map(|_| connection.last_insert_rowid())
+            .unwrap();
+        let place_id = connection
+            .execute("INSERT INTO expense_places (name) VALUES ('Магазин')", [])
+            .map(|_| connection.last_insert_rowid())
+            .unwrap();
+        let place_comment = connection
+            .query_row(
+                "SELECT comment FROM expense_places WHERE id = ?1",
+                [place_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap();
+        assert_eq!(place_comment, None);
+        assert!(connection
+            .execute("INSERT INTO expense_places (name) VALUES ('  ')", [])
+            .is_err());
+        assert!(connection
+            .execute("INSERT INTO expense_places (name) VALUES (NULL)", [])
+            .is_err());
+
+        connection
+            .execute(
+                "INSERT INTO expenses (date, category_id, amount, currency, comment)
+                 VALUES ('2024-01-01', ?1, '12.34', 'RUB', '')",
+                [category_id],
+            )
+            .unwrap();
+        let expense_id = connection.last_insert_rowid();
+        let unassigned_place = connection
+            .query_row(
+                "SELECT expense_place_id FROM expenses WHERE id = ?1",
+                [expense_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .unwrap();
+        assert_eq!(unassigned_place, None);
+
+        assert!(connection
+            .execute(
+                "UPDATE expenses SET expense_place_id = 9999 WHERE id = ?1",
+                [expense_id],
+            )
+            .is_err());
+        connection
+            .execute(
+                "UPDATE expenses SET expense_place_id = ?1 WHERE id = ?2",
+                rusqlite::params![place_id, expense_id],
+            )
+            .unwrap();
+        assert!(connection
+            .execute("DELETE FROM expense_places WHERE id = ?1", [place_id])
+            .is_err());
     }
 
     #[test]
@@ -2771,7 +2875,7 @@ mod tests {
                 row.get::<_, i64>(0)
             })
             .unwrap();
-        assert_eq!(schema_version, 10);
+        assert_eq!(schema_version, 11);
     }
 
     #[test]
@@ -2789,7 +2893,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v10-")
+                    .starts_with("data.before-migration-v11-")
             })
             .map(|entry| Connection::open(entry.path()).unwrap())
             .map(|backup| {
@@ -2821,7 +2925,7 @@ mod tests {
             .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
             .unwrap();
 
-        assert_eq!(migration_count, 10);
+        assert_eq!(migration_count, 11);
         assert_eq!(foreign_keys_enabled, 1);
     }
 
@@ -4295,7 +4399,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .contains("before-migration-v10")
+                    .contains("before-migration-v11")
             })
             .count();
 
@@ -4548,7 +4652,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v10-")
+                    .starts_with("data.before-migration-v11-")
             })
             .expect("upgrade from V4 should create a backup")
             .path();
@@ -4560,7 +4664,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(savings_dates, (None, None));
-        assert_eq!(migration_version, 10);
+        assert_eq!(migration_version, 11);
         assert_eq!(backup_version, 4);
     }
 

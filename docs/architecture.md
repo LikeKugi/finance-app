@@ -34,9 +34,11 @@ The initialized SQLite connection and database path are passed to `finance_ui::r
 
 ## Persistence, migrations, and exact values
 
-The database crate embeds the migration SQL files from `crates/db/migrations/` and applies versions V1 through V10. Initialization enables SQLite foreign keys on the connection and sets a five-second busy timeout. An empty database or a database with a recognized, contiguous migration history can be initialized or upgraded; an unrecognized, malformed, or newer schema is rejected without replacing the database.
+The database crate embeds the migration SQL files from `crates/db/migrations/` and applies versions V1 through V11. Initialization enables SQLite foreign keys on the connection and sets a five-second busy timeout. An empty database or a database with a recognized, contiguous migration history can be initialized or upgraded; an unrecognized, malformed, or newer schema is rejected without replacing the database.
 
 Before upgrading a recognized older schema, the application creates an adjacent consistent backup using SQLite facilities (`VACUUM INTO`, as recorded in `docs/decisions.md`). Pending migrations and migration-history updates are applied atomically. Do not edit an applied migration; add a new version instead.
+
+V11 adds nullable names to payment cards, an `expense_places` table with required names and nullable comments, and a nullable `expenses.expense_place_id` foreign key that restricts deletion of referenced places. Existing rows remain unassigned. These columns and the directory are schema-only preparations and are not yet exposed by the UI or database CRUD API.
 
 Financial amounts, rates, and thresholds are represented with `rust_decimal::Decimal` and stored as canonical decimal text rather than floating-point SQLite values. Income and expense operations support RUB and USD and are not converted implicitly. The currency directory and exchange-rate data exist in the database, but transaction forms and the transaction domain currently support only RUB and USD. Currency rates are user-provided; unknown rates remain unknown, and changing the primary currency does not rewrite transaction amounts.
 
