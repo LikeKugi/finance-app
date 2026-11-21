@@ -13,3 +13,10 @@
 - The pinned `Действия` column is 160 logical pixels wide.
 - The `Изменить` and `Удалить` buttons are centered together in the column, leaving equal horizontal space on each side and keeping both buttons on one line.
 - This width overrides any previously saved width for the Actions column, including legacy settings; saved widths for other columns are preserved.
+
+## Payment Cards
+
+- The table has an outer border and internal vertical and horizontal borders for every column and row, including the headers.
+- The pinned `Действия` column is 160 logical pixels wide.
+- The `Изменить` and `Удалить` buttons are centered together in the column, leaving equal horizontal space on each side and keeping both buttons on one line.
+- This width overrides any previously saved width for the Actions column; saved widths for other columns are preserved.

@@ -17,11 +17,12 @@ use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{
-    Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
+    Column, ColumnFixed, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
 };
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _, WindowExt as _,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 const DATE_FORMAT: &str = "%Y-%m-%d";
@@ -31,8 +32,9 @@ const NO_CURRENCY_LABEL: &str = "валюта не указана";
 const RATE_WARNING: &str =
     "Условие сохраняется как возможность; приложение не подтверждает выполнение порога трат.";
 const DEFAULT_COLUMN_WIDTHS: [f32; 12] = [
-    140.0, 120.0, 90.0, 110.0, 100.0, 120.0, 110.0, 100.0, 140.0, 110.0, 220.0, 190.0,
+    140.0, 120.0, 90.0, 110.0, 100.0, 120.0, 110.0, 100.0, 140.0, 110.0, 220.0, 160.0,
 ];
+const ACTIONS_COLUMN_WIDTH: f32 = 160.0;
 const MIN_COLUMN_WIDTH: f32 = 60.0;
 const MAX_COLUMN_WIDTH: f32 = 1200.0;
 const CARDS_COLUMN_WIDTHS_KEY: &str = "table_columns.payment_documents";
@@ -386,7 +388,9 @@ impl PaymentDocumentsPage {
     }
 
     fn save_column_widths(&mut self, widths: &[Pixels], cx: &mut Context<Self>) {
-        let widths: Vec<f32> = widths.iter().map(|width| f32::from(*width)).collect();
+        let widths = column_widths_with_fixed_actions(
+            widths.iter().map(|width| f32::from(*width)).collect(),
+        );
         self.table
             .update(cx, |table, _| table.delegate_mut().set_widths(&widths));
         if let Err(error) = finance_db::set_app_setting(
@@ -1090,14 +1094,23 @@ fn parse_column_widths(value: &str) -> Option<Vec<f32>> {
     .then_some(widths)
 }
 
+fn column_widths_with_fixed_actions(mut widths: Vec<f32>) -> Vec<f32> {
+    if let Some(width) = widths.get_mut(COL_ACTIONS) {
+        *width = ACTIONS_COLUMN_WIDTH;
+    }
+    widths
+}
+
 fn load_column_widths(database: &Database) -> Vec<f32> {
     match finance_db::get_app_setting(database, CARDS_COLUMN_WIDTHS_KEY) {
-        Ok(Some(value)) => parse_column_widths(&value).unwrap_or_else(|| {
-            eprintln!(
-                "Некорректная сохранённая ширина колонок карт; использованы значения по умолчанию"
-            );
-            DEFAULT_COLUMN_WIDTHS.to_vec()
-        }),
+        Ok(Some(value)) => parse_column_widths(&value)
+            .map(column_widths_with_fixed_actions)
+            .unwrap_or_else(|| {
+                eprintln!(
+                    "Некорректная сохранённая ширина колонок карт; использованы значения по умолчанию"
+                );
+                DEFAULT_COLUMN_WIDTHS.to_vec()
+            }),
         Ok(None) => DEFAULT_COLUMN_WIDTHS.to_vec(),
         Err(error) => {
             eprintln!("Не удалось прочитать ширину колонок карт: {error}");
@@ -1168,7 +1181,7 @@ impl CardsTable {
 
     fn set_widths(&mut self, widths: &[f32]) {
         if widths.len() == self.widths.len() {
-            self.widths = widths.to_vec();
+            self.widths = column_widths_with_fixed_actions(widths.to_vec());
         }
     }
 }
@@ -1182,13 +1195,41 @@ impl TableDelegate for CardsTable {
         self.rows.len()
     }
 
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let border = cx.theme().border;
+        div()
+            .w_full()
+            .h_full()
+            .when(col_ix > 0, |cell| cell.border_l_1().border_color(border))
+            .child(HEADERS[col_ix])
+    }
+
     fn column(&self, col_ix: usize, _: &App) -> Column {
+        let is_actions = col_ix == COL_ACTIONS;
         let column = Column::new(HEADERS[col_ix], HEADERS[col_ix])
             .width(px(self.widths[col_ix]))
-            .min_width(px(MIN_COLUMN_WIDTH))
-            .max_width(px(MAX_COLUMN_WIDTH))
-            .resizable(true)
+            .min_width(px(if is_actions {
+                ACTIONS_COLUMN_WIDTH
+            } else {
+                MIN_COLUMN_WIDTH
+            }))
+            .max_width(px(if is_actions {
+                ACTIONS_COLUMN_WIDTH
+            } else {
+                MAX_COLUMN_WIDTH
+            }))
+            .resizable(!is_actions)
             .movable(false);
+        let column = if is_actions {
+            column.fixed(ColumnFixed::Right)
+        } else {
+            column
+        };
         let direction = match self.sort {
             Some((sorted, direction)) if sorted == col_ix => direction,
             _ => ColumnSort::Default,
@@ -1228,11 +1269,11 @@ impl TableDelegate for CardsTable {
         row_ix: usize,
         col_ix: usize,
         _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let document = &self.rows[row_ix];
         let text = |value: String| div().child(value).into_any_element();
-        match col_ix {
+        let content = match col_ix {
             COL_NAME => text(document.name.clone().unwrap_or_default()),
             COL_BANK => text(document.bank_name.clone()),
             COL_SYSTEM => text(document.payment_system.code().to_owned()),
@@ -1293,6 +1334,10 @@ impl TableDelegate for CardsTable {
                 let delete_page = self.page.clone();
                 div()
                     .flex()
+                    .items_center()
+                    .justify_center()
+                    .w_full()
+                    .h_full()
                     .gap_1()
                     .child(
                         Button::new(("card-edit", id as usize))
@@ -1318,7 +1363,14 @@ impl TableDelegate for CardsTable {
                     .into_any_element()
             }
             _ => div().into_any_element(),
-        }
+        };
+        let border = cx.theme().border;
+        div()
+            .w_full()
+            .h_full()
+            .when(col_ix > 0, |cell| cell.border_l_1().border_color(border))
+            .child(content)
+            .into_any_element()
     }
 }
 
@@ -1392,9 +1444,10 @@ mod tests {
     use gpui_kit::component::table::ColumnSort;
 
     use super::{
-        build_details, currency_from_row, currency_row, format_column_widths, parse_column_widths,
-        sort_cards, CardInput, Currency, Database, PaymentCardType, PaymentDocument, PaymentSystem,
-        COL_AMOUNT, COL_BANK, COL_NAME, COL_SYSTEM, DEFAULT_COLUMN_WIDTHS,
+        build_details, currency_from_row, currency_row, format_column_widths, load_column_widths,
+        parse_column_widths, sort_cards, CardInput, Currency, Database, PaymentCardType,
+        PaymentDocument, PaymentSystem, ACTIONS_COLUMN_WIDTH, COL_ACTIONS, COL_AMOUNT, COL_BANK,
+        COL_NAME, COL_SYSTEM, DEFAULT_COLUMN_WIDTHS,
     };
 
     fn database_with_bank() -> Database {
@@ -1631,6 +1684,47 @@ mod tests {
         assert_eq!(parse_column_widths("100,200"), None);
         assert_eq!(parse_column_widths(&text.replacen("140", "5", 1)), None);
         assert_eq!(parse_column_widths(&text.replacen("140", "abc", 1)), None);
+    }
+
+    #[test]
+    fn saved_column_widths_keep_other_columns_and_fix_actions_width() {
+        let database = database_with_bank();
+        let mut saved_widths = DEFAULT_COLUMN_WIDTHS;
+        saved_widths[COL_BANK] = 245.0;
+        saved_widths[COL_ACTIONS] = 235.0;
+        finance_db::set_app_setting(
+            &database,
+            super::CARDS_COLUMN_WIDTHS_KEY,
+            &format_column_widths(&saved_widths),
+        )
+        .unwrap();
+
+        let mut expected = saved_widths;
+        expected[COL_ACTIONS] = 160.0;
+        assert_eq!(load_column_widths(&database), expected);
+    }
+
+    #[test]
+    fn missing_or_invalid_saved_column_widths_use_fixed_action_default() {
+        let database = database_with_bank();
+        let mut expected = DEFAULT_COLUMN_WIDTHS;
+        expected[COL_ACTIONS] = ACTIONS_COLUMN_WIDTH;
+        assert_eq!(load_column_widths(&database), expected);
+
+        finance_db::set_app_setting(&database, super::CARDS_COLUMN_WIDTHS_KEY, "invalid").unwrap();
+        assert_eq!(load_column_widths(&database), expected);
+    }
+
+    #[test]
+    fn changing_column_widths_keeps_actions_fixed_and_other_widths() {
+        let mut widths = DEFAULT_COLUMN_WIDTHS.to_vec();
+        widths[COL_BANK] = 275.0;
+        widths[COL_ACTIONS] = 230.0;
+
+        let widths = super::column_widths_with_fixed_actions(widths);
+
+        assert_eq!(widths[COL_BANK], 275.0);
+        assert_eq!(widths[COL_ACTIONS], ACTIONS_COLUMN_WIDTH);
     }
 
     #[test]
