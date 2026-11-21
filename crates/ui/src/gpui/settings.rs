@@ -63,6 +63,7 @@ enum OperationOutcome {
 pub(crate) struct SettingsPage {
     database: Rc<Database>,
     database_path: PathBuf,
+    app_version: &'static str,
     theme: ThemePreference,
     message: Option<(String, bool)>,
     operation_message: Option<String>,
@@ -73,12 +74,14 @@ impl SettingsPage {
     pub(crate) fn new(
         database: Rc<Database>,
         database_path: PathBuf,
+        app_version: &'static str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut page = Self {
             database,
             database_path,
+            app_version,
             theme: ThemePreference::System,
             message: None,
             operation_message: None,
@@ -309,6 +312,14 @@ impl Render for SettingsPage {
                 })
                 .child(text))
             })
+            .child(div().flex_1().min_h_0())
+            .child(
+                div()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(format!("Версия приложения: {}", self.app_version)),
+            )
     }
 }
 

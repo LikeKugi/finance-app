@@ -43,7 +43,7 @@ fn main() -> Result<()> {
             )
         })?;
         // `run` возвращает управление после закрытия окна и освобождает соединение.
-        finance_ui::run(database, database_path.clone());
+        finance_ui::run(database, database_path.clone(), env!("CARGO_PKG_VERSION"));
 
         if finance_db::has_pending_database_import(&database_path) {
             finance_db::restore_pending_database_import(&database_path)

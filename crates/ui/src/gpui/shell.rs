@@ -109,7 +109,7 @@ impl Render for AppShell {
     }
 }
 
-pub fn run(database: Database, database_path: PathBuf) {
+pub fn run(database: Database, database_path: PathBuf, app_version: &'static str) {
     application()
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
@@ -132,7 +132,13 @@ pub fn run(database: Database, database_path: PathBuf) {
                     cx.new(|cx| PaymentDocumentsPage::new(database.clone(), window, cx));
                 let analysis = cx.new(|cx| AnalysisPage::new(database.clone(), window, cx));
                 let settings = cx.new(|cx| {
-                    SettingsPage::new(database.clone(), database_path.clone(), window, cx)
+                    SettingsPage::new(
+                        database.clone(),
+                        database_path.clone(),
+                        app_version,
+                        window,
+                        cx,
+                    )
                 });
                 cx.new(|_| AppShell {
                     active: PageTab::Income,
