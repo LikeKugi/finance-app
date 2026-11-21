@@ -30,7 +30,9 @@ use gpui_kit::*;
 use rust_decimal::Decimal;
 
 use super::support::category_tree_labels;
-use super::support::{comment_suggestions, DIVISION_ROUNDING_WARNING};
+use super::support::{
+    collect_category_descendants, comment_suggestions, DIVISION_ROUNDING_WARNING,
+};
 use super::support::{date_period_range, DatePeriod, DatePeriodRange};
 
 const DATE_FORMAT: &str = "%Y-%m-%d";
@@ -625,12 +627,15 @@ impl TransactionsPage {
                 return;
             }
         }
+        let category_ids = self
+            .category_filter
+            .map(|id| collect_category_descendants(&self.categories, id));
         match finance_db::list_transactions_filtered_by_place(
             &self.database,
             self.kind,
             from,
             to,
-            self.category_filter,
+            category_ids,
             self.currency_filter,
             &search,
             self.bank_filter,

@@ -193,6 +193,31 @@ pub(crate) fn category_tree_labels(categories: &[Category]) -> Vec<(i64, String)
         .collect()
 }
 
+/// Собирает ID указанной категории и всех её вложенных подкатегорий рекурсивно.
+pub(crate) fn collect_category_descendants(categories: &[Category], root_id: i64) -> Vec<i64> {
+    let mut children_by_parent = HashMap::<i64, Vec<i64>>::new();
+    for category in categories {
+        if let Some(parent_id) = category.parent_id {
+            children_by_parent
+                .entry(parent_id)
+                .or_default()
+                .push(category.id);
+        }
+    }
+
+    let mut result = Vec::new();
+    let mut stack = vec![root_id];
+    while let Some(id) = stack.pop() {
+        result.push(id);
+        if let Some(children) = children_by_parent.get(&id) {
+            for child in children.iter().rev() {
+                stack.push(*child);
+            }
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,5 +473,35 @@ mod tests {
             currency_rate_label(&currency, "RUB"),
             "1 BTC = <0.00001 RUB · курс от 01.02.2026"
         );
+    }
+
+    #[test]
+    fn collect_category_descendants_includes_self_and_all_descendants() {
+        let categories = vec![
+            category(1, None, true),    // root
+            category(2, Some(1), true), // child of 1
+            category(3, Some(1), true), // child of 1
+            category(4, Some(2), true), // grandchild of 1
+            category(5, Some(4), true), // great-grandchild of 1
+            category(10, None, true),   // unrelated root
+        ];
+
+        // Root category includes all descendants
+        let mut ids = collect_category_descendants(&categories, 1);
+        ids.sort();
+        assert_eq!(ids, vec![1, 2, 3, 4, 5]);
+
+        // Subcategory includes only its subtree
+        let mut ids = collect_category_descendants(&categories, 2);
+        ids.sort();
+        assert_eq!(ids, vec![2, 4, 5]);
+
+        // Leaf category includes only itself
+        let ids = collect_category_descendants(&categories, 3);
+        assert_eq!(ids, vec![3]);
+
+        // Unrelated category
+        let ids = collect_category_descendants(&categories, 10);
+        assert_eq!(ids, vec![10]);
     }
 }

@@ -744,7 +744,7 @@ pub fn list_transactions(
     kind: TransactionKind,
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
-    category_id: Option<i64>,
+    category_ids: Option<Vec<i64>>,
     currency: Option<Currency>,
     search: &str,
 ) -> Result<Vec<FinancialTransaction>, DbError> {
@@ -753,7 +753,7 @@ pub fn list_transactions(
         kind,
         from,
         to,
-        category_id,
+        category_ids,
         currency,
         search,
         None,
@@ -771,7 +771,7 @@ pub fn list_transactions_filtered(
     kind: TransactionKind,
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
-    category_id: Option<i64>,
+    category_ids: Option<Vec<i64>>,
     currency: Option<Currency>,
     search: &str,
     bank_id: Option<i64>,
@@ -782,7 +782,7 @@ pub fn list_transactions_filtered(
         kind,
         from,
         to,
-        category_id,
+        category_ids,
         currency,
         search,
         bank_id,
@@ -801,7 +801,7 @@ pub fn list_transactions_filtered_by_place(
     kind: TransactionKind,
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
-    category_id: Option<i64>,
+    category_ids: Option<Vec<i64>>,
     currency: Option<Currency>,
     search: &str,
     bank_id: Option<i64>,
@@ -817,7 +817,7 @@ pub fn list_transactions_filtered_by_place(
             "t.payment_document_balance_applied",
         ),
     };
-    let (place_id_column, place_name_column, place_join, place_filter) = match kind {
+    let (place_id_column, place_name_column, place_join, _place_filter) = match kind {
         TransactionKind::Income => ("NULL", "NULL", "", "AND ?7 IS NULL"),
         TransactionKind::Expense => (
             "t.expense_place_id",
@@ -825,6 +825,25 @@ pub fn list_transactions_filtered_by_place(
             "LEFT JOIN expense_places ON expense_places.id = t.expense_place_id",
             "AND (?7 IS NULL OR t.expense_place_id = ?7)",
         ),
+    };
+    let cat_count = category_ids.as_ref().map_or(0, Vec::len);
+    let category_filter = match &category_ids {
+        None => "1=1".to_owned(),
+        Some(ids) if ids.is_empty() => "1=1".to_owned(),
+        Some(ids) => {
+            let placeholders: Vec<String> = (3..=2 + ids.len()).map(|i| format!("?{i}")).collect();
+            format!("t.category_id IN ({})", placeholders.join(", "))
+        }
+    };
+    let currency_param = 3 + cat_count;
+    let bank_param = currency_param + 1;
+    let card_param = bank_param + 1;
+    let place_param = card_param + 1;
+    let place_filter_sql = match kind {
+        TransactionKind::Income => "1=1".to_owned(),
+        TransactionKind::Expense => {
+            format!("(?{place_param} IS NULL OR t.expense_place_id = ?{place_param})")
+        }
     };
     let sql = format!(
         "SELECT t.id, t.date, t.category_id, c.name, t.amount, t.currency, t.comment,
@@ -834,60 +853,61 @@ pub fn list_transactions_filtered_by_place(
          {place_join}
          WHERE (?1 IS NULL OR t.date >= ?1)
            AND (?2 IS NULL OR t.date <= ?2)
-           AND (?3 IS NULL OR t.category_id = ?3)
-           AND (?4 IS NULL OR t.currency = ?4)
-           AND (?5 IS NULL OR EXISTS (
+           AND ({category_filter})
+           AND (?{currency_param} IS NULL OR t.currency = ?{currency_param})
+           AND (?{bank_param} IS NULL OR EXISTS (
                SELECT 1 FROM payment_documents AS document
-               WHERE document.id = t.payment_document_id AND document.bank_id = ?5
+               WHERE document.id = t.payment_document_id AND document.bank_id = ?{bank_param}
            ))
-           AND (?6 IS NULL OR t.payment_document_id = ?6)
-           {place_filter}
+           AND (?{card_param} IS NULL OR t.payment_document_id = ?{card_param})
+           AND ({place_filter_sql})
          ORDER BY t.date DESC, t.id DESC"
     );
-    let from = from.map(|date| date.format("%Y-%m-%d").to_string());
-    let to = to.map(|date| date.format("%Y-%m-%d").to_string());
-    let currency = currency.map(Currency::code);
+    let from_str = from.map(|date| date.format("%Y-%m-%d").to_string());
+    let to_str = to.map(|date| date.format("%Y-%m-%d").to_string());
+    let currency_str = currency.map(Currency::code);
+    let mut params: Vec<&dyn rusqlite::types::ToSql> = vec![&from_str, &to_str];
+    if let Some(ids) = &category_ids {
+        for id in ids {
+            params.push(id);
+        }
+    }
+    params.push(&currency_str);
+    params.push(&bank_id);
+    params.push(&payment_document_id);
+    if matches!(kind, TransactionKind::Expense) {
+        params.push(&expense_place_id);
+    }
     let mut statement = connection.prepare(&sql)?;
     let transactions = statement
-        .query_map(
-            params![
-                from,
-                to,
-                category_id,
+        .query_map(params.as_slice(), |row| {
+            let date_text = row.get::<_, String>(1)?;
+            let date = NaiveDate::parse_from_str(&date_text, "%Y-%m-%d").map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
+            })?;
+            let amount_text = row.get::<_, String>(4)?;
+            let amount = Decimal::from_str(&amount_text).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
+            })?;
+            let currency_text = row.get::<_, String>(5)?;
+            let currency = Currency::from_str(&currency_text).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(5, Type::Text, Box::new(error))
+            })?;
+            Ok(FinancialTransaction {
+                id: row.get(0)?,
+                date,
+                category_id: row.get(2)?,
+                category_name: row.get(3)?,
+                amount,
                 currency,
-                bank_id,
-                payment_document_id,
-                expense_place_id
-            ],
-            |row| {
-                let date_text = row.get::<_, String>(1)?;
-                let date = NaiveDate::parse_from_str(&date_text, "%Y-%m-%d").map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
-                })?;
-                let amount_text = row.get::<_, String>(4)?;
-                let amount = Decimal::from_str(&amount_text).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
-                })?;
-                let currency_text = row.get::<_, String>(5)?;
-                let currency = Currency::from_str(&currency_text).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(5, Type::Text, Box::new(error))
-                })?;
-                Ok(FinancialTransaction {
-                    id: row.get(0)?,
-                    date,
-                    category_id: row.get(2)?,
-                    category_name: row.get(3)?,
-                    amount,
-                    currency,
-                    comment: row.get(6)?,
-                    expense_place_id: row.get(7)?,
-                    expense_place_name: row.get(8)?,
-                    payment_document_id: row.get(9)?,
-                    affects_deposit_rate: row.get(10)?,
-                    payment_document_balance_applied: row.get(11)?,
-                })
-            },
-        )?
+                comment: row.get(6)?,
+                expense_place_id: row.get(7)?,
+                expense_place_name: row.get(8)?,
+                payment_document_id: row.get(9)?,
+                affects_deposit_rate: row.get(10)?,
+                payment_document_balance_applied: row.get(11)?,
+            })
+        })?
         .collect::<Result<Vec<_>, _>>()?;
 
     let search = search.trim().to_lowercase();
@@ -4337,7 +4357,7 @@ mod tests {
             TransactionKind::Income,
             Some(NaiveDate::from_ymd_opt(2026, 11, 18).unwrap()),
             None,
-            Some(category_id),
+            Some(vec![category_id]),
             None,
             "оклад",
         )
