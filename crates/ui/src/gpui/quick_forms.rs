@@ -61,6 +61,16 @@ fn selected_kind(selected: &[usize]) -> Option<TransactionKind> {
     }
 }
 
+/// Выделенная кнопка переключателя использует стиль `info` (`btn-info`).
+fn kind_button(id: &'static str, label: &'static str, selected: bool) -> Button {
+    let button = Button::new(id).label(label).selected(selected);
+    if selected {
+        button.outline().info()
+    } else {
+        button.ghost()
+    }
+}
+
 pub(crate) struct QuickTransactionForm {
     database: Rc<Database>,
     kind: TransactionKind,
@@ -442,16 +452,16 @@ impl Render for QuickTransactionForm {
                     .outline()
                     .w_full()
                     .justify_center()
-                    .child(
-                        Button::new("quick-kind-income")
-                            .label("Доход")
-                            .selected(self.kind == TransactionKind::Income),
-                    )
-                    .child(
-                        Button::new("quick-kind-expense")
-                            .label("Расход")
-                            .selected(self.kind == TransactionKind::Expense),
-                    )
+                    .child(kind_button(
+                        "quick-kind-income",
+                        "Доход",
+                        self.kind == TransactionKind::Income,
+                    ))
+                    .child(kind_button(
+                        "quick-kind-expense",
+                        "Расход",
+                        self.kind == TransactionKind::Expense,
+                    ))
                     .on_click(cx.listener(|this, selected: &Vec<usize>, window, cx| {
                         if let Some(kind) = selected_kind(selected) {
                             this.set_kind(kind, window, cx);
