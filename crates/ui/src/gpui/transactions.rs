@@ -67,13 +67,22 @@ fn card_label(card: &PaymentDocument) -> String {
         PaymentCardType::Debit => "дебетовая",
         PaymentCardType::Credit => "кредитная",
     };
-    format!(
+    let details = format!(
         "{} — {} #{} ({card_type}, {})",
         card.bank_name,
         card.payment_system.code(),
         card.id,
         card.currency.map_or("валюта не указана", Currency::code)
-    )
+    );
+    match card
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        Some(name) => format!("{name} — {details}"),
+        None => details,
+    }
 }
 
 /// Карты, доступные для выбора при данной валюте операции.
@@ -1490,8 +1499,69 @@ impl Render for TransactionsPage {
 
 #[cfg(test)]
 mod tests {
-    use super::{comment_preview, FormValues};
+    use super::{card_label, comment_preview, FormValues};
     use chrono::NaiveDate;
+    use finance_core::{Currency, PaymentCardType, PaymentDocument, PaymentSystem};
+    use rust_decimal::Decimal;
+
+    fn payment_document(
+        id: i64,
+        name: Option<&str>,
+        card_type: PaymentCardType,
+        currency: Option<Currency>,
+    ) -> PaymentDocument {
+        PaymentDocument {
+            id,
+            name: name.map(str::to_owned),
+            bank_id: 1,
+            bank_name: "Альфа-Банк".to_owned(),
+            payment_system: PaymentSystem::Mir,
+            card_type,
+            amount: Decimal::ONE,
+            currency,
+            due_date: None,
+            grace_period_days: None,
+            affects_deposit_rate: false,
+            min_monthly_spend: None,
+            linked_savings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn card_label_includes_name_and_preserves_card_details() {
+        let debit = payment_document(
+            7,
+            Some("Повседневная"),
+            PaymentCardType::Debit,
+            Some(Currency::Rub),
+        );
+        let credit = payment_document(
+            8,
+            Some("Повседневная"),
+            PaymentCardType::Credit,
+            Some(Currency::Usd),
+        );
+
+        assert_eq!(
+            card_label(&debit),
+            "Повседневная — Альфа-Банк — MIR #7 (дебетовая, RUB)"
+        );
+        assert_eq!(
+            card_label(&credit),
+            "Повседневная — Альфа-Банк — MIR #8 (кредитная, USD)"
+        );
+        assert_ne!(card_label(&debit), card_label(&credit));
+    }
+
+    #[test]
+    fn card_label_keeps_existing_format_for_unnamed_cards() {
+        let card = payment_document(9, None, PaymentCardType::Debit, None);
+
+        assert_eq!(
+            card_label(&card),
+            "Альфа-Банк — MIR #9 (дебетовая, валюта не указана)"
+        );
+    }
 
     #[test]
     fn form_values_are_unchanged_when_they_match_the_initial_state() {
