@@ -657,9 +657,10 @@ pub fn set_currency_exchange_rate(
 ///
 /// The target currency must have a known rate. Currencies without a known rate remain
 /// unknown; transaction amounts are not modified.
-pub fn set_primary_currency(connection: &mut Connection, code: &str) -> Result<(), DbError> {
+pub fn set_primary_currency(connection: &Connection, code: &str) -> Result<(), DbError> {
     validate_currency_code(code)?;
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let transaction =
+        rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
     let currencies = list_currencies(&transaction)?;
     if currencies
         .iter()
@@ -805,6 +806,20 @@ pub fn list_transactions(
             })
             .collect())
     }
+}
+
+/// Returns unique non-empty comments from income and expense transactions.
+pub fn list_transaction_comments(connection: &Connection) -> Result<Vec<String>, DbError> {
+    let mut statement = connection.prepare(
+        "SELECT comment FROM incomes WHERE trim(comment) <> ''
+         UNION
+         SELECT comment FROM expenses WHERE trim(comment) <> ''
+         ORDER BY comment COLLATE NOCASE",
+    )?;
+    let comments = statement
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(comments)
 }
 
 /// Reads income and expense amounts for an inclusive date range, without category or text filters.
@@ -2238,11 +2253,11 @@ mod tests {
         delete_savings, export_database_backup_from_path, get_app_setting,
         has_pending_database_import, initialize, list_currencies, list_payment_documents,
         list_payment_documents_filtered, list_savings, list_savings_filtered,
-        list_transaction_amounts, list_transactions, load_analysis_transactions,
-        load_analysis_transactions_by_category, restore_pending_database_import, save_bank,
-        save_category, save_payment_document, save_savings, save_transaction, set_app_setting,
-        set_currency_exchange_rate, set_primary_currency, stage_database_import, DbError,
-        MIGRATIONS,
+        list_transaction_amounts, list_transaction_comments, list_transactions,
+        load_analysis_transactions, load_analysis_transactions_by_category,
+        restore_pending_database_import, save_bank, save_category, save_payment_document,
+        save_savings, save_transaction, set_app_setting, set_currency_exchange_rate,
+        set_primary_currency, stage_database_import, DbError, MIGRATIONS,
     };
 
     fn savings_details(bank_id: i64) -> SavingsDetails {
@@ -3021,7 +3036,7 @@ mod tests {
     #[test]
     fn set_primary_currency_overflow_rolls_back_without_changing_rates() {
         let directory = tempfile::tempdir().unwrap();
-        let mut connection = initialize(&directory.path().join("data.db")).unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
         add_currency(&connection, "EUR", "Евро").unwrap();
         set_currency_exchange_rate(
             &connection,
@@ -3038,7 +3053,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = set_primary_currency(&mut connection, "EUR");
+        let result = set_primary_currency(&connection, "EUR");
         assert!(matches!(
             result,
             Err(DbError::Domain(DomainError::ExchangeRateOverflow))
@@ -3054,7 +3069,7 @@ mod tests {
     #[test]
     fn set_primary_currency_rebases_known_rates_and_preserves_unknown_rates() {
         let directory = tempfile::tempdir().unwrap();
-        let mut connection = initialize(&directory.path().join("data.db")).unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
         add_currency(&connection, "EUR", "Евро").unwrap();
         add_currency(&connection, "GBP", "Фунт стерлингов").unwrap();
         set_currency_exchange_rate(
@@ -3072,7 +3087,7 @@ mod tests {
         )
         .unwrap();
 
-        set_primary_currency(&mut connection, "EUR").unwrap();
+        set_primary_currency(&connection, "EUR").unwrap();
         let currencies = list_currencies(&connection).unwrap();
         let currency_by_code =
             |code: &str| currencies.iter().find(|currency| currency.code == code);
@@ -3092,7 +3107,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 1, 3)
         );
 
-        let change_to_unknown = set_primary_currency(&mut connection, "GBP");
+        let change_to_unknown = set_primary_currency(&connection, "GBP");
         assert!(matches!(
             change_to_unknown,
             Err(DbError::PrimaryCurrencyRateUnavailable)
@@ -4070,6 +4085,86 @@ mod tests {
         assert_eq!(all_time.len(), 4);
         assert_eq!(from_only.len(), 3);
         assert_eq!(to_only.len(), 1);
+    }
+
+    #[test]
+    fn list_transaction_comments_combines_unique_non_empty_comments_and_reflects_updates() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let income_category = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Зарплата",
+            None,
+            true,
+        )
+        .unwrap();
+        let expense_category = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Дом",
+            None,
+            true,
+        )
+        .unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
+        let income_id = save_transaction(
+            &connection,
+            TransactionKind::Income,
+            None,
+            date,
+            income_category,
+            Decimal::from(10),
+            Currency::Rub,
+            "Зарплата",
+        )
+        .unwrap();
+        for (kind, category_id, comment) in [
+            (TransactionKind::Expense, expense_category, "Зарплата"),
+            (
+                TransactionKind::Expense,
+                expense_category,
+                "Коммунальные услуги",
+            ),
+            (TransactionKind::Income, income_category, ""),
+            (TransactionKind::Expense, expense_category, "   "),
+        ] {
+            save_transaction(
+                &connection,
+                kind,
+                None,
+                date,
+                category_id,
+                Decimal::from(1),
+                Currency::Rub,
+                comment,
+            )
+            .unwrap();
+        }
+
+        let initial_comments = list_transaction_comments(&connection).unwrap();
+        assert_eq!(initial_comments.len(), 2);
+        assert!(initial_comments.contains(&"Зарплата".to_owned()));
+        assert!(initial_comments.contains(&"Коммунальные услуги".to_owned()));
+
+        save_transaction(
+            &connection,
+            TransactionKind::Income,
+            Some(income_id),
+            date,
+            income_category,
+            Decimal::from(10),
+            Currency::Rub,
+            "Новая зарплата",
+        )
+        .unwrap();
+
+        let updated_comments = list_transaction_comments(&connection).unwrap();
+        assert_eq!(updated_comments.len(), 3);
+        assert!(updated_comments.contains(&"Зарплата".to_owned()));
+        assert!(updated_comments.contains(&"Новая зарплата".to_owned()));
     }
 
     #[test]

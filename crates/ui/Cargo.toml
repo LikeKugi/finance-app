@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 chrono.workspace = true
-eframe.workspace = true
+gpui-kit.workspace = true
 finance-core = { path = "../core" }
 finance-db = { path = "../db" }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal"] }

@@ -37,16 +37,14 @@ fn main() -> Result<()> {
                 database_path.display()
             )
         })?;
-        let run_result = finance_ui::run(database, database_path.clone())
-            .map_err(|error| anyhow::anyhow!("Не удалось запустить окно приложения: {error:?}"));
+        // `run` возвращает управление после закрытия окна и освобождает соединение.
+        finance_ui::run(database, database_path.clone());
 
         if finance_db::has_pending_database_import(&database_path) {
             finance_db::restore_pending_database_import(&database_path)
                 .context("Не удалось восстановить выбранную резервную копию")?;
-            run_result?;
             continue;
         }
-        run_result?;
         break;
     }
     tracing::info!("Завершение FinanceApp");

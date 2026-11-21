@@ -6,7 +6,7 @@ FinanceApp is a local desktop application for personal and family finance manage
 
 - `finance-app` — application entry point, user data paths, and logging.
 - `finance-core` — transaction, currency, directory types, and exact decimal input handling.
-- `finance-ui` — native `eframe` tables and Russian-language workflows.
+- `finance-ui` — native `gpui-kit` tables and Russian-language workflows.
 - `finance-db` — SQLite connection setup, embedded migrations, and repositories.
 
 Income and expense records support create, edit, delete with confirmation, inclusive date filters, category filters, text search, and exact RUB/USD totals. Directories support bank and hierarchical income/expense category management, activation, and deletion safeguards for categories in use. Savings support create, edit, delete with confirmation, bank/status/text filters, term and interest-destination fields, optional opening and interest-accrual dates, and exact decimal storage. Payment documents support create, edit, delete with confirmation, bank/system/card-type filters, credit payment dates and grace periods, and links to savings at the same bank. Analysis supports inclusive date ranges and independent income-category and expense-category selectors; each selector includes all categories (including inactive ones) using the same hierarchical labels as the income and expense filters. Both transaction groups remain visible, with exact category totals and shares grouped separately by transaction type and currency. Forecasts, currency conversion, and exports remain deferred.
@@ -48,15 +48,21 @@ cargo +stable build --workspace --release
 
 ### Builds
 
+#### GitHub Actions
+
+The workflow in `.github/workflows/build.yml` builds release artifacts on every push and pull request, and can also be started manually from the repository's **Actions** tab. It produces separate downloadable artifacts for Windows x64, macOS Apple Silicon (`arm64`), and macOS Intel (`x86_64`).
+
+Open the completed workflow run, select **Artifacts**, and download the artifact for your platform. The macOS artifacts are `.tar.gz` archives containing the executable; extract the archive before running it. These builds are not signed or notarized, and the workflow does not create an installer or a macOS `.app` bundle.
+
 #### Windows
 
-For a Windows x64 release, install the `x86_64-pc-windows-gnu` Rust target and ensure the GNU cross-linker is available in `PATH`:
+Build a Windows x64 release on Windows with Rust stable and the Windows SDK installed. The release build needs the SDK's `fxc.exe` shader compiler, which must be available in `PATH` or specified with `GPUI_FXC_PATH`:
 
 ```sh
-cargo +stable build -p finance-app --release --locked --target x86_64-pc-windows-gnu
+cargo +stable build -p finance-app --release --locked
 ```
 
-The executable is written to `target/x86_64-pc-windows-gnu/release/finance-app.exe`.
+The executable is written to `target/release/finance-app.exe`. The GitHub Actions workflow locates `fxc.exe` in the Windows SDK automatically. The Windows release build is performed on a Windows runner; cross-compiling this release from macOS is not supported by the current shader build dependency.
 
 #### macOS
 

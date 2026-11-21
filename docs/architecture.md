@@ -11,7 +11,7 @@ The Cargo workspace currently contains four crates:
 | `finance-app` (`crates/app`) | Application entry point; resolves the user's configuration directory, initializes logging and SQLite, then starts the UI. |
 | `finance-core` (`crates/core`) | Domain types, validation, exact decimal parsing and formatting, and transaction and analysis value types. Most implementation is currently in `src/lib.rs`. |
 | `finance-db` (`crates/db`) | SQLite initialization, schema migrations, queries, persistence operations, and database-level validation. Most implementation is currently in `src/lib.rs`; migration SQL is under `migrations/`. |
-| `finance-ui` (`crates/ui`) | Native `eframe`/`egui` application and Russian-language screens. Shared application state is in `src/lib.rs`; feature-specific UI is split among page modules. |
+| `finance-ui` (`crates/ui`) | Native `gpui-kit` application and Russian-language screens. The window shell and tabs are in `src/gpui/shell.rs`; each tab is a separate page in `src/gpui/`, and framework-independent helpers are in `src/gpui/support.rs`. |
 
 There is no `finance-export` crate in the current workspace. CSV, XLSX, and SQL export functionality is not implemented.
 
