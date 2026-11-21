@@ -8,13 +8,16 @@ use std::rc::Rc;
 
 use chrono::{Local, NaiveDate};
 use finance_core::{
-    summarize_analysis, AnalysisCategoryTotal, AnalysisSummary, Category, Currency, TransactionKind,
+    summarize_analysis, AnalysisCategoryTotal, AnalysisSummary, AnalysisTotal, Category, Currency,
+    TransactionKind,
 };
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::calendar::Date;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::table::{Column, ColumnSort, DataTable, TableDelegate, TableState};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -24,9 +27,15 @@ const DATE_FORMAT: &str = "%Y-%m-%d";
 const NONE_LABEL: &str = "Все";
 const ROW_HEIGHT: f32 = 30.0;
 const PIE_CHART_DIAMETER: f32 = 120.0;
-/// Относительные ширины столбцов: категория, операций, сумма, доля.
-const COLUMN_WEIGHTS: [f32; 4] = [2.5, 0.8, 1.5, 0.7];
 const COLUMN_HEADERS: [&str; 4] = ["Категория", "Операций", "Сумма", "Доля"];
+const COLUMN_WIDTHS: [f32; 4] = [260.0, 85.0, 155.0, 80.0];
+const ANALYSIS_TABLE_WIDTH: f32 =
+    COLUMN_WIDTHS[0] + COLUMN_WIDTHS[1] + COLUMN_WIDTHS[2] + COLUMN_WIDTHS[3];
+const MIN_COLUMN_WIDTHS: [f32; 4] = [140.0, 80.0, 120.0, 72.0];
+const COL_CATEGORY: usize = 0;
+const COL_TRANSACTION_COUNT: usize = 1;
+const COL_AMOUNT: usize = 2;
+const COL_SHARE: usize = 3;
 const PIE_CHART_COLORS: [u32; 8] = [
     0x4682b4, 0xe76f51, 0x2a9d8f, 0xe9c46a, 0x805aa0, 0xf4a261, 0x5e8c50, 0xbe5a70,
 ];
@@ -131,6 +140,171 @@ impl RequestTracker {
 struct PieChartSlice<'a> {
     category: &'a AnalysisCategoryTotal,
     share: f32,
+}
+
+struct AnalysisTable {
+    kind: TransactionKind,
+    currency: Currency,
+    rows: Vec<AnalysisCategoryTotal>,
+    total: Option<AnalysisTotal>,
+    sort: Option<(usize, ColumnSort)>,
+}
+
+impl AnalysisTable {
+    fn new(kind: TransactionKind, currency: Currency) -> Self {
+        Self {
+            kind,
+            currency,
+            rows: Vec::new(),
+            total: None,
+            sort: None,
+        }
+    }
+
+    fn set_summary(&mut self, summary: &AnalysisSummary) {
+        self.rows = summary
+            .categories
+            .iter()
+            .filter(|category| category.kind == self.kind && category.currency == self.currency)
+            .cloned()
+            .collect();
+        self.total = summary
+            .totals
+            .iter()
+            .find(|total| total.kind == self.kind && total.currency == self.currency)
+            .cloned();
+        sort_analysis_categories(&mut self.rows, self.sort);
+    }
+}
+
+fn default_analysis_category_order(
+    a: &AnalysisCategoryTotal,
+    b: &AnalysisCategoryTotal,
+) -> std::cmp::Ordering {
+    a.category_name
+        .to_lowercase()
+        .cmp(&b.category_name.to_lowercase())
+        .then(a.category_id.cmp(&b.category_id))
+}
+
+fn sort_analysis_categories(rows: &mut [AnalysisCategoryTotal], sort: Option<(usize, ColumnSort)>) {
+    let Some((column, direction)) = sort else {
+        rows.sort_by(default_analysis_category_order);
+        return;
+    };
+    rows.sort_by(|a, b| {
+        let ordering = match column {
+            COL_CATEGORY => a
+                .category_name
+                .to_lowercase()
+                .cmp(&b.category_name.to_lowercase()),
+            COL_TRANSACTION_COUNT => a.transaction_count.cmp(&b.transaction_count),
+            COL_AMOUNT => a.amount.cmp(&b.amount),
+            COL_SHARE => a.share_percent.cmp(&b.share_percent),
+            _ => std::cmp::Ordering::Equal,
+        };
+        let ordering = if direction == ColumnSort::Descending {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+        ordering.then_with(|| default_analysis_category_order(a, b))
+    });
+}
+
+fn analysis_table_index(kind: TransactionKind, currency: Currency) -> usize {
+    match (kind, currency) {
+        (TransactionKind::Income, Currency::Rub) => 0,
+        (TransactionKind::Income, Currency::Usd) => 1,
+        (TransactionKind::Expense, Currency::Rub) => 2,
+        (TransactionKind::Expense, Currency::Usd) => 3,
+    }
+}
+
+impl TableDelegate for AnalysisTable {
+    fn columns_count(&self, _: &App) -> usize {
+        COLUMN_HEADERS.len()
+    }
+
+    fn rows_count(&self, _: &App) -> usize {
+        self.rows.len()
+    }
+
+    fn column(&self, col_ix: usize, _: &App) -> Column {
+        let direction = self
+            .sort
+            .filter(|(sorted, _)| *sorted == col_ix)
+            .map_or(ColumnSort::Default, |(_, direction)| direction);
+        let column = Column::new(COLUMN_HEADERS[col_ix], COLUMN_HEADERS[col_ix])
+            .width(px(COLUMN_WIDTHS[col_ix]))
+            .min_width(px(MIN_COLUMN_WIDTHS[col_ix]))
+            .resizable(false)
+            .movable(false)
+            .sort(direction);
+        if col_ix == COL_CATEGORY {
+            column
+        } else {
+            column.text_right()
+        }
+    }
+
+    fn perform_sort(
+        &mut self,
+        col_ix: usize,
+        sort: ColumnSort,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) {
+        self.sort = (sort != ColumnSort::Default).then_some((col_ix, sort));
+        sort_analysis_categories(&mut self.rows, self.sort);
+    }
+
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child("Операций по выбранным условиям нет.")
+    }
+
+    fn render_td(
+        &mut self,
+        row_ix: usize,
+        col_ix: usize,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let category = &self.rows[row_ix];
+        match col_ix {
+            COL_CATEGORY => div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(category.category_name.clone())
+                .into_any_element(),
+            COL_TRANSACTION_COUNT => div()
+                .w_full()
+                .text_right()
+                .child(category.transaction_count.to_string())
+                .into_any_element(),
+            COL_AMOUNT => div()
+                .w_full()
+                .text_right()
+                .child(category.amount.to_string())
+                .into_any_element(),
+            COL_SHARE => div()
+                .w_full()
+                .text_right()
+                .child(format!("{}%", category.share_percent.round_dp(2)))
+                .into_any_element(),
+            _ => div().into_any_element(),
+        }
+    }
 }
 
 fn pie_chart_slices(
@@ -259,6 +433,7 @@ pub(crate) struct AnalysisPage {
     income: CategoryPicker,
     expense: CategoryPicker,
     tracker: RequestTracker,
+    tables: [Entity<TableState<AnalysisTable>>; 4],
     message: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -333,6 +508,17 @@ impl AnalysisPage {
             selected: None,
             select,
         };
+        let tables = [
+            (TransactionKind::Income, Currency::Rub),
+            (TransactionKind::Income, Currency::Usd),
+            (TransactionKind::Expense, Currency::Rub),
+            (TransactionKind::Expense, Currency::Usd),
+        ]
+        .map(|(kind, currency)| {
+            cx.new(|cx| {
+                TableState::new(AnalysisTable::new(kind, currency), window, cx).col_movable(false)
+            })
+        });
         let mut page = Self {
             database,
             database_path,
@@ -342,6 +528,7 @@ impl AnalysisPage {
             income: picker(income_select),
             expense: picker(expense_select),
             tracker: RequestTracker::default(),
+            tables,
             message: None,
             _subscriptions: subscriptions,
         };
@@ -401,6 +588,15 @@ impl AnalysisPage {
             || filters.to.is_some()
             || filters.income_category_id.is_some()
             || filters.expense_category_id.is_some()
+    }
+
+    fn update_tables(&self, summary: &AnalysisSummary, cx: &mut Context<Self>) {
+        for table in &self.tables {
+            table.update(cx, |table, cx| {
+                table.delegate_mut().set_summary(summary);
+                cx.notify();
+            });
+        }
     }
 
     fn set_period(
@@ -468,6 +664,9 @@ impl AnalysisPage {
             let result = task.await;
             let _ = this.update(cx, |page, cx| {
                 if page.tracker.accept(generation, filters, result) {
+                    if let Some(summary) = page.tracker.current_report() {
+                        page.update_tables(summary, cx);
+                    }
                     cx.notify();
                 }
             });
@@ -677,6 +876,7 @@ impl AnalysisPage {
         div()
             .flex()
             .items_center()
+            .w(px(ANALYSIS_TABLE_WIDTH))
             .h(px(ROW_HEIGHT))
             .border_l_1()
             .border_r_1()
@@ -686,9 +886,8 @@ impl AnalysisPage {
             .when(strong, |row| row.font_weight(FontWeight::BOLD))
             .when_some(stripe, |row, color| row.bg(color))
             .children(values.into_iter().enumerate().map(|(index, value)| {
-                let total: f32 = COLUMN_WEIGHTS.iter().sum();
                 div()
-                    .w(relative(COLUMN_WEIGHTS[index] / total))
+                    .w(px(COLUMN_WIDTHS[index]))
                     .h_full()
                     .flex_none()
                     .flex()
@@ -703,55 +902,20 @@ impl AnalysisPage {
             }))
     }
 
-    fn render_kind_summary(
-        summary: &AnalysisSummary,
-        kind: TransactionKind,
-        stripe: Hsla,
-        border: Hsla,
-    ) -> Div {
-        let mut column = div().flex().flex_col().gap_1().w_full();
+    fn render_kind_summary(&self, kind: TransactionKind, border: Hsla, cx: &App) -> Div {
+        let mut column = div().flex().flex_col().gap_2().w_full().h_full().min_h_0();
         let mut has_totals = false;
         for currency in Currency::ALL {
-            let Some(total) = summary
-                .totals
-                .iter()
-                .find(|total| total.kind == kind && total.currency == currency)
-            else {
+            let table_index = analysis_table_index(kind, currency);
+            let table_state = self.tables[table_index].read(cx);
+            let Some(total) = table_state.delegate().total.as_ref() else {
                 continue;
             };
             has_totals = true;
-            column = column.child(div().text_lg().font_weight(FontWeight::BOLD).child(format!(
-                "{} — {}",
-                kind.title(),
-                currency.code()
-            )));
-            let mut table = div().flex().flex_col().w_full().child(Self::summary_row(
-                COLUMN_HEADERS.map(str::to_owned),
-                true,
-                true,
-                None,
-                border,
-            ));
-            for (row_index, category) in summary
-                .categories
-                .iter()
-                .filter(|category| category.kind == kind && category.currency == currency)
-                .enumerate()
-            {
-                table = table.child(Self::summary_row(
-                    [
-                        category.category_name.clone(),
-                        category.transaction_count.to_string(),
-                        category.amount.to_string(),
-                        format!("{}%", category.share_percent.round_dp(2)),
-                    ],
-                    false,
-                    false,
-                    (row_index % 2 == 1).then_some(stripe),
-                    border,
-                ));
-            }
-            table = table.child(Self::summary_row(
+            let table = DataTable::new(&self.tables[table_index])
+                .stripe(true)
+                .bordered(true);
+            let table_footer = Self::summary_row(
                 [
                     "Итого".to_owned(),
                     total.transaction_count.to_string(),
@@ -762,8 +926,37 @@ impl AnalysisPage {
                 false,
                 None,
                 border,
-            ));
-            column = column.child(table).child(div().h(px(12.0)));
+            );
+            let table_content = div()
+                .w(px(ANALYSIS_TABLE_WIDTH))
+                .h_full()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(div().flex_1().min_h_0().w_full().child(table))
+                .child(table_footer);
+            column = column.child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().text_lg().font_weight(FontWeight::BOLD).child(format!(
+                        "{} — {}",
+                        kind.title(),
+                        currency.code()
+                    )))
+                    .child(
+                        div()
+                            .id(("analysis-table-scroll", table_index))
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .overflow_x_scrollbar()
+                            .child(table_content),
+                    ),
+            );
         }
         if !has_totals {
             column = column.child(format!(
@@ -774,7 +967,12 @@ impl AnalysisPage {
         column
     }
 
-    fn render_summary(summary: &AnalysisSummary, stripe: Hsla, border: Hsla) -> impl IntoElement {
+    fn render_summary(
+        &self,
+        summary: &AnalysisSummary,
+        border: Hsla,
+        cx: &App,
+    ) -> impl IntoElement {
         if summary.totals.is_empty() {
             return div()
                 .child("За выбранный период операций нет.")
@@ -796,9 +994,8 @@ impl AnalysisPage {
                         .id(id)
                         .flex_1()
                         .min_w_0()
-                        .h_full()
-                        .overflow_y_scroll()
-                        .child(Self::render_kind_summary(summary, kind, stripe, border))
+                        .min_h_0()
+                        .child(self.render_kind_summary(kind, border, cx))
                 }),
             )
             .into_any_element()
@@ -917,7 +1114,6 @@ impl AnalysisPage {
 impl Render for AnalysisPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let danger = cx.theme().danger;
-        let stripe = cx.theme().muted;
         let border = cx.theme().border;
         let mut root = div().size_full().flex().flex_col().gap_2().p_3();
         let header = div()
@@ -956,7 +1152,7 @@ impl Render for AnalysisPage {
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .child(Self::render_summary(summary, stripe, border))
+                .child(self.render_summary(summary, border, cx))
                 .into_any_element()
         } else if self.tracker.loading {
             div()
@@ -978,8 +1174,9 @@ fn category_tree_labels(categories: &[Category]) -> Vec<(i64, String)> {
 mod tests {
     // Глоб-импорт `gpui_kit::*` затеняет атрибут `#[test]`, поэтому имена импортируются явно.
     use super::{
-        parse_filters, pie_chart_slices, pie_slice_points, AnalysisFilters, CategoryPicker,
-        RequestTracker,
+        parse_filters, pie_chart_slices, pie_slice_points, sort_analysis_categories,
+        AnalysisFilters, AnalysisTable, CategoryPicker, RequestTracker, COL_AMOUNT, COL_CATEGORY,
+        COL_SHARE, COL_TRANSACTION_COUNT,
     };
     use chrono::NaiveDate;
     use finance_core::{
@@ -1029,6 +1226,48 @@ mod tests {
         })
         .collect();
         AnalysisSummary { categories, totals }
+    }
+
+    fn category_total(
+        id: i64,
+        name: &str,
+        amount: Decimal,
+        transaction_count: usize,
+        share_percent: Decimal,
+    ) -> AnalysisCategoryTotal {
+        AnalysisCategoryTotal {
+            kind: TransactionKind::Income,
+            category_id: id,
+            category_name: name.to_owned(),
+            currency: Currency::Rub,
+            amount,
+            transaction_count,
+            share_percent,
+        }
+    }
+
+    fn sortable_categories() -> Vec<AnalysisCategoryTotal> {
+        vec![
+            category_total(1, "Бета", Decimal::new(95, 1), 2, Decimal::new(1225, 2)),
+            category_total(2, "Альфа", Decimal::from(100), 10, Decimal::from(50)),
+            category_total(3, "Гамма", Decimal::from(20), 5, Decimal::new(3775, 2)),
+        ]
+    }
+
+    fn summary_with_categories(
+        categories: Vec<AnalysisCategoryTotal>,
+        total_amount: Decimal,
+        transaction_count: usize,
+    ) -> AnalysisSummary {
+        AnalysisSummary {
+            categories,
+            totals: vec![AnalysisTotal {
+                kind: TransactionKind::Income,
+                currency: Currency::Rub,
+                amount: total_amount,
+                transaction_count,
+            }],
+        }
     }
 
     fn filters(from: &str, to: &str, income: Option<i64>, expense: Option<i64>) -> AnalysisFilters {
@@ -1114,6 +1353,105 @@ mod tests {
         let slices = pie_chart_slices(&summary, TransactionKind::Income, Currency::Rub)
             .expect("empty summary is representable");
         assert!(slices.is_empty());
+    }
+
+    #[test]
+    fn analysis_table_sorts_each_column_in_both_directions() {
+        let cases = [
+            (COL_CATEGORY, [2, 1, 3], [3, 1, 2]),
+            (COL_TRANSACTION_COUNT, [1, 3, 2], [2, 3, 1]),
+            (COL_AMOUNT, [1, 3, 2], [2, 3, 1]),
+            (COL_SHARE, [1, 3, 2], [2, 3, 1]),
+        ];
+
+        for (column, ascending, descending) in cases {
+            let mut rows = sortable_categories();
+            sort_analysis_categories(&mut rows, Some((column, super::ColumnSort::Ascending)));
+            assert_eq!(
+                rows.iter().map(|row| row.category_id).collect::<Vec<_>>(),
+                ascending
+            );
+
+            sort_analysis_categories(&mut rows, Some((column, super::ColumnSort::Descending)));
+            assert_eq!(
+                rows.iter().map(|row| row.category_id).collect::<Vec<_>>(),
+                descending
+            );
+        }
+    }
+
+    #[test]
+    fn analysis_table_keeps_group_totals_outside_category_rows() {
+        let summary = summary_with_both_kinds_and_currencies();
+        let mut income_rub_table = AnalysisTable::new(TransactionKind::Income, Currency::Rub);
+        let mut expense_usd_table = AnalysisTable::new(TransactionKind::Expense, Currency::Usd);
+
+        income_rub_table.set_summary(&summary);
+        expense_usd_table.set_summary(&summary);
+
+        assert_eq!(
+            income_rub_table
+                .rows
+                .iter()
+                .map(|row| row.category_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Зарплата", "Премия"]
+        );
+        assert_eq!(
+            expense_usd_table
+                .rows
+                .iter()
+                .map(|row| row.category_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Платеж USD", "Расход USD"]
+        );
+        assert_eq!(
+            income_rub_table.total.as_ref().map(|total| total.amount),
+            Some(Decimal::from(2))
+        );
+        assert_eq!(
+            expense_usd_table
+                .total
+                .as_ref()
+                .map(|total| total.transaction_count),
+            Some(2)
+        );
+        assert_eq!(income_rub_table.rows.len(), 2);
+        assert_eq!(expense_usd_table.rows.len(), 2);
+    }
+
+    #[test]
+    fn analysis_table_refresh_replaces_rows_and_preserves_sort_order() {
+        let mut table = AnalysisTable::new(TransactionKind::Income, Currency::Rub);
+        table.sort = Some((COL_AMOUNT, super::ColumnSort::Ascending));
+        table.set_summary(&summary_with_categories(
+            sortable_categories(),
+            Decimal::new(1295, 1),
+            17,
+        ));
+        let refreshed = summary_with_categories(
+            vec![
+                category_total(4, "Новая Бета", Decimal::from(10), 1, Decimal::from(25)),
+                category_total(5, "Новая Альфа", Decimal::from(3), 2, Decimal::from(75)),
+            ],
+            Decimal::from(13),
+            3,
+        );
+
+        table.set_summary(&refreshed);
+
+        assert_eq!(
+            table
+                .rows
+                .iter()
+                .map(|row| row.category_id)
+                .collect::<Vec<_>>(),
+            [5, 4]
+        );
+        assert_eq!(
+            table.total.as_ref().map(|total| total.amount),
+            Some(Decimal::from(13))
+        );
     }
 
     #[test]
