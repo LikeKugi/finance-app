@@ -52,7 +52,11 @@ cargo +stable build --workspace --release
 
 The workflow in `.github/workflows/build.yml` builds release artifacts on every push and pull request, and can also be started manually from the repository's **Actions** tab. It produces separate downloadable artifacts for Windows x64, macOS Apple Silicon (`arm64`), and macOS Intel (`x86_64`).
 
-Open the completed workflow run, select **Artifacts**, and download the artifact for your platform. The macOS artifacts are `.tar.gz` archives containing the executable; extract the archive before running it. These builds are not signed or notarized, and the workflow does not create an installer or a macOS `.app` bundle.
+For user-facing downloads, push a trusted version tag in the form `vMAJOR.MINOR.PATCH`, such as `v0.1.0`. The separate `.github/workflows/release.yml` builds and publishes a GitHub Release containing `finance-app.exe` for Windows x64, `finance-app-macos-arm64.zip`, and `finance-app-macos-x86_64.zip`. The ordinary build workflow remains independent and continues to provide CI artifacts.
+
+On Windows, download `finance-app.exe` from the GitHub Release and launch it directly; the release executable uses the GUI subsystem and does not open a terminal window. On macOS, download the ZIP matching the Mac's architecture, extract it, then open `FinanceApp.app` from Finder. Each archive contains one standalone `.app` bundle with its executable and icon.
+
+Release builds are not signed or notarized. Windows SmartScreen or macOS Gatekeeper may still show an unknown-publisher or security warning; this release process does not guarantee their removal. The GitHub Release is a direct download and does not include an installer.
 
 #### Windows
 
@@ -62,7 +66,7 @@ Build a Windows x64 release on Windows with Rust stable and the Windows SDK inst
 cargo +stable build -p finance-app --release --locked
 ```
 
-The executable is written to `target/release/finance-app.exe`. The GitHub Actions workflow locates `fxc.exe` in the Windows SDK automatically. The Windows release build is performed on a Windows runner; cross-compiling this release from macOS is not supported by the current shader build dependency.
+The executable is written to `target/release/finance-app.exe`. A release build uses the GUI subsystem, so launching the built EXE does not open a terminal window; debug builds keep the console, and launching from `cargo run` does not close an already-open terminal. The GitHub Actions workflow locates `fxc.exe` in the Windows SDK automatically. The Windows release build is performed on a Windows runner; cross-compiling this release from macOS is not supported by the current shader build dependency.
 
 #### macOS
 
@@ -72,7 +76,7 @@ For a native macOS release, install Apple Command Line Tools:
 cargo +stable build -p finance-app --release --locked --target-dir target/macos
 ```
 
-The executable is written to `target/macos/release/finance-app`.
+The executable is written to `target/macos/release/finance-app`. This is a raw executable; the downloadable `.app` bundles are assembled by the tagged GitHub Release workflow.
 
 For development, run the app in debug mode on the current machine with one command. This form explicitly selects the stable toolchain and works even when `cargo +stable` is not supported by the active Cargo executable:
 
