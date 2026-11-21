@@ -40,27 +40,28 @@ const COLUMN_HEADINGS: [&str; 13] = [
     "Базовая ставка",
     "Ставка при выполнении условий",
     "Порог",
-    "Срок",
     "Дата открытия",
+    "Срок",
     "Дата начисления процентов",
     "Назначение процентов",
     "Статус",
     "Действия",
 ];
 const DEFAULT_COLUMN_WIDTHS: [f32; 13] = [
-    85.0, 120.0, 90.0, 70.0, 80.0, 170.0, 90.0, 115.0, 95.0, 105.0, 120.0, 85.0, 145.0,
+    85.0, 120.0, 90.0, 70.0, 80.0, 170.0, 90.0, 95.0, 115.0, 105.0, 120.0, 85.0, 145.0,
 ];
 const MIN_COLUMN_WIDTH: f32 = 60.0;
 const MAX_COLUMN_WIDTH: f32 = 1200.0;
-const SAVINGS_COLUMN_WIDTHS_KEY: &str = "table_columns.savings";
+const SAVINGS_COLUMN_WIDTHS_KEY: &str = "table_columns.savings.v2";
+const LEGACY_SAVINGS_COLUMN_WIDTHS_KEY: &str = "table_columns.savings";
 const COL_BANK: usize = 0;
 const COL_TITLE: usize = 1;
 const COL_AMOUNT: usize = 2;
 const COL_BASE_RATE: usize = 4;
 const COL_RATE_AFTER_THRESHOLD: usize = 5;
 const COL_THRESHOLD: usize = 6;
-const COL_TERM: usize = 7;
-const COL_OPENED_DATE: usize = 8;
+const COL_OPENED_DATE: usize = 7;
+const COL_TERM: usize = 8;
 const COL_ACTIONS: usize = 12;
 const FOOTER_NOTE: &str = "Даты открытия и начисления процентов сохраняются как справочные значения; процентный доход здесь не рассчитывается без истории остатка и правил начисления банка. Повышенная ставка показана как условие, а не как подтверждённая доходность.";
 const FOOTER_WARNING: &str =
@@ -101,6 +102,36 @@ fn status_labels() -> Vec<String> {
         "Активные".to_owned(),
         "Неактивные".to_owned(),
     ]
+}
+
+fn term_filter_labels() -> Vec<String> {
+    std::iter::once(ALL_LABEL.to_owned())
+        .chain(TERMS.into_iter().map(|term| term.title().to_owned()))
+        .collect()
+}
+
+fn destination_filter_labels() -> Vec<String> {
+    std::iter::once(ALL_LABEL.to_owned())
+        .chain(
+            InterestDestination::ALL
+                .into_iter()
+                .map(|destination| destination.title().to_owned()),
+        )
+        .collect()
+}
+
+fn filter_savings(
+    entries: Vec<SavingsAccount>,
+    term: Option<SavingsTerm>,
+    destination: Option<InterestDestination>,
+) -> Vec<SavingsAccount> {
+    entries
+        .into_iter()
+        .filter(|entry| {
+            term.is_none_or(|term| entry.term_type == term)
+                && destination.is_none_or(|destination| entry.interest_destination == destination)
+        })
+        .collect()
 }
 
 fn format_date(date: NaiveDate) -> String {
@@ -271,6 +302,10 @@ pub(crate) struct SavingsPage {
     currency_filter_select: Choice,
     active_filter: Option<bool>,
     active_filter_select: Choice,
+    term_filter: Option<SavingsTerm>,
+    term_filter_select: Choice,
+    destination_filter: Option<InterestDestination>,
+    destination_filter_select: Choice,
     form: Option<Form>,
     confirm_discard: bool,
     _subscriptions: Vec<Subscription>,
@@ -282,6 +317,8 @@ impl SavingsPage {
         let bank_filter_select = choice(vec![ALL_BANKS_LABEL.to_owned()], Some(0), window, cx);
         let currency_filter_select = choice(currency_labels(ALL_LABEL), Some(0), window, cx);
         let active_filter_select = choice(status_labels(), Some(0), window, cx);
+        let term_filter_select = choice(term_filter_labels(), Some(0), window, cx);
+        let destination_filter_select = choice(destination_filter_labels(), Some(0), window, cx);
 
         let mut subscriptions = vec![
             cx.subscribe_in(
@@ -330,6 +367,32 @@ impl SavingsPage {
                     this.apply_filters(cx);
                 },
             ),
+            cx.subscribe_in(
+                &term_filter_select,
+                window,
+                |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                    let SelectEvent::Confirm(value) = event;
+                    this.term_filter = value.as_ref().and_then(|label| {
+                        TERMS
+                            .into_iter()
+                            .find(|term| term.title() == label.as_ref())
+                    });
+                    this.apply_filters(cx);
+                },
+            ),
+            cx.subscribe_in(
+                &destination_filter_select,
+                window,
+                |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                    let SelectEvent::Confirm(value) = event;
+                    this.destination_filter = value.as_ref().and_then(|label| {
+                        InterestDestination::ALL
+                            .into_iter()
+                            .find(|destination| destination.title() == label.as_ref())
+                    });
+                    this.apply_filters(cx);
+                },
+            ),
         ];
         subscriptions.shrink_to_fit();
 
@@ -357,6 +420,10 @@ impl SavingsPage {
             currency_filter_select,
             active_filter: None,
             active_filter_select,
+            term_filter: None,
+            term_filter_select,
+            destination_filter: None,
+            destination_filter_select,
             form: None,
             confirm_discard: false,
             _subscriptions: subscriptions,
@@ -451,6 +518,7 @@ impl SavingsPage {
             &search,
         ) {
             Ok(entries) => {
+                let entries = filter_savings(entries, self.term_filter, self.destination_filter);
                 self.table.update(cx, |table, cx| {
                     table.delegate_mut().set_rows(entries.clone());
                     cx.notify();
@@ -477,6 +545,8 @@ impl SavingsPage {
             || self.bank_filter.is_some()
             || self.currency_filter.is_some()
             || self.active_filter.is_some()
+            || self.term_filter.is_some()
+            || self.destination_filter.is_some()
     }
 
     fn reset_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -485,10 +555,14 @@ impl SavingsPage {
         self.bank_filter = None;
         self.currency_filter = None;
         self.active_filter = None;
+        self.term_filter = None;
+        self.destination_filter = None;
         for select in [
             &self.bank_filter_select,
             &self.currency_filter_select,
             &self.active_filter_select,
+            &self.term_filter_select,
+            &self.destination_filter_select,
         ] {
             select.update(cx, |state, cx| {
                 state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
@@ -899,6 +973,22 @@ impl SavingsPage {
                             .placeholder("Статус")
                             .small()
                             .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Срок",
+                        180.0,
+                        Select::new(&self.term_filter_select)
+                            .placeholder("Срок")
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Назначение процентов",
+                        190.0,
+                        Select::new(&self.destination_filter_select)
+                            .placeholder("Назначение процентов")
+                            .small()
+                            .into_any_element(),
                     )),
             )
             .child(
@@ -1133,13 +1223,31 @@ fn parse_column_widths(value: &str) -> Option<Vec<f32>> {
     .then_some(widths)
 }
 
+fn parse_legacy_column_widths(value: &str) -> Option<Vec<f32>> {
+    let mut widths = parse_column_widths(value)?;
+    widths.swap(COL_OPENED_DATE, COL_TERM);
+    Some(widths)
+}
+
 fn load_column_widths(database: &Database) -> Vec<f32> {
     match finance_db::get_app_setting(database, column_widths_key()) {
         Ok(Some(value)) => parse_column_widths(&value).unwrap_or_else(|| {
             eprintln!("Некорректная сохранённая ширина колонок накоплений; использованы значения по умолчанию");
             DEFAULT_COLUMN_WIDTHS.to_vec()
         }),
-        Ok(None) => DEFAULT_COLUMN_WIDTHS.to_vec(),
+        Ok(None) => match finance_db::get_app_setting(database, LEGACY_SAVINGS_COLUMN_WIDTHS_KEY) {
+            Ok(Some(value)) => parse_legacy_column_widths(&value).unwrap_or_else(|| {
+                eprintln!(
+                    "Некорректная сохранённая ширина колонок накоплений; использованы значения по умолчанию"
+                );
+                DEFAULT_COLUMN_WIDTHS.to_vec()
+            }),
+            Ok(None) => DEFAULT_COLUMN_WIDTHS.to_vec(),
+            Err(error) => {
+                eprintln!("Не удалось прочитать ширину колонок накоплений: {error}");
+                DEFAULT_COLUMN_WIDTHS.to_vec()
+            }
+        },
         Err(error) => {
             eprintln!("Не удалось прочитать ширину колонок накоплений: {error}");
             DEFAULT_COLUMN_WIDTHS.to_vec()
@@ -1448,9 +1556,11 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::{
-        column_widths_key, format_column_widths, load_column_widths, parse_column_widths,
-        sort_savings, SavingsForm, COL_AMOUNT, COL_BANK, COL_BASE_RATE, COL_OPENED_DATE,
-        COL_RATE_AFTER_THRESHOLD, COL_TERM, COL_THRESHOLD, COL_TITLE, DEFAULT_COLUMN_WIDTHS,
+        column_widths_key, destination_filter_labels, filter_savings, format_column_widths,
+        load_column_widths, parse_column_widths, parse_legacy_column_widths, sort_savings,
+        term_filter_labels, SavingsForm, COLUMN_HEADINGS, COL_AMOUNT, COL_BANK, COL_BASE_RATE,
+        COL_OPENED_DATE, COL_RATE_AFTER_THRESHOLD, COL_TERM, COL_THRESHOLD, COL_TITLE,
+        DEFAULT_COLUMN_WIDTHS, LEGACY_SAVINGS_COLUMN_WIDTHS_KEY,
     };
 
     fn valid_savings_form() -> SavingsForm {
@@ -1608,7 +1718,7 @@ mod tests {
                 interest_accrual_date: None,
                 term_type: SavingsTerm::Limited,
                 term_end_date: NaiveDate::from_ymd_opt(2028, 1, 1),
-                interest_destination: InterestDestination::Reinvest,
+                interest_destination: InterestDestination::Withdraw,
                 is_active: true,
             },
         ]
@@ -1648,6 +1758,71 @@ mod tests {
     }
 
     #[test]
+    fn savings_column_order_places_opening_date_before_term() {
+        assert_eq!(COL_OPENED_DATE, 7);
+        assert_eq!(COL_TERM, 8);
+        assert_eq!(COLUMN_HEADINGS[COL_OPENED_DATE], "Дата открытия");
+        assert_eq!(COLUMN_HEADINGS[COL_TERM], "Срок");
+    }
+
+    #[test]
+    fn savings_filters_match_each_value_combine_and_reset() {
+        let entries = sortable_savings();
+        let ids =
+            |rows: Vec<SavingsAccount>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+
+        assert_eq!(
+            term_filter_labels(),
+            ["Все", "С ограниченным сроком", "Бессрочный"]
+        );
+        assert_eq!(
+            destination_filter_labels(),
+            ["Все", "Капитализация", "На карту"]
+        );
+        assert_eq!(
+            ids(filter_savings(
+                entries.clone(),
+                Some(SavingsTerm::Limited),
+                None
+            )),
+            [1, 3]
+        );
+        assert_eq!(
+            ids(filter_savings(
+                entries.clone(),
+                Some(SavingsTerm::Unlimited),
+                None
+            )),
+            [2]
+        );
+        assert_eq!(
+            ids(filter_savings(
+                entries.clone(),
+                None,
+                Some(InterestDestination::Reinvest)
+            )),
+            [1, 2]
+        );
+        assert_eq!(
+            ids(filter_savings(
+                entries.clone(),
+                None,
+                Some(InterestDestination::Withdraw)
+            )),
+            [3]
+        );
+        assert_eq!(
+            ids(filter_savings(
+                entries.clone(),
+                Some(SavingsTerm::Limited),
+                Some(InterestDestination::Withdraw)
+            )),
+            [3]
+        );
+        assert_eq!(ids(filter_savings(entries.clone(), None, None)), [1, 2, 3]);
+    }
+
+    #[test]
     fn savings_column_widths_are_loaded_from_database_and_validated() {
         let database = filtered_database();
         let mut widths = DEFAULT_COLUMN_WIDTHS;
@@ -1660,6 +1835,28 @@ mod tests {
         .expect("column widths should be stored");
 
         assert_eq!(load_column_widths(&database), widths);
+    }
+
+    #[test]
+    fn legacy_savings_column_widths_are_remapped_to_the_new_column_order() {
+        let database = filtered_database();
+        let mut legacy_widths = DEFAULT_COLUMN_WIDTHS;
+        legacy_widths[COL_OPENED_DATE] = 125.0;
+        legacy_widths[COL_TERM] = 235.0;
+        finance_db::set_app_setting(
+            &database,
+            LEGACY_SAVINGS_COLUMN_WIDTHS_KEY,
+            &format_column_widths(&legacy_widths),
+        )
+        .expect("legacy column widths should be stored");
+
+        let mut expected = legacy_widths;
+        expected.swap(COL_OPENED_DATE, COL_TERM);
+        assert_eq!(
+            parse_legacy_column_widths(&format_column_widths(&legacy_widths)),
+            Some(expected.to_vec())
+        );
+        assert_eq!(load_column_widths(&database), expected);
     }
 
     #[test]

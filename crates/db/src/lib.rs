@@ -985,11 +985,18 @@ fn load_analysis_transactions_with_filters(
             TransactionKind::Expense => expense_category_id,
         };
         let sql = format!(
-            "SELECT t.category_id, c.name, t.amount, t.currency
+            "WITH RECURSIVE selected_categories(id) AS (
+                 SELECT id FROM {categories} WHERE id = ?3
+                 UNION
+                 SELECT child.id
+                 FROM {categories} child
+                 JOIN selected_categories parent ON child.parent_id = parent.id
+             )
+             SELECT t.category_id, c.name, t.amount, t.currency
              FROM {table} t JOIN {categories} c ON c.id = t.category_id
              WHERE (?1 IS NULL OR t.date >= ?1)
                AND (?2 IS NULL OR t.date <= ?2)
-               AND (?3 IS NULL OR t.category_id = ?3)
+               AND (?3 IS NULL OR t.category_id IN (SELECT id FROM selected_categories))
              ORDER BY t.date, t.id"
         );
         let mut statement = transaction.prepare(&sql)?;
@@ -2293,8 +2300,9 @@ fn backup_before_migration(
 mod tests {
     use chrono::NaiveDate;
     use finance_core::{
-        Currency, CurrencyDefinition, DomainError, InterestDestination, PaymentCardType,
-        PaymentDocumentDetails, PaymentSystem, SavingsDetails, SavingsTerm, TransactionKind,
+        summarize_analysis, Currency, CurrencyDefinition, DomainError, InterestDestination,
+        PaymentCardType, PaymentDocumentDetails, PaymentSystem, SavingsDetails, SavingsTerm,
+        TransactionKind,
     };
     use rusqlite::{Connection, OpenFlags};
     use rust_decimal::Decimal;
@@ -5349,6 +5357,169 @@ mod tests {
         );
         assert_eq!(income_category_one, expense_category_one);
         assert_eq!(income_category_two, expense_category_two);
+    }
+
+    #[test]
+    fn load_analysis_transactions_by_category_includes_recursive_descendants() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let connection = initialize(&database_path).unwrap();
+
+        let income_root = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Зарплата",
+            None,
+            true,
+        )
+        .unwrap();
+        let income_child = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Премии",
+            Some(income_root),
+            true,
+        )
+        .unwrap();
+        let income_grandchild = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Годовая премия",
+            Some(income_child),
+            true,
+        )
+        .unwrap();
+        let other_income_root = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Пособия",
+            None,
+            true,
+        )
+        .unwrap();
+        let other_income_child = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Пособие по уходу",
+            Some(other_income_root),
+            true,
+        )
+        .unwrap();
+
+        let expense_root = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Жильё",
+            None,
+            true,
+        )
+        .unwrap();
+        let expense_child = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Коммунальные услуги",
+            Some(expense_root),
+            true,
+        )
+        .unwrap();
+        let other_expense_root = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Транспорт",
+            None,
+            true,
+        )
+        .unwrap();
+        let other_expense_child = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Такси",
+            Some(other_expense_root),
+            true,
+        )
+        .unwrap();
+
+        for (kind, category_id, month, day, amount) in [
+            (TransactionKind::Income, income_root, 1, 1, 10),
+            (TransactionKind::Income, income_child, 1, 15, 20),
+            (TransactionKind::Income, income_grandchild, 1, 31, 30),
+            (TransactionKind::Income, other_income_child, 1, 10, 900),
+            (TransactionKind::Income, income_grandchild, 2, 1, 700),
+            (TransactionKind::Expense, expense_root, 1, 1, 40),
+            (TransactionKind::Expense, expense_child, 1, 31, 50),
+            (TransactionKind::Expense, other_expense_child, 1, 10, 800),
+            (TransactionKind::Expense, expense_child, 2, 1, 600),
+        ] {
+            save_transaction(
+                &connection,
+                kind,
+                None,
+                NaiveDate::from_ymd_opt(2027, month, day).unwrap(),
+                category_id,
+                Decimal::from(amount),
+                Currency::Rub,
+                "",
+            )
+            .unwrap();
+        }
+        connection
+            .execute(
+                "UPDATE income_categories SET is_active = 0 WHERE id = ?1",
+                [income_grandchild],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE expense_categories SET is_active = 0 WHERE id = ?1",
+                [expense_child],
+            )
+            .unwrap();
+        drop(connection);
+
+        let transactions = load_analysis_transactions_by_category(
+            &database_path,
+            NaiveDate::from_ymd_opt(2027, 1, 1),
+            NaiveDate::from_ymd_opt(2027, 1, 31),
+            Some(income_root),
+            Some(expense_root),
+        )
+        .unwrap();
+
+        assert_eq!(
+            transactions
+                .iter()
+                .map(|entry| (entry.kind, entry.category_id))
+                .collect::<Vec<_>>(),
+            vec![
+                (TransactionKind::Income, income_root),
+                (TransactionKind::Income, income_child),
+                (TransactionKind::Income, income_grandchild),
+                (TransactionKind::Expense, expense_root),
+                (TransactionKind::Expense, expense_child),
+            ]
+        );
+
+        let summary = summarize_analysis(&transactions).unwrap();
+        assert_eq!(
+            summary
+                .totals
+                .iter()
+                .map(|total| (total.kind, total.amount))
+                .collect::<Vec<_>>(),
+            vec![
+                (TransactionKind::Income, Decimal::from(60)),
+                (TransactionKind::Expense, Decimal::from(90)),
+            ]
+        );
     }
 
     #[test]

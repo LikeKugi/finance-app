@@ -68,14 +68,15 @@ Shared compact DatePicker controls retain previous/next-month arrow navigation a
 
 ### Savings
 
-- Search, bank, currency, and status filters appear above the table and wrap onto additional lines when they do not fit; horizontal scrolling is not used.
+- Search, bank, currency, status, term, and interest-destination filters appear above the table and wrap onto additional lines when they do not fit; horizontal scrolling is not used.
 - Filter groups and wrapped rows have a small, consistent gap for visual separation.
 - `Применить` and `Сбросить фильтры` remain aligned to the right of the final filter row, moving to the bottom-right row when needed.
-- Editing search, bank, currency, or status does not reload the results until `Применить` is clicked.
-- The Savings results use a resizable `DataTable`; column widths are persisted in the database. Sorting applies to the complete filtered result set for `Банк`, `Название`, `Сумма`, `Базовая ставка`, `Ставка при выполнении условий`, `Порог`, `Дата открытия`, and `Срок`.
+- Search edits do not reload the results until `Применить` is clicked or Enter is pressed. Selecting bank, currency, status, term, or interest destination applies the filter immediately.
+- The Savings results use a resizable `DataTable`; column widths are persisted in the database and legacy widths are remapped when the column order changes. Columns appear as `Дата открытия` followed by `Срок`. Sorting applies to the complete filtered result set for `Банк`, `Название`, `Сумма`, `Базовая ставка`, `Ставка при выполнении условий`, `Порог`, `Дата открытия`, and `Срок`.
+- The term filter offers `Бессрочный` and `С ограниченным сроком`; the interest-destination filter offers `Капитализация` and `На карту`. These filters combine with the other selected conditions.
 - Currency options are `Все`, `RUB`, and `USD`. A currency selection matches only accounts explicitly set to that currency; `Все` includes accounts with an unknown currency.
-- Each active filter has an `×` control. Clearing one immediately reloads the results using the other values currently in the controls.
-- `Сбросить фильтры` clears all filters and reloads the list. It is disabled when no filters are active.
+- The search input has an inline clear control; its value is applied on `Применить` or Enter. Select filters are cleared with `Сбросить фильтры`.
+- `Сбросить фильтры` clears all filters, including term and interest destination, and reloads the list. It is disabled when no filters are active.
 - The `↻ Обновить` header action reloads the banks and results with the current filter values without resetting the sort or column widths.
 - If no records match, the page shows an empty-state message.
 - Opening date and interest-accrual date are optional `YYYY-MM-DD` values in the add/edit form; clearing either field stores it as unknown, shown as `—` in the table. These are manually maintained reference dates and do not trigger interest calculations or assert that an accrual was verified by the bank.

@@ -640,6 +640,9 @@ impl AnalysisPage {
                             .into_any_element(),
                     )),
             )
+            .child(div().text_size(px(12.0)).child(
+                "Выбранная категория и все её подкатегории учитываются в таблице и диаграмме.",
+            ))
             .child(
                 div()
                     .flex()
@@ -980,7 +983,8 @@ mod tests {
     };
     use chrono::NaiveDate;
     use finance_core::{
-        AnalysisCategoryTotal, AnalysisSummary, AnalysisTotal, Category, Currency, TransactionKind,
+        summarize_analysis, AnalysisCategoryTotal, AnalysisSummary, AnalysisTotal,
+        AnalysisTransaction, Category, Currency, TransactionKind,
     };
     use rust_decimal::Decimal;
 
@@ -1071,6 +1075,36 @@ mod tests {
                 .map(|slice| slice.category.category_name.as_str())
                 .collect::<Vec<_>>(),
             ["Расход USD", "Платеж USD"]
+        );
+    }
+
+    #[test]
+    fn pie_chart_includes_each_category_total_in_the_selected_branch() {
+        let transactions = [
+            (1, "Зарплата", 10),
+            (2, "Премии", 20),
+            (3, "Годовая премия", 30),
+        ]
+        .into_iter()
+        .map(|(category_id, category_name, amount)| AnalysisTransaction {
+            kind: TransactionKind::Income,
+            category_id,
+            category_name: category_name.to_owned(),
+            amount: Decimal::from(amount),
+            currency: Currency::Rub,
+        })
+        .collect::<Vec<_>>();
+        let summary = summarize_analysis(&transactions).unwrap();
+
+        let slices = pie_chart_slices(&summary, TransactionKind::Income, Currency::Rub)
+            .expect("category totals should be representable as chart slices");
+
+        assert_eq!(
+            slices
+                .iter()
+                .map(|slice| slice.category.category_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Зарплата", "Премии", "Годовая премия"]
         );
     }
 
