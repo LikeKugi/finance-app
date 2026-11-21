@@ -28,12 +28,15 @@ const ALL_BANKS_LABEL: &str = "Все банки";
 const NO_CURRENCY_LABEL: &str = "валюта не указана";
 const RATE_WARNING: &str =
     "Условие сохраняется как возможность; приложение не подтверждает выполнение порога трат.";
-/// Фиксированные ширины колонок 0..=8; колонка «Связанные накопления» занимает остаток,
+/// Фиксированные ширины колонок 0..=9; колонка «Связанные накопления» занимает остаток,
 /// «Действия» закреплены справа.
-const FIXED_COLUMN_WIDTHS: [f32; 9] = [130.0, 95.0, 90.0, 100.0, 75.0, 105.0, 80.0, 125.0, 100.0];
-const SAVINGS_COLUMN: usize = 9;
+const FIXED_COLUMN_WIDTHS: [f32; 10] = [
+    120.0, 105.0, 80.0, 70.0, 90.0, 60.0, 100.0, 65.0, 110.0, 90.0,
+];
+const SAVINGS_COLUMN: usize = 10;
 const ACTIONS_COLUMN_WIDTH: f32 = 180.0;
-const HEADERS: [&str; 11] = [
+const HEADERS: [&str; 12] = [
+    "Название",
     "Банк",
     "Система",
     "Тип",
@@ -119,6 +122,7 @@ fn savings_label(savings: &SavingsAccount) -> String {
 /// Строковые значения формы, не зависящие от GUI.
 #[derive(Debug, Clone, PartialEq)]
 struct CardInput {
+    name: String,
     bank_id: Option<i64>,
     payment_system: Option<PaymentSystem>,
     card_type: Option<PaymentCardType>,
@@ -169,7 +173,9 @@ fn build_details(input: &CardInput) -> Result<PaymentDocumentDetails, String> {
     } else {
         (None, Vec::new())
     };
+    let name = input.name.trim();
     Ok(PaymentDocumentDetails {
+        name: (!name.is_empty()).then(|| name.to_owned()),
         bank_id,
         payment_system,
         card_type,
@@ -185,6 +191,7 @@ fn build_details(input: &CardInput) -> Result<PaymentDocumentDetails, String> {
 
 struct CardForm {
     id: Option<i64>,
+    name: Entity<InputState>,
     bank_id: Option<i64>,
     payment_system: Option<PaymentSystem>,
     card_type: Option<PaymentCardType>,
@@ -208,6 +215,7 @@ struct CardForm {
 impl CardForm {
     fn input(&self, cx: &App) -> CardInput {
         CardInput {
+            name: self.name.read(cx).value().to_string(),
             bank_id: self.bank_id,
             payment_system: self.payment_system,
             card_type: self.card_type,
@@ -527,6 +535,12 @@ impl PaymentDocumentsPage {
 
         let mut form = CardForm {
             id: existing.map(|d| d.id),
+            name: text_input(
+                "Например, Основная карта",
+                existing.and_then(|d| d.name.as_deref()).unwrap_or_default(),
+                window,
+                cx,
+            ),
             bank_id,
             payment_system,
             card_type,
@@ -572,6 +586,7 @@ impl PaymentDocumentsPage {
             currency_select,
             error: None,
             initial: CardInput {
+                name: String::new(),
                 bank_id,
                 payment_system,
                 card_type,
@@ -851,7 +866,11 @@ impl PaymentDocumentsPage {
                 .child(control)
         };
 
-        let mut fields = div().flex().flex_col().gap_3().child(
+        let mut fields = div().flex().flex_col().gap_3().child(field(
+            "Название карты",
+            Input::new(&form.name).into_any_element(),
+        ));
+        fields = fields.child(
             div()
                 .flex()
                 .gap_4()
@@ -1054,6 +1073,7 @@ impl PaymentDocumentsPage {
         let border = cx.theme().border;
         let id = document.id;
         let values = [
+            document.name.clone().unwrap_or_default(),
             document.bank_name.clone(),
             document.payment_system.code().to_owned(),
             document.card_type.title().to_owned(),
@@ -1155,7 +1175,7 @@ fn cell(width: f32, text: String, border: Hsla, separator: bool) -> Div {
 
 fn table_cell(index: usize, text: String, border: Hsla) -> Div {
     match index {
-        0..=8 => cell(FIXED_COLUMN_WIDTHS[index], text, border, index > 0),
+        0..=9 => cell(FIXED_COLUMN_WIDTHS[index], text, border, index > 0),
         SAVINGS_COLUMN => div()
             .flex_1()
             .min_w_0()
@@ -1269,6 +1289,7 @@ mod tests {
             include_str!("../../../db/migrations/V8__currencies.sql"),
             include_str!("../../../db/migrations/V9__savings_currency.sql"),
             include_str!("../../../db/migrations/V10__expense_card_balances.sql"),
+            include_str!("../../../db/migrations/V11__expense_places_and_card_names.sql"),
         ] {
             database.execute_batch(sql).unwrap();
         }
@@ -1280,6 +1301,7 @@ mod tests {
 
     fn debit_input() -> CardInput {
         CardInput {
+            name: String::new(),
             bank_id: Some(1),
             payment_system: Some(PaymentSystem::Visa),
             card_type: Some(PaymentCardType::Debit),
@@ -1328,9 +1350,11 @@ mod tests {
     fn new_debit_card_saves_zero_balance_without_automatic_currency() {
         let database = database_with_bank();
         let mut input = debit_input();
+        input.name = "Основная".to_owned();
         input.amount = "0".to_owned();
         save(&database, None, &input).unwrap();
         let entries = list(&database, None);
+        assert_eq!(entries[0].name.as_deref(), Some("Основная"));
         assert_eq!(entries[0].currency, None);
         assert_eq!(entries[0].amount.to_string(), "0");
     }
@@ -1340,16 +1364,24 @@ mod tests {
         let database = database_with_bank();
         let mut input = debit_input();
         input.amount = "10".to_owned();
+        input.name = "Основная".to_owned();
         input.currency = Some(Currency::Rub);
         save(&database, None, &input).unwrap();
         let id = list(&database, None)[0].id;
 
         input.currency = Some(Currency::Usd);
+        input.name = "Для поездок".to_owned();
         save(&database, Some(id), &input).unwrap();
         assert_eq!(list(&database, None)[0].currency, Some(Currency::Usd));
+        assert_eq!(
+            list(&database, None)[0].name.as_deref(),
+            Some("Для поездок")
+        );
         input.currency = None;
+        input.name.clear();
         save(&database, Some(id), &input).unwrap();
         assert_eq!(list(&database, None)[0].currency, None);
+        assert_eq!(list(&database, None)[0].name, None);
     }
 
     #[test]

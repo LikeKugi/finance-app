@@ -1601,7 +1601,7 @@ pub fn list_payment_documents_filtered(
         "SELECT document.id, document.bank_id, bank.name, document.payment_system,
                 document.card_type, document.amount, document.due_date,
                 document.grace_period_days, document.affects_deposit_rate,
-                document.min_monthly_spend, document.currency
+                document.min_monthly_spend, document.currency, document.name
          FROM payment_documents AS document
          JOIN banks AS bank ON bank.id = document.bank_id
          WHERE (?1 IS NULL OR document.bank_id = ?1)
@@ -1643,6 +1643,7 @@ pub fn list_payment_documents_filtered(
 
                 Ok(PaymentDocument {
                     id: row.get(0)?,
+                    name: row.get(11)?,
                     bank_id: row.get(1)?,
                     bank_name: row.get(2)?,
                     payment_system,
@@ -1777,6 +1778,7 @@ pub fn save_payment_document(
     }
 
     let amount = canonical_amount(details.amount);
+    let name = details.name.as_deref().map(str::trim);
     let due_date = details
         .due_date
         .map(|date| date.format("%Y-%m-%d").to_string());
@@ -1790,8 +1792,8 @@ pub fn save_payment_document(
             "UPDATE payment_documents
              SET bank_id = ?1, payment_system = ?2, card_type = ?3, amount = ?4,
                  due_date = ?5, grace_period_days = ?6, affects_deposit_rate = ?7,
-                 min_monthly_spend = ?8, currency = ?9
-             WHERE id = ?10",
+                 min_monthly_spend = ?8, currency = ?9, name = ?10
+             WHERE id = ?11",
             params![
                 details.bank_id,
                 details.payment_system.code(),
@@ -1802,6 +1804,7 @@ pub fn save_payment_document(
                 details.affects_deposit_rate,
                 min_monthly_spend,
                 details.currency.map(Currency::code),
+                name,
                 id
             ],
         )?;
@@ -1813,8 +1816,8 @@ pub fn save_payment_document(
         transaction.execute(
             "INSERT INTO payment_documents (
                 bank_id, payment_system, card_type, amount, due_date,
-                grace_period_days, affects_deposit_rate, min_monthly_spend, currency
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                grace_period_days, affects_deposit_rate, min_monthly_spend, currency, name
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 details.bank_id,
                 details.payment_system.code(),
@@ -1824,7 +1827,8 @@ pub fn save_payment_document(
                 details.grace_period_days,
                 details.affects_deposit_rate,
                 min_monthly_spend,
-                details.currency.map(Currency::code)
+                details.currency.map(Currency::code),
+                name
             ],
         )?;
         transaction.last_insert_rowid()
@@ -2284,6 +2288,7 @@ mod tests {
 
     fn payment_document_details(bank_id: i64) -> PaymentDocumentDetails {
         PaymentDocumentDetails {
+            name: None,
             bank_id,
             payment_system: PaymentSystem::MasterCard,
             card_type: PaymentCardType::Debit,
@@ -2684,10 +2689,15 @@ mod tests {
         let database_path = directory.path().join("data.db");
         let legacy = create_legacy_database(&database_path, 9);
         let bank_id = 1;
-        let mut card_details = payment_document_details(bank_id);
-        card_details.amount = Decimal::from(200);
-        card_details.currency = Some(Currency::Rub);
-        let card_id = save_payment_document(&legacy, None, &card_details).unwrap();
+        legacy
+            .execute(
+                "INSERT INTO payment_documents (
+                    bank_id, payment_system, card_type, amount, currency
+                 ) VALUES (?1, 'MasterCard', 'debit', '200', 'RUB')",
+                [bank_id],
+            )
+            .unwrap();
+        let card_id = legacy.last_insert_rowid();
         legacy
             .execute(
                 "UPDATE expenses SET payment_document_id = ?1 WHERE id = 1",
@@ -2710,15 +2720,13 @@ mod tests {
         assert_eq!(expenses.len(), 1);
         assert_eq!(expenses[0].payment_document_id, Some(card_id));
         assert!(!expenses[0].payment_document_balance_applied);
-        assert_eq!(
-            list_payment_documents(&database, None, None, None)
-                .unwrap()
-                .iter()
-                .find(|card| card.id == card_id)
-                .unwrap()
-                .amount,
-            Decimal::from(200)
-        );
+        let migrated_card = list_payment_documents(&database, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|card| card.id == card_id)
+            .unwrap();
+        assert_eq!(migrated_card.amount, Decimal::from(200));
+        assert_eq!(migrated_card.name, None);
 
         super::delete_transaction(&database, TransactionKind::Expense, expenses[0].id).unwrap();
         assert_eq!(
@@ -4696,6 +4704,7 @@ mod tests {
         let bank_id = save_bank(&connection, None, "Банк", "").unwrap();
         let savings_id = save_savings(&connection, None, &savings_details(bank_id)).unwrap();
         let mut details = payment_document_details(bank_id);
+        details.name = Some("Основная карта".to_owned());
         details.affects_deposit_rate = true;
         details.min_monthly_spend = Some(Decimal::from_str("10000.25").unwrap());
         details.savings_ids = vec![savings_id];
@@ -4710,6 +4719,7 @@ mod tests {
         .unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, id);
+        assert_eq!(listed[0].name.as_deref(), Some("Основная карта"));
         assert_eq!(listed[0].amount, details.amount);
         assert_eq!(listed[0].min_monthly_spend, details.min_monthly_spend);
         assert_eq!(listed[0].linked_savings[0].id, savings_id);
@@ -4717,6 +4727,7 @@ mod tests {
         let mut updated = details;
         updated.payment_system = PaymentSystem::Mir;
         updated.card_type = PaymentCardType::Credit;
+        updated.name = Some("Кредитная карта".to_owned());
         updated.amount = Decimal::from_str("5000.01").unwrap();
         updated.due_date = NaiveDate::from_ymd_opt(2026, 12, 1);
         updated.grace_period_days = Some(55);
@@ -4730,8 +4741,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(filtered[0].amount, updated.amount);
+        assert_eq!(filtered[0].name.as_deref(), Some("Кредитная карта"));
         assert_eq!(filtered[0].due_date, updated.due_date);
         assert_eq!(filtered[0].grace_period_days, Some(55));
+
+        updated.name = None;
+        save_payment_document(&connection, Some(id), &updated).unwrap();
+        assert_eq!(
+            list_payment_documents(&connection, None, None, None).unwrap()[0].name,
+            None
+        );
         assert!(
             list_payment_documents(&connection, None, Some(PaymentCardType::Debit), None)
                 .unwrap()

@@ -731,6 +731,7 @@ pub struct LinkedSavingsAccount {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaymentDocument {
     pub id: i64,
+    pub name: Option<String>,
     pub bank_id: i64,
     pub bank_name: String,
     pub payment_system: PaymentSystem,
@@ -746,6 +747,7 @@ pub struct PaymentDocument {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaymentDocumentDetails {
+    pub name: Option<String>,
     pub bank_id: i64,
     pub payment_system: PaymentSystem,
     pub card_type: PaymentCardType,
@@ -760,6 +762,13 @@ pub struct PaymentDocumentDetails {
 
 impl PaymentDocumentDetails {
     pub fn validate(&self) -> Result<(), DomainError> {
+        if self
+            .name
+            .as_deref()
+            .is_some_and(|name| name.trim().is_empty())
+        {
+            return Err(DomainError::InvalidPaymentDocumentName);
+        }
         validate_payment_document(
             self.amount,
             self.card_type,
@@ -818,6 +827,8 @@ pub enum DomainError {
     UnknownPaymentCardType(String),
     #[error("Баланс дебетовой карты не может быть отрицательным, а кредитный лимит должен быть положительным")]
     InvalidPaymentDocumentAmount,
+    #[error("Название платёжной карты не может быть пустым")]
+    InvalidPaymentDocumentName,
     #[error("Для кредитной карты укажите дату платежа и неотрицательный льготный период; у дебетовой карты эти поля отсутствуют")]
     InvalidPaymentCardTerms,
     #[error("Условие повышенной ставки требует положительного минимума трат и хотя бы одного связанного накопления")]
@@ -1042,7 +1053,7 @@ mod tests {
         canonical_amount, parse_amount, parse_amount_expression, parse_non_negative_decimal,
         rebase_exchange_rate, validate_currency_code, validate_exchange_rate,
         validate_payment_document, validate_savings, DomainError, InterestDestination,
-        PaymentCardType, PaymentSystem, SavingsTerm,
+        PaymentCardType, PaymentDocumentDetails, PaymentSystem, SavingsTerm,
     };
 
     #[test]
@@ -1317,6 +1328,28 @@ mod tests {
         assert_eq!(
             "MASTERCARD".parse::<PaymentSystem>(),
             Err(DomainError::UnknownPaymentSystem("MASTERCARD".to_owned()))
+        );
+    }
+
+    #[test]
+    fn payment_document_details_rejects_empty_optional_name() {
+        let details = PaymentDocumentDetails {
+            name: Some("  ".to_owned()),
+            bank_id: 1,
+            payment_system: PaymentSystem::Visa,
+            card_type: PaymentCardType::Debit,
+            amount: Decimal::ONE,
+            currency: None,
+            due_date: None,
+            grace_period_days: None,
+            affects_deposit_rate: false,
+            min_monthly_spend: None,
+            savings_ids: Vec::new(),
+        };
+
+        assert_eq!(
+            details.validate(),
+            Err(DomainError::InvalidPaymentDocumentName)
         );
     }
 
