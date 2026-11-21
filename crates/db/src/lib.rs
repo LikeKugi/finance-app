@@ -746,6 +746,35 @@ pub fn list_transactions(
     currency: Option<Currency>,
     search: &str,
 ) -> Result<Vec<FinancialTransaction>, DbError> {
+    list_transactions_filtered(
+        connection,
+        kind,
+        from,
+        to,
+        category_id,
+        currency,
+        search,
+        None,
+        None,
+    )
+}
+
+/// Returns transactions filtered by the existing criteria and their payment card or bank.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Extends the established transaction-list filters without changing the existing API"
+)]
+pub fn list_transactions_filtered(
+    connection: &Connection,
+    kind: TransactionKind,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+    category_id: Option<i64>,
+    currency: Option<Currency>,
+    search: &str,
+    bank_id: Option<i64>,
+    payment_document_id: Option<i64>,
+) -> Result<Vec<FinancialTransaction>, DbError> {
     let (table, categories) = transaction_tables(kind);
     let (card_column, rate_effect_column, balance_applied_column) = match kind {
         TransactionKind::Income => ("t.payment_document_id", "0", "0"),
@@ -763,6 +792,11 @@ pub fn list_transactions(
            AND (?2 IS NULL OR t.date <= ?2)
            AND (?3 IS NULL OR t.category_id = ?3)
            AND (?4 IS NULL OR t.currency = ?4)
+           AND (?5 IS NULL OR EXISTS (
+               SELECT 1 FROM payment_documents AS document
+               WHERE document.id = t.payment_document_id AND document.bank_id = ?5
+           ))
+           AND (?6 IS NULL OR t.payment_document_id = ?6)
          ORDER BY t.date DESC, t.id DESC"
     );
     let from = from.map(|date| date.format("%Y-%m-%d").to_string());
@@ -770,32 +804,42 @@ pub fn list_transactions(
     let currency = currency.map(Currency::code);
     let mut statement = connection.prepare(&sql)?;
     let transactions = statement
-        .query_map(params![from, to, category_id, currency], |row| {
-            let date_text = row.get::<_, String>(1)?;
-            let date = NaiveDate::parse_from_str(&date_text, "%Y-%m-%d").map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
-            })?;
-            let amount_text = row.get::<_, String>(4)?;
-            let amount = Decimal::from_str(&amount_text).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
-            })?;
-            let currency_text = row.get::<_, String>(5)?;
-            let currency = Currency::from_str(&currency_text).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(5, Type::Text, Box::new(error))
-            })?;
-            Ok(FinancialTransaction {
-                id: row.get(0)?,
-                date,
-                category_id: row.get(2)?,
-                category_name: row.get(3)?,
-                amount,
+        .query_map(
+            params![
+                from,
+                to,
+                category_id,
                 currency,
-                comment: row.get(6)?,
-                payment_document_id: row.get(7)?,
-                affects_deposit_rate: row.get(8)?,
-                payment_document_balance_applied: row.get(9)?,
-            })
-        })?
+                bank_id,
+                payment_document_id
+            ],
+            |row| {
+                let date_text = row.get::<_, String>(1)?;
+                let date = NaiveDate::parse_from_str(&date_text, "%Y-%m-%d").map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
+                })?;
+                let amount_text = row.get::<_, String>(4)?;
+                let amount = Decimal::from_str(&amount_text).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
+                })?;
+                let currency_text = row.get::<_, String>(5)?;
+                let currency = Currency::from_str(&currency_text).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(5, Type::Text, Box::new(error))
+                })?;
+                Ok(FinancialTransaction {
+                    id: row.get(0)?,
+                    date,
+                    category_id: row.get(2)?,
+                    category_name: row.get(3)?,
+                    amount,
+                    currency,
+                    comment: row.get(6)?,
+                    payment_document_id: row.get(7)?,
+                    affects_deposit_rate: row.get(8)?,
+                    payment_document_balance_applied: row.get(9)?,
+                })
+            },
+        )?
         .collect::<Result<Vec<_>, _>>()?;
 
     let search = search.trim().to_lowercase();
@@ -2262,9 +2306,10 @@ mod tests {
         has_pending_database_import, initialize, list_currencies, list_payment_documents,
         list_payment_documents_filtered, list_savings, list_savings_filtered,
         list_transaction_amounts, list_transaction_comments, list_transactions,
-        load_analysis_transactions, load_analysis_transactions_by_category,
-        restore_pending_database_import, save_bank, save_category, save_payment_document,
-        save_savings, save_transaction, set_app_setting, set_currency_exchange_rate,
+        list_transactions_filtered, load_analysis_transactions,
+        load_analysis_transactions_by_category, restore_pending_database_import, save_bank,
+        save_category, save_payment_document, save_savings, save_transaction,
+        save_transaction_with_card, set_app_setting, set_currency_exchange_rate,
         set_primary_currency, stage_database_import, DbError, MIGRATIONS,
     };
 
@@ -2300,6 +2345,51 @@ mod tests {
             min_monthly_spend: None,
             savings_ids: Vec::new(),
         }
+    }
+
+    fn transaction_filter_fixture(
+        kind: TransactionKind,
+    ) -> (tempfile::TempDir, Connection, i64, i64, i64) {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let first_bank_id = save_bank(&connection, None, "Банк первый", "").unwrap();
+        let second_bank_id = save_bank(&connection, None, "Банк второй", "").unwrap();
+        let category_id = save_category(&connection, kind, None, "Категория", None, true).unwrap();
+
+        let mut first_card_details = payment_document_details(first_bank_id);
+        first_card_details.currency = Some(Currency::Rub);
+        let first_card_id = save_payment_document(&connection, None, &first_card_details).unwrap();
+        let mut second_card_details = payment_document_details(second_bank_id);
+        second_card_details.currency = Some(Currency::Rub);
+        let second_card_id =
+            save_payment_document(&connection, None, &second_card_details).unwrap();
+
+        for (card_id, comment) in [
+            (Some(first_card_id), "Карта первого банка"),
+            (Some(second_card_id), "Карта второго банка"),
+            (None, "Без карты"),
+        ] {
+            save_transaction_with_card(
+                &connection,
+                kind,
+                None,
+                NaiveDate::from_ymd_opt(2026, 11, 21).unwrap(),
+                category_id,
+                Decimal::ONE,
+                Currency::Rub,
+                comment,
+                card_id,
+            )
+            .unwrap();
+        }
+
+        (
+            directory,
+            connection,
+            first_bank_id,
+            first_card_id,
+            second_card_id,
+        )
     }
 
     fn create_legacy_database(path: &std::path::Path, version: i64) -> Connection {
@@ -3945,6 +4035,134 @@ mod tests {
         .unwrap();
 
         assert_eq!(transactions[0].amount, amount);
+    }
+
+    #[test]
+    fn list_transactions_filters_income_by_bank_and_card() {
+        let (_directory, connection, first_bank_id, first_card_id, second_card_id) =
+            transaction_filter_fixture(TransactionKind::Income);
+
+        let unfiltered = list_transactions_filtered(
+            &connection,
+            TransactionKind::Income,
+            None,
+            None,
+            None,
+            None,
+            "",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(unfiltered.len(), 3);
+
+        let bank_filtered = list_transactions_filtered(
+            &connection,
+            TransactionKind::Income,
+            None,
+            None,
+            None,
+            None,
+            "",
+            Some(first_bank_id),
+            None,
+        )
+        .unwrap();
+        assert_eq!(bank_filtered.len(), 1);
+
+        let card_filtered = list_transactions_filtered(
+            &connection,
+            TransactionKind::Income,
+            None,
+            None,
+            None,
+            None,
+            "",
+            None,
+            Some(second_card_id),
+        )
+        .unwrap();
+        assert_eq!(card_filtered.len(), 1);
+        assert_eq!(card_filtered[0].payment_document_id, Some(second_card_id));
+
+        let mismatched_filters = list_transactions_filtered(
+            &connection,
+            TransactionKind::Income,
+            None,
+            None,
+            None,
+            None,
+            "",
+            Some(first_bank_id),
+            Some(second_card_id),
+        )
+        .unwrap();
+        assert!(mismatched_filters.is_empty());
+        assert_eq!(bank_filtered[0].payment_document_id, Some(first_card_id));
+    }
+
+    #[test]
+    fn list_transactions_filters_expenses_by_bank_and_card() {
+        let (_directory, connection, first_bank_id, first_card_id, second_card_id) =
+            transaction_filter_fixture(TransactionKind::Expense);
+
+        let unfiltered = list_transactions_filtered(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            None,
+            None,
+            None,
+            "",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(unfiltered.len(), 3);
+
+        let bank_filtered = list_transactions_filtered(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            None,
+            None,
+            None,
+            "",
+            Some(first_bank_id),
+            None,
+        )
+        .unwrap();
+        assert_eq!(bank_filtered.len(), 1);
+        assert_eq!(bank_filtered[0].payment_document_id, Some(first_card_id));
+
+        let card_filtered = list_transactions_filtered(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            None,
+            None,
+            None,
+            "",
+            None,
+            Some(second_card_id),
+        )
+        .unwrap();
+        assert_eq!(card_filtered.len(), 1);
+        assert_eq!(card_filtered[0].payment_document_id, Some(second_card_id));
+
+        let mismatched_filters = list_transactions_filtered(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            None,
+            None,
+            None,
+            "",
+            Some(first_bank_id),
+            Some(second_card_id),
+        )
+        .unwrap();
+        assert!(mismatched_filters.is_empty());
     }
 
     #[test]

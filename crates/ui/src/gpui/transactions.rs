@@ -7,8 +7,9 @@ use std::rc::Rc;
 
 use chrono::{Local, NaiveDate};
 use finance_core::{
-    parse_amount_expression, summarize_transaction_balance, Category, Currency, CurrencyDefinition,
-    FinancialTransaction, PaymentCardType, PaymentDocument, TransactionBalance, TransactionKind,
+    parse_amount_expression, summarize_transaction_balance, Bank, Category, Currency,
+    CurrencyDefinition, FinancialTransaction, PaymentCardType, PaymentDocument, TransactionBalance,
+    TransactionKind,
 };
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -93,6 +94,26 @@ fn eligible_cards(cards: &[PaymentDocument], currency: Option<Currency>) -> Vec<
         .collect()
 }
 
+fn cards_for_bank(cards: &[PaymentDocument], bank_id: Option<i64>) -> Vec<&PaymentDocument> {
+    cards
+        .iter()
+        .filter(|card| bank_id.is_none_or(|bank_id| card.bank_id == bank_id))
+        .collect()
+}
+
+fn update_bank_filter_selection(
+    bank_filter: &mut Option<i64>,
+    card_filter: &mut Option<i64>,
+    next_bank: Option<i64>,
+) -> bool {
+    if *bank_filter == next_bank {
+        return false;
+    }
+    *bank_filter = next_bank;
+    *card_filter = None;
+    true
+}
+
 struct Form {
     id: Option<i64>,
     date: Entity<DatePickerState>,
@@ -133,8 +154,10 @@ pub(crate) struct TransactionsPage {
     database: Rc<Database>,
     kind: TransactionKind,
     categories: Vec<Category>,
+    banks: Vec<Bank>,
     currencies: Vec<CurrencyDefinition>,
     cards: Vec<PaymentDocument>,
+    filter_cards: Vec<PaymentDocument>,
     comment_history: Vec<String>,
     transactions: Vec<FinancialTransaction>,
     balances: Option<[TransactionBalance; 2]>,
@@ -146,6 +169,12 @@ pub(crate) struct TransactionsPage {
     category_filter: Option<i64>,
     category_filter_ids: Vec<i64>,
     category_filter_select: Choice,
+    bank_filter: Option<i64>,
+    bank_filter_ids: Vec<i64>,
+    bank_filter_select: Choice,
+    card_filter: Option<i64>,
+    card_filter_ids: Vec<i64>,
+    card_filter_select: Choice,
     currency_filter: Option<Currency>,
     currency_filter_select: Choice,
     period_select: Choice,
@@ -165,6 +194,8 @@ impl TransactionsPage {
         let from = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
         let to = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
         let category_filter_select = choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
+        let bank_filter_select = choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
+        let card_filter_select = choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
         let currency_filter_select = choice(Self::currency_filter_labels(), 0, window, cx);
         let period_select = choice(Self::period_labels(), 0, window, cx);
 
@@ -203,6 +234,46 @@ impl TransactionsPage {
             },
         ));
         subscriptions.push(cx.subscribe_in(
+            &bank_filter_select,
+            window,
+            |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, window, cx| {
+                let SelectEvent::Confirm(value) = event;
+                let next_bank = value
+                    .as_ref()
+                    .and_then(|label| {
+                        this.bank_filter_labels()
+                            .iter()
+                            .position(|item| item == label.as_ref())
+                    })
+                    .and_then(|position| position.checked_sub(1))
+                    .and_then(|position| this.bank_filter_ids.get(position).copied());
+                update_bank_filter_selection(
+                    &mut this.bank_filter,
+                    &mut this.card_filter,
+                    next_bank,
+                );
+                this.sync_card_filter_options(window, cx);
+                this.refresh(cx);
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
+            &card_filter_select,
+            window,
+            |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                let SelectEvent::Confirm(value) = event;
+                this.card_filter = value
+                    .as_ref()
+                    .and_then(|label| {
+                        this.card_filter_labels()
+                            .iter()
+                            .position(|item| item == label.as_ref())
+                    })
+                    .and_then(|position| position.checked_sub(1))
+                    .and_then(|position| this.card_filter_ids.get(position).copied());
+                this.refresh(cx);
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
             &currency_filter_select,
             window,
             |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
@@ -235,8 +306,10 @@ impl TransactionsPage {
             database,
             kind,
             categories: Vec::new(),
+            banks: Vec::new(),
             currencies: Vec::new(),
             cards: Vec::new(),
+            filter_cards: Vec::new(),
             comment_history: Vec::new(),
             transactions: Vec::new(),
             balances: None,
@@ -248,6 +321,12 @@ impl TransactionsPage {
             category_filter: None,
             category_filter_ids: Vec::new(),
             category_filter_select,
+            bank_filter: None,
+            bank_filter_ids: Vec::new(),
+            bank_filter_select,
+            card_filter: None,
+            card_filter_ids: Vec::new(),
+            card_filter_select,
             currency_filter: None,
             currency_filter_select,
             period_select,
@@ -256,12 +335,16 @@ impl TransactionsPage {
             _subscriptions: subscriptions,
         };
         page.reload_categories(window, cx);
+        page.reload_filter_sources(window, cx);
         page.refresh(cx);
         page
     }
 
     /// Обновляет категории и список после изменений в справочниках.
     pub(crate) fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.reload_filter_sources(window, cx) {
+            return;
+        }
         self.reload_categories(window, cx);
         self.refresh(cx);
     }
@@ -283,6 +366,22 @@ impl TransactionsPage {
         let labels = category_tree_labels(&self.categories);
         std::iter::once(NONE_LABEL.to_owned())
             .chain(labels.into_iter().map(|(_, label)| label))
+            .collect()
+    }
+
+    fn bank_filter_labels(&self) -> Vec<String> {
+        std::iter::once(NONE_LABEL.to_owned())
+            .chain(self.banks.iter().map(|bank| bank.name.clone()))
+            .collect()
+    }
+
+    fn card_filter_labels(&self) -> Vec<String> {
+        std::iter::once(NONE_LABEL.to_owned())
+            .chain(
+                cards_for_bank(&self.filter_cards, self.bank_filter)
+                    .into_iter()
+                    .map(card_label),
+            )
             .collect()
     }
 
@@ -310,6 +409,96 @@ impl TransactionsPage {
         });
     }
 
+    fn reload_filter_sources(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let banks = match finance_db::list_banks(&self.database) {
+            Ok(banks) => banks,
+            Err(error) => {
+                self.error(error.to_string(), cx);
+                return false;
+            }
+        };
+        let cards = match finance_db::list_payment_documents(&self.database, None, None, None) {
+            Ok(cards) => cards,
+            Err(error) => {
+                self.error(error.to_string(), cx);
+                return false;
+            }
+        };
+        self.banks = banks;
+        self.filter_cards = cards;
+        if self
+            .bank_filter
+            .is_some_and(|bank_id| !self.banks.iter().any(|bank| bank.id == bank_id))
+        {
+            self.bank_filter = None;
+            self.card_filter = None;
+        }
+        if self.card_filter.is_some_and(|card_id| {
+            !cards_for_bank(&self.filter_cards, self.bank_filter)
+                .iter()
+                .any(|card| card.id == card_id)
+        }) {
+            self.card_filter = None;
+        }
+
+        self.bank_filter_ids = self.banks.iter().map(|bank| bank.id).collect();
+        let bank_items: Vec<SharedString> = self
+            .bank_filter_labels()
+            .into_iter()
+            .map(SharedString::from)
+            .collect();
+        let selected_bank_index = self
+            .bank_filter
+            .and_then(|bank_id| {
+                self.bank_filter_ids
+                    .iter()
+                    .position(|candidate| *candidate == bank_id)
+            })
+            .map_or(0, |position| position + 1);
+        self.bank_filter_select.update(cx, |state, cx| {
+            state.set_items(bank_items, window, cx);
+            state.set_selected_index(
+                Some(IndexPath::default().row(selected_bank_index)),
+                window,
+                cx,
+            );
+        });
+        self.sync_card_filter_options(window, cx);
+        true
+    }
+
+    fn sync_card_filter_options(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let available_cards = cards_for_bank(&self.filter_cards, self.bank_filter);
+        self.card_filter_ids = available_cards.iter().map(|card| card.id).collect();
+        let selected_card_index = match self.card_filter {
+            Some(card_id) => self
+                .card_filter_ids
+                .iter()
+                .position(|candidate| *candidate == card_id)
+                .map_or_else(
+                    || {
+                        self.card_filter = None;
+                        0
+                    },
+                    |position| position + 1,
+                ),
+            None => 0,
+        };
+        let items: Vec<SharedString> = self
+            .card_filter_labels()
+            .into_iter()
+            .map(SharedString::from)
+            .collect();
+        self.card_filter_select.update(cx, |state, cx| {
+            state.set_items(items, window, cx);
+            state.set_selected_index(
+                Some(IndexPath::default().row(selected_card_index)),
+                window,
+                cx,
+            );
+        });
+    }
+
     /// Загружает операции и сальдо по текущим фильтрам; ошибки показываются, а не маскируются.
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         let from = selected_date(self.from.read(cx));
@@ -329,7 +518,7 @@ impl TransactionsPage {
                 return;
             }
         }
-        match finance_db::list_transactions(
+        match finance_db::list_transactions_filtered(
             &self.database,
             self.kind,
             from,
@@ -337,6 +526,8 @@ impl TransactionsPage {
             self.category_filter,
             self.currency_filter,
             &search,
+            self.bank_filter,
+            self.card_filter,
         ) {
             Ok(transactions) => self.transactions = transactions,
             Err(error) => {
@@ -377,6 +568,8 @@ impl TransactionsPage {
             || selected_date(self.from.read(cx)).is_some()
             || selected_date(self.to.read(cx)).is_some()
             || self.category_filter.is_some()
+            || self.bank_filter.is_some()
+            || self.card_filter.is_some()
             || self.currency_filter.is_some()
     }
 
@@ -389,9 +582,14 @@ impl TransactionsPage {
             });
         }
         self.category_filter = None;
+        self.bank_filter = None;
+        self.card_filter = None;
         self.currency_filter = None;
+        self.sync_card_filter_options(window, cx);
         for select in [
             &self.category_filter_select,
+            &self.bank_filter_select,
+            &self.card_filter_select,
             &self.currency_filter_select,
             &self.period_select,
         ] {
@@ -903,6 +1101,22 @@ impl TransactionsPage {
                         260.0,
                         Select::new(&self.category_filter_select)
                             .placeholder("Категория")
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Банк",
+                        180.0,
+                        Select::new(&self.bank_filter_select)
+                            .placeholder("Банк")
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Платёжная карта",
+                        260.0,
+                        Select::new(&self.card_filter_select)
+                            .placeholder("Платёжная карта")
                             .small()
                             .into_any_element(),
                     ))
@@ -1479,7 +1693,7 @@ impl Render for TransactionsPage {
                             .large()
                             .label("Обновить")
                             .icon(IconName::Replace)
-                            .on_click(cx.listener(|page, _, _, cx| page.refresh(cx))),
+                            .on_click(cx.listener(|page, _, window, cx| page.reload(window, cx))),
                     ),
             );
         root = root.child(header);
@@ -1499,7 +1713,9 @@ impl Render for TransactionsPage {
 
 #[cfg(test)]
 mod tests {
-    use super::{card_label, comment_preview, FormValues};
+    use super::{
+        card_label, cards_for_bank, comment_preview, update_bank_filter_selection, FormValues,
+    };
     use chrono::NaiveDate;
     use finance_core::{Currency, PaymentCardType, PaymentDocument, PaymentSystem};
     use rust_decimal::Decimal;
@@ -1561,6 +1777,48 @@ mod tests {
             card_label(&card),
             "Альфа-Банк — MIR #9 (дебетовая, валюта не указана)"
         );
+    }
+
+    #[test]
+    fn card_filter_options_include_all_cards_without_a_bank_filter() {
+        let first = payment_document(10, None, PaymentCardType::Debit, Some(Currency::Rub));
+        let mut second = payment_document(11, None, PaymentCardType::Credit, None);
+        second.bank_id = 2;
+
+        let cards = [first, second];
+        let available = cards_for_bank(&cards, None);
+
+        assert_eq!(
+            available.iter().map(|card| card.id).collect::<Vec<_>>(),
+            [10, 11]
+        );
+    }
+
+    #[test]
+    fn card_filter_options_only_include_cards_from_the_selected_bank() {
+        let first = payment_document(10, None, PaymentCardType::Debit, Some(Currency::Rub));
+        let mut second = payment_document(11, None, PaymentCardType::Credit, None);
+        second.bank_id = 2;
+
+        let cards = [first, second];
+        let available = cards_for_bank(&cards, Some(2));
+
+        assert_eq!(
+            available.iter().map(|card| card.id).collect::<Vec<_>>(),
+            [11]
+        );
+    }
+
+    #[test]
+    fn changing_bank_filter_clears_the_selected_card() {
+        let mut bank_filter = Some(1);
+        let mut card_filter = Some(10);
+
+        let changed = update_bank_filter_selection(&mut bank_filter, &mut card_filter, Some(2));
+
+        assert!(changed);
+        assert_eq!(bank_filter, Some(2));
+        assert_eq!(card_filter, None);
     }
 
     #[test]
