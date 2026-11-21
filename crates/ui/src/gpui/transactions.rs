@@ -19,6 +19,9 @@ use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerSt
 use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::table::{
+    Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
+};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _, WindowExt as _,
 };
@@ -31,7 +34,6 @@ use super::support::{comment_suggestions, DIVISION_ROUNDING_WARNING};
 use super::support::{date_period_range, DatePeriod, DatePeriodRange};
 
 const DATE_FORMAT: &str = "%Y-%m-%d";
-const ROW_HEIGHT: f32 = 40.0;
 const NONE_LABEL: &str = "Все";
 
 type Choice = Entity<SelectState<Vec<SharedString>>>;
@@ -160,6 +162,7 @@ pub(crate) struct TransactionsPage {
     filter_cards: Vec<PaymentDocument>,
     comment_history: Vec<String>,
     transactions: Vec<FinancialTransaction>,
+    table: Entity<TableState<TransactionsTable>>,
     balances: Option<[TransactionBalance; 2]>,
     balance_period: Option<(Option<NaiveDate>, Option<NaiveDate>)>,
     message: Option<(String, bool)>,
@@ -302,6 +305,17 @@ impl TransactionsPage {
             },
         ));
 
+        let widths = load_column_widths(&database, kind);
+        let table_delegate = TransactionsTable::new(cx.entity().downgrade(), widths);
+        let table = cx.new(|cx| TableState::new(table_delegate, window, cx).col_movable(false));
+        subscriptions.push(
+            cx.subscribe(&table, |this: &mut Self, _, event: &TableEvent, cx| {
+                if let TableEvent::ColumnWidthsChanged(widths) = event {
+                    this.save_column_widths(widths, cx);
+                }
+            }),
+        );
+
         let mut page = Self {
             database,
             kind,
@@ -312,6 +326,7 @@ impl TransactionsPage {
             filter_cards: Vec::new(),
             comment_history: Vec::new(),
             transactions: Vec::new(),
+            table,
             balances: None,
             balance_period: None,
             message: None,
@@ -383,6 +398,19 @@ impl TransactionsPage {
                     .map(card_label),
             )
             .collect()
+    }
+
+    fn save_column_widths(&mut self, widths: &[Pixels], cx: &mut Context<Self>) {
+        let widths: Vec<f32> = widths.iter().map(|width| f32::from(*width)).collect();
+        self.table
+            .update(cx, |table, _| table.delegate_mut().set_widths(&widths));
+        if let Err(error) = finance_db::set_app_setting(
+            &self.database,
+            column_widths_key(self.kind),
+            &format_column_widths(&widths),
+        ) {
+            self.error(format!("Не удалось сохранить ширину колонок: {error}"), cx);
+        }
     }
 
     fn error(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
@@ -529,7 +557,13 @@ impl TransactionsPage {
             self.bank_filter,
             self.card_filter,
         ) {
-            Ok(transactions) => self.transactions = transactions,
+            Ok(transactions) => {
+                self.table.update(cx, |table, cx| {
+                    table.delegate_mut().set_rows(transactions.clone());
+                    cx.notify();
+                });
+                self.transactions = transactions;
+            }
             Err(error) => {
                 self.error(error.to_string(), cx);
                 return;
@@ -1355,126 +1389,12 @@ impl TransactionsPage {
         panel.into_any_element()
     }
 
-    fn render_table(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let border = cx.theme().border;
-        let stripe = cx.theme().muted;
-        let count = self.transactions.len();
-        let headers = [
-            "Дата",
-            "Категория",
-            "Сумма",
-            "Валюта",
-            "Комментарии",
-            "Действия",
-        ];
-        let header = div()
-            .flex()
-            .w_full()
-            .h(px(ROW_HEIGHT))
-            .items_center()
-            .border_1()
-            .border_color(border)
-            .font_weight(FontWeight::BOLD)
-            .children(
-                headers
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, title)| table_cell(index, title.into(), border)),
-            );
-        let body = if count == 0 {
-            div()
-                .w_full()
-                .p_4()
-                .child("Операций по выбранным условиям нет.")
-                .into_any_element()
-        } else {
-            uniform_list(
-                "transactions-rows",
-                count,
-                cx.processor(move |page, range: std::ops::Range<usize>, _, cx| {
-                    range
-                        .map(|index| page.render_row(index, stripe, cx))
-                        .collect::<Vec<_>>()
-                }),
-            )
-            .flex_1()
-            .w_full()
-            .into_any_element()
-        };
+    fn render_table(&mut self) -> impl IntoElement {
         div()
             .flex_1()
             .min_h_0()
-            .flex()
-            .flex_col()
             .w_full()
-            .child(header)
-            .child(body)
-    }
-
-    fn render_row(
-        &mut self,
-        index: usize,
-        stripe: Hsla,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let transaction = self.transactions[index].clone();
-        let border = cx.theme().border;
-        let id = transaction.id;
-        let values = vec![
-            transaction.date.format("%d.%m.%Y").to_string(),
-            transaction.category_name.clone(),
-            transaction.amount.to_string(),
-            transaction.currency.code().to_owned(),
-            transaction.comment.clone(),
-        ];
-        let edit_target = transaction.clone();
-        let delete_target = transaction;
-        div()
-            .id(("transaction-row", id as usize))
-            .flex()
-            .w_full()
-            .h(px(ROW_HEIGHT))
-            .items_center()
-            .border_l_1()
-            .border_r_1()
-            .border_b_1()
-            .border_color(border)
-            .when(index % 2 == 1, |row| row.bg(stripe))
-            .children(values.into_iter().enumerate().map(|(column, value)| {
-                if column == 4 && !value.is_empty() {
-                    comment_cell(id, value, cx).into_any_element()
-                } else {
-                    table_cell(column, value, border).into_any_element()
-                }
-            }))
-            .child(
-                div()
-                    .w(px(ACTIONS_COLUMN_WIDTH))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .border_l_1()
-                    .border_color(border)
-                    .gap_1()
-                    .justify_end()
-                    .child(
-                        Button::new(("edit", id as usize))
-                            .xsmall()
-                            .label("Изменить")
-                            .on_click(cx.listener(move |page, _, window, cx| {
-                                page.open_form(Some(&edit_target), window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new(("delete", id as usize))
-                            .danger()
-                            .xsmall()
-                            .label("Удалить")
-                            .on_click(cx.listener(move |page, _, window, cx| {
-                                page.confirm_delete(&delete_target, window, cx)
-                            })),
-                    ),
-            )
+            .child(DataTable::new(&self.table).stripe(true).bordered(true))
     }
 
     fn render_footer(&self, cx: &App) -> impl IntoElement {
@@ -1548,82 +1468,275 @@ impl TransactionsPage {
     }
 }
 
-const FIXED_COLUMN_WIDTHS: [f32; 4] = [115.0, 220.0, 135.0, 90.0];
-const ACTIONS_COLUMN_WIDTH: f32 = 180.0;
+const COLUMN_TITLES: [&str; 6] = [
+    "Дата",
+    "Категория",
+    "Сумма",
+    "Валюта",
+    "Комментарии",
+    "Действия",
+];
+const DEFAULT_COLUMN_WIDTHS: [f32; 6] = [115.0, 220.0, 135.0, 90.0, 320.0, 180.0];
+const MIN_COLUMN_WIDTH: f32 = 60.0;
+const MAX_COLUMN_WIDTH: f32 = 1200.0;
+const COL_DATE: usize = 0;
+const COL_CATEGORY: usize = 1;
+const COL_AMOUNT: usize = 2;
+const COL_COMMENT: usize = 4;
+const COL_ACTIONS: usize = 5;
 
-fn cell(width: f32, text: String, border: Hsla, separator: bool) -> Div {
-    div()
-        .w(px(width))
-        .h_full()
-        .flex()
-        .items_center()
-        .when(separator, |cell| cell.border_l_1().border_color(border))
-        .px_2()
-        .overflow_hidden()
-        .child(text)
-}
-
-fn table_cell(index: usize, text: String, border: Hsla) -> Div {
-    match index {
-        0..=3 => cell(FIXED_COLUMN_WIDTHS[index], text, border, index > 0),
-        4 => div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .flex()
-            .items_center()
-            .border_l_1()
-            .border_color(border)
-            .px_2()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .child(text),
-        _ => div()
-            .w(px(ACTIONS_COLUMN_WIDTH))
-            .h_full()
-            .px_2()
-            .flex()
-            .items_center()
-            .border_l_1()
-            .border_color(border)
-            .justify_end()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .child(text),
+fn column_widths_key(kind: TransactionKind) -> &'static str {
+    match kind {
+        TransactionKind::Income => "table_columns.income",
+        TransactionKind::Expense => "table_columns.expense",
     }
 }
 
-fn comment_cell(id: i64, text: String, cx: &mut Context<TransactionsPage>) -> AnyElement {
-    let preview = comment_preview(&text);
-    div()
-        .id(("income-comment", id as usize))
-        .flex_1()
-        .min_w_0()
-        .h_full()
-        .flex()
-        .items_center()
-        .border_l_1()
-        .border_color(cx.theme().border)
-        .px_2()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .child(preview)
-        .cursor_pointer()
-        .on_click(cx.listener(move |_, _, window, cx| {
-            let comment = text.clone();
-            window.open_dialog(cx, move |dialog: Dialog, _, _| {
-                dialog.title("Комментарий").centered().child(
-                    div()
-                        .id("income-comment-dialog-body")
-                        .max_h(px(420.0))
-                        .overflow_y_scroll()
-                        .overflow_x_scroll()
-                        .child(comment.clone()),
-                )
-            });
+fn format_column_widths(widths: &[f32]) -> String {
+    widths
+        .iter()
+        .map(|width| width.round().to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Разбирает сохранённые ширины; повреждённое значение отклоняется целиком.
+fn parse_column_widths(value: &str) -> Option<Vec<f32>> {
+    let widths = value
+        .split(',')
+        .map(|part| part.trim().parse::<f32>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    (widths.len() == COLUMN_TITLES.len()
+        && widths.iter().all(|width| {
+            width.is_finite() && (MIN_COLUMN_WIDTH..=MAX_COLUMN_WIDTH).contains(width)
         }))
-        .into_any_element()
+    .then_some(widths)
+}
+
+/// Ширины из БД или значения по умолчанию; ошибка чтения или формата логируется и не прерывает запуск.
+fn load_column_widths(database: &Database, kind: TransactionKind) -> Vec<f32> {
+    match finance_db::get_app_setting(database, column_widths_key(kind)) {
+        Ok(Some(value)) => parse_column_widths(&value).unwrap_or_else(|| {
+            eprintln!(
+                "Некорректная сохранённая ширина колонок; использованы значения по умолчанию"
+            );
+            DEFAULT_COLUMN_WIDTHS.to_vec()
+        }),
+        Ok(None) => DEFAULT_COLUMN_WIDTHS.to_vec(),
+        Err(error) => {
+            eprintln!("Не удалось прочитать ширину колонок: {error}");
+            DEFAULT_COLUMN_WIDTHS.to_vec()
+        }
+    }
+}
+
+fn default_order(a: &FinancialTransaction, b: &FinancialTransaction) -> std::cmp::Ordering {
+    b.date.cmp(&a.date).then(b.id.cmp(&a.id))
+}
+
+/// Сортирует полный набор строк; суммы сравниваются как `Decimal`, а не как текст.
+fn sort_transactions(rows: &mut [FinancialTransaction], sort: Option<(usize, ColumnSort)>) {
+    let Some((column, direction)) = sort else {
+        rows.sort_by(default_order);
+        return;
+    };
+    rows.sort_by(|a, b| {
+        let ordering = match column {
+            COL_DATE => a.date.cmp(&b.date),
+            COL_CATEGORY => a
+                .category_name
+                .to_lowercase()
+                .cmp(&b.category_name.to_lowercase()),
+            COL_AMOUNT => a
+                .amount
+                .cmp(&b.amount)
+                .then_with(|| a.currency.code().cmp(b.currency.code())),
+            _ => std::cmp::Ordering::Equal,
+        };
+        let ordering = if direction == ColumnSort::Descending {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+        ordering.then_with(|| default_order(a, b))
+    });
+}
+
+/// Делегат `DataTable` для доходов и расходов: хранит строки, ширины и сортировку.
+pub(crate) struct TransactionsTable {
+    page: WeakEntity<TransactionsPage>,
+    rows: Vec<FinancialTransaction>,
+    widths: Vec<f32>,
+    sort: Option<(usize, ColumnSort)>,
+}
+
+impl TransactionsTable {
+    fn new(page: WeakEntity<TransactionsPage>, widths: Vec<f32>) -> Self {
+        Self {
+            page,
+            rows: Vec::new(),
+            widths,
+            sort: None,
+        }
+    }
+
+    fn set_rows(&mut self, rows: Vec<FinancialTransaction>) {
+        self.rows = rows;
+        sort_transactions(&mut self.rows, self.sort);
+    }
+
+    fn set_widths(&mut self, widths: &[f32]) {
+        if widths.len() == self.widths.len() {
+            self.widths = widths.to_vec();
+        }
+    }
+}
+
+impl TableDelegate for TransactionsTable {
+    fn columns_count(&self, _: &App) -> usize {
+        COLUMN_TITLES.len()
+    }
+
+    fn rows_count(&self, _: &App) -> usize {
+        self.rows.len()
+    }
+
+    fn column(&self, col_ix: usize, _: &App) -> Column {
+        let column = Column::new(COLUMN_TITLES[col_ix], COLUMN_TITLES[col_ix])
+            .width(px(self.widths[col_ix]))
+            .min_width(px(MIN_COLUMN_WIDTH))
+            .max_width(px(MAX_COLUMN_WIDTH))
+            .resizable(true)
+            .movable(false);
+        let column = match col_ix {
+            COL_DATE | COL_CATEGORY | COL_AMOUNT => {
+                let direction = match self.sort {
+                    Some((sorted, direction)) if sorted == col_ix => direction,
+                    _ => ColumnSort::Default,
+                };
+                column.sort(direction)
+            }
+            _ => column,
+        };
+        if col_ix == COL_AMOUNT {
+            column.text_right()
+        } else {
+            column
+        }
+    }
+
+    fn perform_sort(
+        &mut self,
+        col_ix: usize,
+        sort: ColumnSort,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) {
+        self.sort = (sort != ColumnSort::Default).then_some((col_ix, sort));
+        sort_transactions(&mut self.rows, self.sort);
+    }
+
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child("Операций по выбранным условиям нет.")
+    }
+
+    fn render_td(
+        &mut self,
+        row_ix: usize,
+        col_ix: usize,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let transaction = &self.rows[row_ix];
+        let id = transaction.id;
+        match col_ix {
+            COL_DATE => div()
+                .child(transaction.date.format("%d.%m.%Y").to_string())
+                .into_any_element(),
+            COL_CATEGORY => div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(transaction.category_name.clone())
+                .into_any_element(),
+            COL_AMOUNT => div()
+                .w_full()
+                .text_right()
+                .child(transaction.amount.to_string())
+                .into_any_element(),
+            3 => div()
+                .child(transaction.currency.code().to_owned())
+                .into_any_element(),
+            COL_COMMENT => {
+                let comment = transaction.comment.clone();
+                if comment.is_empty() {
+                    return div().into_any_element();
+                }
+                div()
+                    .id(("transaction-comment", id as usize))
+                    .w_full()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .child(comment_preview(&comment))
+                    .on_click(move |_, window, cx| {
+                        let comment = comment.clone();
+                        window.open_dialog(cx, move |dialog: Dialog, _, _| {
+                            dialog.title("Комментарий").centered().child(
+                                div()
+                                    .id("transaction-comment-dialog-body")
+                                    .max_h(px(420.0))
+                                    .overflow_y_scroll()
+                                    .overflow_x_scroll()
+                                    .child(comment.clone()),
+                            )
+                        });
+                    })
+                    .into_any_element()
+            }
+            COL_ACTIONS => {
+                let edit_page = self.page.clone();
+                let delete_page = self.page.clone();
+                let edit_target = transaction.clone();
+                let delete_target = transaction.clone();
+                div()
+                    .flex()
+                    .gap_1()
+                    .child(
+                        Button::new(("edit", id as usize))
+                            .xsmall()
+                            .label("Изменить")
+                            .on_click(move |_, window, cx| {
+                                let _ = edit_page.update(cx, |page, cx| {
+                                    page.open_form(Some(&edit_target), window, cx)
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new(("delete", id as usize))
+                            .danger()
+                            .xsmall()
+                            .label("Удалить")
+                            .on_click(move |_, window, cx| {
+                                let _ = delete_page.update(cx, |page, cx| {
+                                    page.confirm_delete(&delete_target, window, cx)
+                                });
+                            }),
+                    )
+                    .into_any_element()
+            }
+            _ => div().into_any_element(),
+        }
+    }
 }
 
 fn comment_preview(text: &str) -> String {
@@ -1706,7 +1819,7 @@ impl Render for TransactionsPage {
         if !has_active_category {
             root = root.child("Сначала добавьте категорию в разделе «Справочники».");
         }
-        root.child(self.render_table(cx))
+        root.child(self.render_table())
             .child(self.render_footer(cx))
     }
 }
@@ -1714,10 +1827,13 @@ impl Render for TransactionsPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        card_label, cards_for_bank, comment_preview, update_bank_filter_selection, FormValues,
+        card_label, cards_for_bank, comment_preview, format_column_widths, parse_column_widths,
+        sort_transactions, update_bank_filter_selection, FormValues,
     };
     use chrono::NaiveDate;
+    use finance_core::FinancialTransaction;
     use finance_core::{Currency, PaymentCardType, PaymentDocument, PaymentSystem};
+    use gpui_kit::component::table::ColumnSort;
     use rust_decimal::Decimal;
 
     fn payment_document(
@@ -1934,5 +2050,63 @@ mod tests {
             comment_preview("Первая строка\r\nВторая строка"),
             "Первая строка…"
         );
+    }
+
+    fn transaction(id: i64, day: u32, category: &str, amount: &str) -> FinancialTransaction {
+        FinancialTransaction {
+            id,
+            date: NaiveDate::from_ymd_opt(2024, 2, day).unwrap(),
+            category_id: 1,
+            category_name: category.to_owned(),
+            amount: amount.parse().unwrap(),
+            currency: Currency::Rub,
+            comment: String::new(),
+            payment_document_id: None,
+            affects_deposit_rate: false,
+            payment_document_balance_applied: false,
+        }
+    }
+
+    fn ids(rows: &[FinancialTransaction]) -> Vec<i64> {
+        rows.iter().map(|row| row.id).collect()
+    }
+
+    #[test]
+    fn amount_sort_is_numeric_not_lexicographic() {
+        let mut rows = vec![
+            transaction(1, 1, "А", "9.5"),
+            transaction(2, 2, "Б", "100"),
+            transaction(3, 3, "В", "20"),
+        ];
+        sort_transactions(&mut rows, Some((2, ColumnSort::Ascending)));
+        assert_eq!(ids(&rows), [1, 3, 2]);
+        sort_transactions(&mut rows, Some((2, ColumnSort::Descending)));
+        assert_eq!(ids(&rows), [2, 3, 1]);
+    }
+
+    #[test]
+    fn date_and_category_sorts_and_default_order() {
+        let mut rows = vec![
+            transaction(1, 5, "б", "1"),
+            transaction(2, 1, "А", "1"),
+            transaction(3, 9, "В", "1"),
+        ];
+        sort_transactions(&mut rows, Some((0, ColumnSort::Ascending)));
+        assert_eq!(ids(&rows), [2, 1, 3]);
+        sort_transactions(&mut rows, Some((1, ColumnSort::Ascending)));
+        assert_eq!(ids(&rows), [2, 1, 3]);
+        sort_transactions(&mut rows, None);
+        assert_eq!(ids(&rows), [3, 1, 2]);
+    }
+
+    #[test]
+    fn column_widths_round_trip_and_reject_corrupt_values() {
+        let widths = [100.0, 200.0, 130.0, 90.0, 300.0, 180.0];
+        let text = format_column_widths(&widths);
+        assert_eq!(parse_column_widths(&text).as_deref(), Some(&widths[..]));
+        assert_eq!(parse_column_widths("1,2,3"), None);
+        assert_eq!(parse_column_widths("100,200,x,90,300,180"), None);
+        assert_eq!(parse_column_widths("100,200,130,90,300,5000"), None);
+        assert_eq!(parse_column_widths("100,200,130,90,300,NaN"), None);
     }
 }

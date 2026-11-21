@@ -2,6 +2,7 @@
 //! `savings_page.rs`; SQL и финансовые правила остаются в `finance-db` и
 //! `finance-core`.
 
+use std::cmp::Ordering;
 use std::rc::Rc;
 
 use chrono::NaiveDate;
@@ -17,16 +18,16 @@ use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerSt
 use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::table::{
+    Column, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
+};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _, WindowExt as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-const SAVINGS_PAGE_SIZE: usize = 100;
 const DATE_FORMAT: &str = "%Y-%m-%d";
-const ROW_HEIGHT: f32 = 40.0;
-const HEADER_HEIGHT: f32 = 48.0;
 const ALL_LABEL: &str = "Все";
 const ALL_BANKS_LABEL: &str = "Все банки";
 const NO_CURRENCY_LABEL: &str = "Не указана";
@@ -37,7 +38,7 @@ const COLUMN_HEADINGS: [&str; 13] = [
     "Сумма",
     "Валюта",
     "Базовая ставка",
-    "Ставка при условии",
+    "Ставка при выполнении условий",
     "Порог",
     "Срок",
     "Дата открытия",
@@ -46,9 +47,21 @@ const COLUMN_HEADINGS: [&str; 13] = [
     "Статус",
     "Действия",
 ];
-const COLUMN_WIDTHS: [f32; 13] = [
-    85.0, 90.0, 90.0, 70.0, 80.0, 90.0, 90.0, 115.0, 95.0, 105.0, 120.0, 85.0, 145.0,
+const DEFAULT_COLUMN_WIDTHS: [f32; 13] = [
+    85.0, 120.0, 90.0, 70.0, 80.0, 170.0, 90.0, 115.0, 95.0, 105.0, 120.0, 85.0, 145.0,
 ];
+const MIN_COLUMN_WIDTH: f32 = 60.0;
+const MAX_COLUMN_WIDTH: f32 = 1200.0;
+const SAVINGS_COLUMN_WIDTHS_KEY: &str = "table_columns.savings";
+const COL_BANK: usize = 0;
+const COL_TITLE: usize = 1;
+const COL_AMOUNT: usize = 2;
+const COL_BASE_RATE: usize = 4;
+const COL_RATE_AFTER_THRESHOLD: usize = 5;
+const COL_THRESHOLD: usize = 6;
+const COL_TERM: usize = 7;
+const COL_OPENED_DATE: usize = 8;
+const COL_ACTIONS: usize = 12;
 const FOOTER_NOTE: &str = "Даты открытия и начисления процентов сохраняются как справочные значения; процентный доход здесь не рассчитывается без истории остатка и правил начисления банка. Повышенная ставка показана как условие, а не как подтверждённая доходность.";
 const FOOTER_WARNING: &str =
     "Валюта накопления указывается отдельно; фактические начисления процентов здесь не рассчитываются.";
@@ -249,7 +262,7 @@ pub(crate) struct SavingsPage {
     database: Rc<Database>,
     banks: Vec<Bank>,
     entries: Vec<SavingsAccount>,
-    current_page: usize,
+    table: Entity<TableState<SavingsTable>>,
     message: Option<(String, bool)>,
     search: Entity<InputState>,
     bank_filter: Option<i64>,
@@ -320,11 +333,22 @@ impl SavingsPage {
         ];
         subscriptions.shrink_to_fit();
 
+        let widths = load_column_widths(&database);
+        let table_delegate = SavingsTable::new(cx.entity().downgrade(), widths);
+        let table = cx.new(|cx| TableState::new(table_delegate, window, cx).col_movable(false));
+        subscriptions.push(
+            cx.subscribe(&table, |this: &mut Self, _, event: &TableEvent, cx| {
+                if let TableEvent::ColumnWidthsChanged(widths) = event {
+                    this.save_column_widths(widths, cx);
+                }
+            }),
+        );
+
         let mut page = Self {
             database,
             banks: Vec::new(),
             entries: Vec::new(),
-            current_page: 0,
+            table,
             message: None,
             search,
             bank_filter: None,
@@ -351,6 +375,19 @@ impl SavingsPage {
     fn error(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
         self.message = Some((message.into(), true));
         cx.notify();
+    }
+
+    fn save_column_widths(&mut self, widths: &[Pixels], cx: &mut Context<Self>) {
+        let widths: Vec<f32> = widths.iter().map(|width| f32::from(*width)).collect();
+        self.table
+            .update(cx, |table, _| table.delegate_mut().set_widths(&widths));
+        if let Err(error) = finance_db::set_app_setting(
+            &self.database,
+            SAVINGS_COLUMN_WIDTHS_KEY,
+            &format_column_widths(&widths),
+        ) {
+            self.error(format!("Не удалось сохранить ширину колонок: {error}"), cx);
+        }
     }
 
     fn reload_banks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -414,8 +451,11 @@ impl SavingsPage {
             &search,
         ) {
             Ok(entries) => {
+                self.table.update(cx, |table, cx| {
+                    table.delegate_mut().set_rows(entries.clone());
+                    cx.notify();
+                });
                 self.entries = entries;
-                self.current_page = 0;
                 cx.notify();
                 true
             }
@@ -1051,204 +1091,288 @@ impl SavingsPage {
             .into_any_element()
     }
 
-    fn page_count(&self) -> usize {
-        self.entries.len().div_ceil(SAVINGS_PAGE_SIZE)
-    }
-
-    fn render_table(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let border = cx.theme().border;
-        let stripe = cx.theme().muted;
-        if self.entries.is_empty() {
-            return div()
-                .flex_1()
-                .p_4()
-                .child("Накоплений по выбранным условиям нет.")
-                .into_any_element();
-        }
-        let page_count = self.page_count();
-        self.current_page = self.current_page.min(page_count.saturating_sub(1));
-        let current = self.current_page;
-        let first = current * SAVINGS_PAGE_SIZE;
-        let rows_on_page = (self.entries.len() - first).min(SAVINGS_PAGE_SIZE);
-        let total = self.entries.len();
-
-        let pager = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(
-                Button::new("page-prev")
-                    .label("← Назад")
-                    .disabled(current == 0)
-                    .on_click(cx.listener(|page, _, _, cx| {
-                        page.current_page = page.current_page.saturating_sub(1);
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("page-next")
-                    .label("Далее →")
-                    .disabled(current + 1 >= page_count)
-                    .on_click(cx.listener(|page, _, _, cx| {
-                        page.current_page += 1;
-                        cx.notify();
-                    })),
-            )
-            .child(format!(
-                "Страница {} из {} · всего записей: {}",
-                current + 1,
-                page_count,
-                total
-            ));
-        let header = div()
-            .flex()
-            .w_full()
-            .h(px(HEADER_HEIGHT))
-            .items_center()
-            .border_1()
-            .border_color(border)
-            .font_weight(FontWeight::BOLD)
-            .children(
-                COLUMN_HEADINGS
-                    .into_iter()
-                    .zip(COLUMN_WIDTHS)
-                    .enumerate()
-                    .map(|(index, (title, width))| cell(index, width, title.into(), border)),
-            );
-        let body = uniform_list(
-            "savings-rows",
-            rows_on_page,
-            cx.processor(move |page, range: std::ops::Range<usize>, _, cx| {
-                range
-                    .map(|index| page.render_row(first + index, index, stripe, cx))
-                    .collect::<Vec<_>>()
-            }),
-        )
-        .flex_1();
+    fn render_table(&mut self, _: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex_1()
             .min_h_0()
+            .w_full()
             .flex()
             .flex_col()
             .gap_1()
-            .child(pager)
+            .child(format!("Всего записей: {}", self.entries.len()))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .child(header)
-                    .child(body),
+                    .child(DataTable::new(&self.table).stripe(true).bordered(true)),
             )
-            .into_any_element()
+    }
+}
+
+fn column_widths_key() -> &'static str {
+    SAVINGS_COLUMN_WIDTHS_KEY
+}
+
+fn format_column_widths(widths: &[f32]) -> String {
+    widths
+        .iter()
+        .map(|width| width.round().to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn parse_column_widths(value: &str) -> Option<Vec<f32>> {
+    let widths = value
+        .split(',')
+        .map(|part| part.trim().parse::<f32>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    (widths.len() == COLUMN_HEADINGS.len()
+        && widths.iter().all(|width| {
+            width.is_finite() && (MIN_COLUMN_WIDTH..=MAX_COLUMN_WIDTH).contains(width)
+        }))
+    .then_some(widths)
+}
+
+fn load_column_widths(database: &Database) -> Vec<f32> {
+    match finance_db::get_app_setting(database, column_widths_key()) {
+        Ok(Some(value)) => parse_column_widths(&value).unwrap_or_else(|| {
+            eprintln!("Некорректная сохранённая ширина колонок накоплений; использованы значения по умолчанию");
+            DEFAULT_COLUMN_WIDTHS.to_vec()
+        }),
+        Ok(None) => DEFAULT_COLUMN_WIDTHS.to_vec(),
+        Err(error) => {
+            eprintln!("Не удалось прочитать ширину колонок накоплений: {error}");
+            DEFAULT_COLUMN_WIDTHS.to_vec()
+        }
+    }
+}
+
+fn default_order(a: &SavingsAccount, b: &SavingsAccount) -> Ordering {
+    a.bank_name
+        .to_lowercase()
+        .cmp(&b.bank_name.to_lowercase())
+        .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+        .then(a.id.cmp(&b.id))
+}
+
+fn compare_terms(a: &SavingsAccount, b: &SavingsAccount) -> Ordering {
+    let term_order = |account: &SavingsAccount| match account.term_type {
+        SavingsTerm::Limited => 0,
+        SavingsTerm::Unlimited => 1,
+    };
+    term_order(a)
+        .cmp(&term_order(b))
+        .then(a.term_end_date.cmp(&b.term_end_date))
+}
+
+fn sort_savings(rows: &mut [SavingsAccount], sort: Option<(usize, ColumnSort)>) {
+    let Some((column, direction)) = sort else {
+        rows.sort_by(default_order);
+        return;
+    };
+    rows.sort_by(|a, b| {
+        let ordering = match column {
+            COL_BANK => a.bank_name.to_lowercase().cmp(&b.bank_name.to_lowercase()),
+            COL_TITLE => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+            COL_AMOUNT => a.amount.cmp(&b.amount),
+            COL_BASE_RATE => a.base_rate.cmp(&b.base_rate),
+            COL_RATE_AFTER_THRESHOLD => a.rate_after_threshold.cmp(&b.rate_after_threshold),
+            COL_THRESHOLD => a.threshold_amount.cmp(&b.threshold_amount),
+            COL_OPENED_DATE => a.opened_date.cmp(&b.opened_date),
+            COL_TERM => compare_terms(a, b),
+            _ => Ordering::Equal,
+        };
+        let ordering = if direction == ColumnSort::Descending {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+        ordering.then_with(|| default_order(a, b))
+    });
+}
+
+struct SavingsTable {
+    page: WeakEntity<SavingsPage>,
+    rows: Vec<SavingsAccount>,
+    widths: Vec<f32>,
+    sort: Option<(usize, ColumnSort)>,
+}
+
+impl SavingsTable {
+    fn new(page: WeakEntity<SavingsPage>, widths: Vec<f32>) -> Self {
+        Self {
+            page,
+            rows: Vec::new(),
+            widths,
+            sort: None,
+        }
     }
 
-    fn render_row(
+    fn set_rows(&mut self, rows: Vec<SavingsAccount>) {
+        self.rows = rows;
+        sort_savings(&mut self.rows, self.sort);
+    }
+
+    fn set_widths(&mut self, widths: &[f32]) {
+        if widths.len() == self.widths.len() {
+            self.widths = widths.to_vec();
+        }
+    }
+}
+
+impl TableDelegate for SavingsTable {
+    fn columns_count(&self, _: &App) -> usize {
+        COLUMN_HEADINGS.len()
+    }
+
+    fn rows_count(&self, _: &App) -> usize {
+        self.rows.len()
+    }
+
+    fn column(&self, col_ix: usize, _: &App) -> Column {
+        let column = Column::new(COLUMN_HEADINGS[col_ix], COLUMN_HEADINGS[col_ix])
+            .width(px(self.widths[col_ix]))
+            .min_width(px(MIN_COLUMN_WIDTH))
+            .max_width(px(MAX_COLUMN_WIDTH))
+            .resizable(true)
+            .movable(false);
+        let direction = match self.sort {
+            Some((sorted, direction)) if sorted == col_ix => direction,
+            _ => ColumnSort::Default,
+        };
+        match col_ix {
+            COL_BANK
+            | COL_TITLE
+            | COL_AMOUNT
+            | COL_BASE_RATE
+            | COL_RATE_AFTER_THRESHOLD
+            | COL_THRESHOLD
+            | COL_OPENED_DATE
+            | COL_TERM => column.sort(direction),
+            _ => column,
+        }
+    }
+
+    fn perform_sort(
         &mut self,
-        entry_index: usize,
-        row_index: usize,
-        stripe: Hsla,
-        cx: &mut Context<Self>,
+        col_ix: usize,
+        sort: ColumnSort,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) {
+        self.sort = (sort != ColumnSort::Default).then_some((col_ix, sort));
+        sort_savings(&mut self.rows, self.sort);
+    }
+
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let account = self.entries[entry_index].clone();
-        let border = cx.theme().border;
-        let id = account.id;
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child("Накоплений по выбранным условиям нет.")
+    }
+
+    fn render_td(
+        &mut self,
+        row_ix: usize,
+        col_ix: usize,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let account = &self.rows[row_ix];
+        let dash = || "—".to_owned();
         let term = match (account.term_type, account.term_end_date) {
             (SavingsTerm::Limited, Some(date)) => format!("до {}", format_date(date)),
             (SavingsTerm::Limited, None) => "Дата не задана".to_owned(),
             (SavingsTerm::Unlimited, _) => "Бессрочный".to_owned(),
         };
-        let dash = || "—".to_owned();
-        let values = [
-            account.bank_name.clone(),
-            account.title.clone(),
-            account.amount.to_string(),
-            account.currency.map_or_else(dash, |c| c.code().to_owned()),
-            format!("{}%", account.base_rate),
-            account
-                .rate_after_threshold
-                .map_or_else(dash, |rate| format!("{rate}%")),
-            account
-                .threshold_amount
-                .map_or_else(dash, |amount| amount.to_string()),
-            term,
-            account.opened_date.map_or_else(dash, format_date),
-            account.interest_accrual_date.map_or_else(dash, format_date),
-            account.interest_destination.title().to_owned(),
-            if account.is_active {
-                "Активно"
-            } else {
-                "Неактивно"
-            }
-            .to_owned(),
-        ];
-        let title = account.title;
-        div()
-            .id(("savings-row", id as usize))
-            .flex()
-            .w_full()
-            .h(px(ROW_HEIGHT))
-            .items_center()
-            .border_l_1()
-            .border_r_1()
-            .border_b_1()
-            .border_color(border)
-            .when(row_index % 2 == 1, |row| row.bg(stripe))
-            .children(
-                values
-                    .into_iter()
-                    .zip(COLUMN_WIDTHS)
-                    .enumerate()
-                    .map(|(index, (value, width))| cell(index, width, value, border)),
-            )
-            .child(
+        match col_ix {
+            COL_BANK => div().child(account.bank_name.clone()).into_any_element(),
+            COL_TITLE => div().child(account.title.clone()).into_any_element(),
+            COL_AMOUNT => div()
+                .w_full()
+                .text_right()
+                .child(account.amount.to_string())
+                .into_any_element(),
+            3 => div()
+                .child(
+                    account
+                        .currency
+                        .map_or_else(dash, |currency| currency.code().to_owned()),
+                )
+                .into_any_element(),
+            COL_BASE_RATE => div()
+                .child(format!("{}%", account.base_rate))
+                .into_any_element(),
+            COL_RATE_AFTER_THRESHOLD => div()
+                .child(
+                    account
+                        .rate_after_threshold
+                        .map_or_else(dash, |rate| format!("{rate}%")),
+                )
+                .into_any_element(),
+            COL_THRESHOLD => div()
+                .child(
+                    account
+                        .threshold_amount
+                        .map_or_else(dash, |amount| amount.to_string()),
+                )
+                .into_any_element(),
+            COL_TERM => div().child(term).into_any_element(),
+            COL_OPENED_DATE => div()
+                .child(account.opened_date.map_or_else(dash, format_date))
+                .into_any_element(),
+            9 => div()
+                .child(account.interest_accrual_date.map_or_else(dash, format_date))
+                .into_any_element(),
+            10 => div()
+                .child(account.interest_destination.title().to_owned())
+                .into_any_element(),
+            11 => div()
+                .child(if account.is_active {
+                    "Активно"
+                } else {
+                    "Неактивно"
+                })
+                .into_any_element(),
+            COL_ACTIONS => {
+                let id = account.id;
+                let title = account.title.clone();
+                let edit_page = self.page.clone();
+                let delete_page = self.page.clone();
                 div()
-                    .w(px(COLUMN_WIDTHS[12]))
-                    .h_full()
                     .flex()
-                    .items_center()
-                    .justify_end()
-                    .border_l_1()
-                    .border_color(border)
                     .gap_1()
                     .child(
                         Button::new(("edit", id as usize))
                             .xsmall()
                             .label("Изменить")
-                            .on_click(cx.listener(move |page, _, window, cx| {
-                                page.begin_edit(id, window, cx)
-                            })),
+                            .on_click(move |_, window, cx| {
+                                let _ = edit_page
+                                    .update(cx, |page, cx| page.begin_edit(id, window, cx));
+                            }),
                     )
                     .child(
                         Button::new(("delete", id as usize))
                             .danger()
                             .xsmall()
                             .label("Удалить")
-                            .on_click(cx.listener(move |page, _, window, cx| {
-                                page.confirm_delete(id, title.clone(), window, cx)
-                            })),
-                    ),
-            )
+                            .on_click(move |_, window, cx| {
+                                let _ = delete_page.update(cx, |page, cx| {
+                                    page.confirm_delete(id, title.clone(), window, cx)
+                                });
+                            }),
+                    )
+                    .into_any_element()
+            }
+            _ => div().into_any_element(),
+        }
     }
-}
-
-/// Колонка «Название» занимает свободную ширину, остальные имеют фиксированную.
-fn cell(index: usize, width: f32, text: String, border: Hsla) -> Div {
-    let base = if index == 1 {
-        div().flex_1().min_w(px(width))
-    } else {
-        div().w(px(width)).flex_none()
-    };
-    base.h_full()
-        .flex()
-        .items_center()
-        .text_size(px(13.0))
-        .line_height(px(16.0))
-        .when(index > 0, |cell| cell.border_l_1().border_color(border))
-        .px_2()
-        .overflow_hidden()
-        .child(text)
 }
 
 impl Render for SavingsPage {
@@ -1319,9 +1443,15 @@ impl Render for SavingsPage {
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
-    use finance_core::{Currency, InterestDestination, SavingsTerm};
+    use finance_core::{Currency, InterestDestination, SavingsAccount, SavingsTerm};
+    use gpui_kit::component::table::ColumnSort;
+    use rust_decimal::Decimal;
 
-    use super::SavingsForm;
+    use super::{
+        column_widths_key, format_column_widths, load_column_widths, parse_column_widths,
+        sort_savings, SavingsForm, COL_AMOUNT, COL_BANK, COL_BASE_RATE, COL_OPENED_DATE,
+        COL_RATE_AFTER_THRESHOLD, COL_TERM, COL_THRESHOLD, COL_TITLE, DEFAULT_COLUMN_WIDTHS,
+    };
 
     fn valid_savings_form() -> SavingsForm {
         SavingsForm {
@@ -1426,6 +1556,119 @@ mod tests {
         assert!(edited == initial);
         edited.title = "Черновик".to_owned();
         assert!(edited != initial);
+    }
+
+    fn sortable_savings() -> Vec<SavingsAccount> {
+        vec![
+            SavingsAccount {
+                id: 1,
+                bank_id: 1,
+                bank_name: "Банк Бета".to_owned(),
+                title: "Зета".to_owned(),
+                amount: Decimal::from(2),
+                currency: None,
+                base_rate: Decimal::from(7),
+                rate_after_threshold: Some(Decimal::from(8)),
+                threshold_amount: Some(Decimal::from(100)),
+                opened_date: NaiveDate::from_ymd_opt(2026, 2, 1),
+                interest_accrual_date: None,
+                term_type: SavingsTerm::Limited,
+                term_end_date: NaiveDate::from_ymd_opt(2030, 1, 1),
+                interest_destination: InterestDestination::Reinvest,
+                is_active: true,
+            },
+            SavingsAccount {
+                id: 2,
+                bank_id: 2,
+                bank_name: "Банк Альфа".to_owned(),
+                title: "Альфа".to_owned(),
+                amount: Decimal::from(10),
+                currency: None,
+                base_rate: Decimal::from(5),
+                rate_after_threshold: None,
+                threshold_amount: None,
+                opened_date: None,
+                interest_accrual_date: None,
+                term_type: SavingsTerm::Unlimited,
+                term_end_date: None,
+                interest_destination: InterestDestination::Reinvest,
+                is_active: true,
+            },
+            SavingsAccount {
+                id: 3,
+                bank_id: 2,
+                bank_name: "Банк Альфа".to_owned(),
+                title: "Гамма".to_owned(),
+                amount: Decimal::from(1),
+                currency: None,
+                base_rate: Decimal::from(9),
+                rate_after_threshold: Some(Decimal::from(6)),
+                threshold_amount: Some(Decimal::from(50)),
+                opened_date: NaiveDate::from_ymd_opt(2026, 1, 1),
+                interest_accrual_date: None,
+                term_type: SavingsTerm::Limited,
+                term_end_date: NaiveDate::from_ymd_opt(2028, 1, 1),
+                interest_destination: InterestDestination::Reinvest,
+                is_active: true,
+            },
+        ]
+    }
+
+    fn sorted_ids(column: usize, direction: ColumnSort) -> Vec<i64> {
+        let mut rows = sortable_savings();
+        sort_savings(&mut rows, Some((column, direction)));
+        rows.into_iter().map(|account| account.id).collect()
+    }
+
+    #[test]
+    fn savings_sorting_covers_all_requested_columns_in_both_directions() {
+        let columns = [
+            (COL_BANK, [2, 3, 1], [1, 2, 3]),
+            (COL_TITLE, [2, 3, 1], [1, 3, 2]),
+            (COL_AMOUNT, [3, 1, 2], [2, 1, 3]),
+            (COL_BASE_RATE, [2, 1, 3], [3, 1, 2]),
+            (COL_RATE_AFTER_THRESHOLD, [2, 3, 1], [1, 3, 2]),
+            (COL_THRESHOLD, [2, 3, 1], [1, 3, 2]),
+            (COL_OPENED_DATE, [2, 3, 1], [1, 3, 2]),
+            (COL_TERM, [3, 1, 2], [2, 1, 3]),
+        ];
+
+        for (column, ascending, descending) in columns {
+            assert_eq!(
+                sorted_ids(column, ColumnSort::Ascending),
+                ascending,
+                "ascending sort for column {column}"
+            );
+            assert_eq!(
+                sorted_ids(column, ColumnSort::Descending),
+                descending,
+                "descending sort for column {column}"
+            );
+        }
+    }
+
+    #[test]
+    fn savings_column_widths_are_loaded_from_database_and_validated() {
+        let database = filtered_database();
+        let mut widths = DEFAULT_COLUMN_WIDTHS;
+        widths[1] = 245.0;
+        finance_db::set_app_setting(
+            &database,
+            column_widths_key(),
+            &format_column_widths(&widths),
+        )
+        .expect("column widths should be stored");
+
+        assert_eq!(load_column_widths(&database), widths);
+    }
+
+    #[test]
+    fn invalid_savings_column_widths_are_rejected() {
+        assert!(parse_column_widths("60,not-a-width").is_none());
+        assert!(
+            parse_column_widths(&[59.0; 13].map(|width| width.to_string()).join(",")).is_none()
+        );
+        assert!(parse_column_widths(&format_column_widths(&DEFAULT_COLUMN_WIDTHS)).is_some());
     }
 
     fn filtered_database() -> finance_db::Database {

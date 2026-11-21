@@ -12,7 +12,7 @@ On Directories, the header has the page title on the left and a Large Secondary 
 
 The Income page keeps Add enabled even if no active categories exist; it shows a notice to add a category instead. Future pages should make missing prerequisites clear and should not allow an action that cannot create a valid record.
 
-On Savings, refresh also reloads the bank list and returns the results table to its first page. Income reloads the transaction list with the current filters when filters are applied.
+On Savings, refresh also reloads the bank list and results with the current filters while retaining the selected sort and saved column widths. On Income, refresh reloads the transaction list with the current filters.
 
 On Savings, Add is disabled when there are no banks and explains that a bank must first be added in Directories.
 
@@ -72,10 +72,11 @@ Shared compact DatePicker controls retain previous/next-month arrow navigation a
 - Filter groups and wrapped rows have a small, consistent gap for visual separation.
 - `Применить` and `Сбросить фильтры` remain aligned to the right of the final filter row, moving to the bottom-right row when needed.
 - Editing search, bank, currency, or status does not reload the results until `Применить` is clicked.
+- The Savings results use a resizable `DataTable`; column widths are persisted in the database. Sorting applies to the complete filtered result set for `Банк`, `Название`, `Сумма`, `Базовая ставка`, `Ставка при выполнении условий`, `Порог`, `Дата открытия`, and `Срок`.
 - Currency options are `Все`, `RUB`, and `USD`. A currency selection matches only accounts explicitly set to that currency; `Все` includes accounts with an unknown currency.
 - Each active filter has an `×` control. Clearing one immediately reloads the results using the other values currently in the controls.
 - `Сбросить фильтры` clears all filters and reloads the list. It is disabled when no filters are active.
-- The `↻ Обновить` header action reloads the banks and results with the current filter values, then returns the table to its first page.
+- The `↻ Обновить` header action reloads the banks and results with the current filter values without resetting the sort or column widths.
 - If no records match, the page shows an empty-state message.
 - Opening date and interest-accrual date are optional `YYYY-MM-DD` values in the add/edit form; clearing either field stores it as unknown, shown as `—` in the table. These are manually maintained reference dates and do not trigger interest calculations or assert that an accrual was verified by the bank.
 
