@@ -61,11 +61,14 @@ fn selected_kind(selected: &[usize]) -> Option<TransactionKind> {
     }
 }
 
-/// Выделенная кнопка переключателя использует стиль `info` (`btn-info`).
-fn kind_button(id: &'static str, label: &'static str, selected: bool) -> Button {
+/// Выделенная кнопка переключателя получает нейтральный фон и рамку из темы.
+fn kind_button(id: &'static str, label: &'static str, selected: bool, cx: &App) -> Button {
     let button = Button::new(id).label(label).selected(selected);
     if selected {
-        button.outline().info()
+        button
+            .bg(cx.theme().secondary)
+            .border_color(cx.theme().ring)
+            .text_color(cx.theme().foreground)
     } else {
         button.ghost()
     }
@@ -456,11 +459,13 @@ impl Render for QuickTransactionForm {
                         "quick-kind-income",
                         "Доход",
                         self.kind == TransactionKind::Income,
+                        cx,
                     ))
                     .child(kind_button(
                         "quick-kind-expense",
                         "Расход",
                         self.kind == TransactionKind::Expense,
+                        cx,
                     ))
                     .on_click(cx.listener(|this, selected: &Vec<usize>, window, cx| {
                         if let Some(kind) = selected_kind(selected) {
