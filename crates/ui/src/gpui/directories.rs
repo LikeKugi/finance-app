@@ -6,12 +6,12 @@ use std::rc::Rc;
 use std::str::FromStr;
 
 use chrono::{Local, NaiveDate};
-use finance_core::{Bank, Category, CurrencyDefinition, TransactionKind};
+use finance_core::{Bank, Category, CurrencyDefinition, ExpensePlace, TransactionKind};
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{AlertDialog, Dialog};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _, WindowExt as _,
@@ -22,6 +22,7 @@ use rust_decimal::Decimal;
 
 use super::support::category_tree_rows;
 use super::support::currency_rate_label;
+use super::transactions::comment_preview;
 
 const DATE_FORMAT: &str = "%Y-%m-%d";
 const ROW_HEIGHT: f32 = 36.0;
@@ -30,6 +31,7 @@ const ROW_HEIGHT: f32 = 36.0;
 enum RightTab {
     Banks,
     Currencies,
+    ExpensePlaces,
 }
 
 struct CategoryForm {
@@ -47,6 +49,12 @@ struct BankForm {
     comment: Entity<InputState>,
 }
 
+struct ExpensePlaceForm {
+    id: Option<i64>,
+    name: Entity<InputState>,
+    comment: Entity<TextareaState>,
+}
+
 struct CurrencyForm {
     /// `Some(code)` — правка курса существующей валюты, `None` — новая валюта.
     rate_for: Option<String>,
@@ -61,12 +69,14 @@ enum FormKind {
     Category,
     Bank,
     Currency,
+    ExpensePlace,
 }
 
 enum Delete {
     Category(i64),
     Bank(i64),
     Currency(String),
+    ExpensePlace(i64),
 }
 
 pub(crate) struct DirectoriesPage {
@@ -75,11 +85,13 @@ pub(crate) struct DirectoriesPage {
     right_tab: RightTab,
     categories: Vec<Category>,
     banks: Vec<Bank>,
+    expense_places: Vec<ExpensePlace>,
     currencies: Vec<CurrencyDefinition>,
     used_currencies: HashSet<String>,
     message: Option<(String, bool)>,
     category_form: Option<CategoryForm>,
     bank_form: Option<BankForm>,
+    expense_place_form: Option<ExpensePlaceForm>,
     currency_form: Option<CurrencyForm>,
     _subscriptions: Vec<Subscription>,
 }
@@ -109,11 +121,13 @@ impl DirectoriesPage {
             right_tab: RightTab::Banks,
             categories: Vec::new(),
             banks: Vec::new(),
+            expense_places: Vec::new(),
             currencies: Vec::new(),
             used_currencies: HashSet::new(),
             message: None,
             category_form: None,
             bank_form: None,
+            expense_place_form: None,
             currency_form: None,
             _subscriptions: Vec::new(),
         };
@@ -131,6 +145,7 @@ impl DirectoriesPage {
         let db = &self.database;
         let categories = finance_db::list_categories(db, self.kind, true);
         let banks = finance_db::list_banks(db);
+        let expense_places = finance_db::list_expense_places(db);
         let currencies = finance_db::list_currencies(db);
         let used = finance_db::list_used_currency_codes(db);
         let mut failure = None;
@@ -140,6 +155,10 @@ impl DirectoriesPage {
         }
         match banks {
             Ok(v) => self.banks = v,
+            Err(e) => failure = Some(e.to_string()),
+        }
+        match expense_places {
+            Ok(v) => self.expense_places = v,
             Err(e) => failure = Some(e.to_string()),
         }
         match currencies {
@@ -174,6 +193,7 @@ impl DirectoriesPage {
         if self.right_tab != tab {
             self.right_tab = tab;
             self.bank_form = None;
+            self.expense_place_form = None;
             self.currency_form = None;
             cx.notify();
         }
@@ -306,6 +326,53 @@ impl DirectoriesPage {
         }
     }
 
+    // ---- места трат ----
+
+    fn open_expense_place_form(
+        &mut self,
+        existing: Option<&ExpensePlace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let comment = cx.new(|cx| {
+            let mut state = TextareaState::new(window, cx).rows(4);
+            if let Some(comment) = existing.and_then(|place| place.comment.as_ref()) {
+                state.set_value(comment.clone(), window, cx);
+            }
+            state
+        });
+        self.expense_place_form = Some(ExpensePlaceForm {
+            id: existing.map(|place| place.id),
+            name: input(
+                "Название",
+                existing.map_or("", |place| place.name.as_str()),
+                window,
+                cx,
+            ),
+            comment,
+        });
+        self.message = None;
+        cx.notify();
+        self.open_form_dialog(FormKind::ExpensePlace, window, cx);
+    }
+
+    fn save_expense_place(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = self.expense_place_form.as_ref() else {
+            return;
+        };
+        let name = form.name.read(cx).value().to_string();
+        let comment = form.comment.read(cx).value().to_string();
+        let comment = (!comment.is_empty()).then_some(comment.as_str());
+        match finance_db::save_expense_place(&self.database, form.id, &name, comment) {
+            Ok(_) => {
+                self.expense_place_form = None;
+                window.close_dialog(cx);
+                self.reload(cx);
+            }
+            Err(error) => self.error(error.to_string(), cx),
+        }
+    }
+
     // ---- валюты ----
 
     fn open_currency_form(
@@ -398,6 +465,7 @@ impl DirectoriesPage {
                 Delete::Category(id) => Delete::Category(*id),
                 Delete::Bank(id) => Delete::Bank(*id),
                 Delete::Currency(code) => Delete::Currency(code.clone()),
+                Delete::ExpensePlace(id) => Delete::ExpensePlace(*id),
             };
             alert
                 .title("Подтверждение удаления")
@@ -414,6 +482,9 @@ impl DirectoriesPage {
                             Delete::Bank(id) => finance_db::delete_bank(&page.database, *id),
                             Delete::Currency(code) => {
                                 finance_db::delete_currency(&page.database, code)
+                            }
+                            Delete::ExpensePlace(id) => {
+                                finance_db::delete_expense_place(&page.database, *id)
                             }
                         };
                         match result {
@@ -500,6 +571,25 @@ impl DirectoriesPage {
                     .child(Input::new(&form.comment));
                 (title.to_owned(), fields, "bank", "Сохранить банк")
             }
+            FormKind::ExpensePlace => {
+                let Some(form) = self.expense_place_form.as_ref() else {
+                    return (String::new(), div().into_any_element());
+                };
+                let title = if form.id.is_some() {
+                    "Изменить место трат"
+                } else {
+                    "Новое место трат"
+                };
+                let fields = div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child("Название")
+                    .child(Input::new(&form.name))
+                    .child("Комментарий")
+                    .child(Textarea::new(&form.comment));
+                (title.to_owned(), fields, "expense-place", "Сохранить место")
+            }
             FormKind::Currency => {
                 let Some(form) = self.currency_form.as_ref() else {
                     return (String::new(), div().into_any_element());
@@ -552,6 +642,7 @@ impl DirectoriesPage {
                                 match kind {
                                     FormKind::Category => page.category_form = None,
                                     FormKind::Bank => page.bank_form = None,
+                                    FormKind::ExpensePlace => page.expense_place_form = None,
                                     FormKind::Currency => page.currency_form = None,
                                 }
                                 page.message = None;
@@ -566,6 +657,7 @@ impl DirectoriesPage {
                             .on_click(cx.listener(move |page, _, window, cx| match kind {
                                 FormKind::Category => page.save_category(window, cx),
                                 FormKind::Bank => page.save_bank(window, cx),
+                                FormKind::ExpensePlace => page.save_expense_place(window, cx),
                                 FormKind::Currency => page.save_currency(window, cx),
                             })),
                     ),
@@ -724,6 +816,92 @@ impl DirectoriesPage {
         div().flex().flex_col().gap_2().child(list)
     }
 
+    fn render_expense_places(&mut self, cx: &mut Context<Self>) -> Div {
+        let mut list = self.list(true, cx);
+        list = list.child(
+            self.row("expense-places-header", 0, cx)
+                .bg(cx.theme().muted)
+                .font_weight(FontWeight::BOLD)
+                .child(div().flex_1().px_2().child("Название"))
+                .child(div().flex_1().px_2().child("Комментарий"))
+                .child(
+                    self.action_cell(cx)
+                        .w(px(168.0))
+                        .justify_center()
+                        .child("Действия"),
+                ),
+        );
+
+        for (position, place) in self.expense_places.iter().cloned().enumerate() {
+            let id = place.id;
+            let subject = format!("место трат «{}»", place.name);
+            let edit = place.clone();
+            let comment_cell = match place.comment.as_deref() {
+                Some(comment) if !comment.is_empty() => {
+                    let full_comment = comment.to_owned();
+                    div()
+                        .id(("expense-place-comment", id as usize))
+                        .flex_1()
+                        .px_2()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .cursor_pointer()
+                        .child(comment_preview(comment))
+                        .on_click(move |_, window, cx| {
+                            let comment = full_comment.clone();
+                            window.open_dialog(cx, move |dialog: Dialog, _, _| {
+                                dialog.title("Комментарий").centered().child(
+                                    div()
+                                        .id(("expense-place-comment-dialog", id as usize))
+                                        .max_h(px(420.0))
+                                        .overflow_y_scroll()
+                                        .overflow_x_scroll()
+                                        .child(comment.clone()),
+                                )
+                            });
+                        })
+                        .into_any_element()
+                }
+                _ => div().flex_1().px_2().into_any_element(),
+            };
+            list = list.child(
+                self.row(("expense-place", id as usize), position + 1, cx)
+                    .child(div().flex_1().px_2().child(place.name))
+                    .child(comment_cell)
+                    .child(
+                        self.action_cell(cx)
+                            .w(px(168.0))
+                            .justify_center()
+                            .gap_1()
+                            .child(
+                                Button::new(("expense-place-edit", id as usize))
+                                    .xsmall()
+                                    .label("Изменить")
+                                    .on_click(cx.listener(move |page, _, window, cx| {
+                                        page.open_expense_place_form(Some(&edit), window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(("expense-place-delete", id as usize))
+                                    .danger()
+                                    .xsmall()
+                                    .label("Удалить")
+                                    .on_click(cx.listener(move |page, _, window, cx| {
+                                        page.confirm_delete(
+                                            Delete::ExpensePlace(id),
+                                            subject.clone(),
+                                            window,
+                                            cx,
+                                        )
+                                    })),
+                            ),
+                    ),
+            );
+        }
+
+        div().flex().flex_col().gap_2().child(list)
+    }
+
     fn render_currencies(&mut self, cx: &mut Context<Self>) -> Div {
         let primary_code = self
             .currencies
@@ -830,6 +1008,7 @@ impl Render for DirectoriesPage {
         let right = match tab {
             RightTab::Banks => self.render_banks(cx),
             RightTab::Currencies => self.render_currencies(cx),
+            RightTab::ExpensePlaces => self.render_expense_places(cx),
         };
         let add_right = match tab {
             RightTab::Banks => Button::new("bank-add")
@@ -846,6 +1025,14 @@ impl Render for DirectoriesPage {
                 .on_click(
                     cx.listener(|page, _, window, cx| page.open_currency_form(None, window, cx)),
                 ),
+            RightTab::ExpensePlaces => Button::new("expense-place-add")
+                .primary()
+                .small()
+                .label("Добавить место")
+                .icon(IconName::Plus)
+                .on_click(cx.listener(|page, _, window, cx| {
+                    page.open_expense_place_form(None, window, cx)
+                })),
         };
         div()
             .id("directories-page")
@@ -949,6 +1136,18 @@ impl Render for DirectoriesPage {
                                                 page.set_right_tab(RightTab::Currencies, cx)
                                             }),
                                         ),
+                                    )
+                                    .child(
+                                        toggle(
+                                            "tab-expense-places",
+                                            "Места трат",
+                                            tab == RightTab::ExpensePlaces,
+                                        )
+                                        .on_click(
+                                            cx.listener(|page, _, _, cx| {
+                                                page.set_right_tab(RightTab::ExpensePlaces, cx)
+                                            }),
+                                        ),
                                     ),
                             )
                             .child(
@@ -960,6 +1159,7 @@ impl Render for DirectoriesPage {
                                         match tab {
                                             RightTab::Banks => "Банки",
                                             RightTab::Currencies => "Валюты",
+                                            RightTab::ExpensePlaces => "Места трат",
                                         },
                                     ))
                                     .child(add_right),

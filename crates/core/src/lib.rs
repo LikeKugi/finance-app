@@ -190,6 +190,13 @@ pub struct Bank {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpensePlace {
+    pub id: i64,
+    pub name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinancialTransaction {
     pub id: i64,
     pub date: NaiveDate,

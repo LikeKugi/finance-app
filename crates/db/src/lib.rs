@@ -7,10 +7,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use chrono::NaiveDate;
 use finance_core::{
     canonical_amount, rebase_exchange_rate, validate_currency_code, validate_exchange_rate,
-    AnalysisTransaction, Bank, Category, Currency, CurrencyDefinition, FinancialTransaction,
-    InterestDestination, LinkedSavingsAccount, PaymentCardType, PaymentDocument,
-    PaymentDocumentDetails, PaymentSystem, SavingsAccount, SavingsDetails, SavingsTerm,
-    TransactionAmount, TransactionKind,
+    AnalysisTransaction, Bank, Category, Currency, CurrencyDefinition, ExpensePlace,
+    FinancialTransaction, InterestDestination, LinkedSavingsAccount, PaymentCardType,
+    PaymentDocument, PaymentDocumentDetails, PaymentSystem, SavingsAccount, SavingsDetails,
+    SavingsTerm, TransactionAmount, TransactionKind,
 };
 use rusqlite::backup::Backup;
 use rusqlite::{
@@ -2116,6 +2116,66 @@ pub fn delete_bank(connection: &Connection, id: i64) -> Result<(), DbError> {
     Ok(())
 }
 
+/// Lists expense places alphabetically.
+pub fn list_expense_places(connection: &Connection) -> Result<Vec<ExpensePlace>, DbError> {
+    let mut statement = connection
+        .prepare("SELECT id, name, comment FROM expense_places ORDER BY name COLLATE NOCASE, id")?;
+    let rows = statement.query_map([], |row| {
+        Ok(ExpensePlace {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            comment: row.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Creates or updates an expense place without altering its comment text.
+pub fn save_expense_place(
+    connection: &Connection,
+    id: Option<i64>,
+    name: &str,
+    comment: Option<&str>,
+) -> Result<i64, DbError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(DbError::EmptyName);
+    }
+    if let Some(id) = id {
+        let changed = connection.execute(
+            "UPDATE expense_places SET name = ?1, comment = ?2 WHERE id = ?3",
+            params![name, comment, id],
+        )?;
+        if changed == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows.into());
+        }
+        Ok(id)
+    } else {
+        connection.execute(
+            "INSERT INTO expense_places (name, comment) VALUES (?1, ?2)",
+            params![name, comment],
+        )?;
+        Ok(connection.last_insert_rowid())
+    }
+}
+
+/// Deletes an expense place only when no expense refers to it.
+pub fn delete_expense_place(connection: &Connection, id: i64) -> Result<(), DbError> {
+    let deleted = match connection.execute("DELETE FROM expense_places WHERE id = ?1", [id]) {
+        Ok(deleted) => deleted,
+        Err(rusqlite::Error::SqliteFailure(error, _))
+            if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            return Err(DbError::EntityInUse);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if deleted == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows.into());
+    }
+    Ok(())
+}
+
 fn category_table(kind: TransactionKind) -> &'static str {
     match kind {
         TransactionKind::Income => "income_categories",
@@ -2300,23 +2360,23 @@ fn backup_before_migration(
 mod tests {
     use chrono::NaiveDate;
     use finance_core::{
-        summarize_analysis, Currency, CurrencyDefinition, DomainError, InterestDestination,
-        PaymentCardType, PaymentDocumentDetails, PaymentSystem, SavingsDetails, SavingsTerm,
-        TransactionKind,
+        summarize_analysis, Currency, CurrencyDefinition, DomainError, ExpensePlace,
+        InterestDestination, PaymentCardType, PaymentDocumentDetails, PaymentSystem,
+        SavingsDetails, SavingsTerm, TransactionKind,
     };
     use rusqlite::{Connection, OpenFlags};
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
     use super::{
-        add_currency, delete_bank, delete_category, delete_currency, delete_payment_document,
-        delete_savings, export_database_backup_from_path, get_app_setting,
-        has_pending_database_import, initialize, list_currencies, list_payment_documents,
-        list_payment_documents_filtered, list_savings, list_savings_filtered,
-        list_transaction_amounts, list_transaction_comments, list_transactions,
-        list_transactions_filtered, load_analysis_transactions,
+        add_currency, delete_bank, delete_category, delete_currency, delete_expense_place,
+        delete_payment_document, delete_savings, export_database_backup_from_path, get_app_setting,
+        has_pending_database_import, initialize, list_currencies, list_expense_places,
+        list_payment_documents, list_payment_documents_filtered, list_savings,
+        list_savings_filtered, list_transaction_amounts, list_transaction_comments,
+        list_transactions, list_transactions_filtered, load_analysis_transactions,
         load_analysis_transactions_by_category, restore_pending_database_import, save_bank,
-        save_category, save_payment_document, save_savings, save_transaction,
+        save_category, save_expense_place, save_payment_document, save_savings, save_transaction,
         save_transaction_with_card, set_app_setting, set_currency_exchange_rate,
         set_primary_currency, stage_database_import, DbError, MIGRATIONS,
     };
@@ -2479,6 +2539,90 @@ mod tests {
                     .starts_with("data.before-migration-v11-")
             })
             .count()
+    }
+
+    #[test]
+    fn expense_place_crud_preserves_multiline_comments_and_rejects_empty_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+
+        assert!(list_expense_places(&connection).unwrap().is_empty());
+        assert!(matches!(
+            save_expense_place(&connection, None, "  ", None),
+            Err(DbError::EmptyName)
+        ));
+
+        let id = save_expense_place(
+            &connection,
+            None,
+            "  Кофейня  ",
+            Some("Первая строка\nВторая строка\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            list_expense_places(&connection).unwrap(),
+            [ExpensePlace {
+                id,
+                name: "Кофейня".to_owned(),
+                comment: Some("Первая строка\nВторая строка\n".to_owned()),
+            }]
+        );
+
+        assert_eq!(
+            save_expense_place(&connection, Some(id), "Кофе", None).unwrap(),
+            id
+        );
+        assert_eq!(
+            list_expense_places(&connection).unwrap(),
+            [ExpensePlace {
+                id,
+                name: "Кофе".to_owned(),
+                comment: None,
+            }]
+        );
+
+        delete_expense_place(&connection, id).unwrap();
+        assert!(list_expense_places(&connection).unwrap().is_empty());
+        assert!(delete_expense_place(&connection, id).is_err());
+    }
+
+    #[test]
+    fn expense_place_delete_is_rejected_when_an_expense_references_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let category_id = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Продукты",
+            None,
+            true,
+        )
+        .unwrap();
+        let expense_id = save_transaction(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            NaiveDate::from_ymd_opt(2026, 11, 21).unwrap(),
+            category_id,
+            Decimal::ONE,
+            Currency::Rub,
+            "Покупка",
+        )
+        .unwrap();
+        let place_id = save_expense_place(&connection, None, "Магазин", None).unwrap();
+        connection
+            .execute(
+                "UPDATE expenses SET expense_place_id = ?1 WHERE id = ?2",
+                rusqlite::params![place_id, expense_id],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            delete_expense_place(&connection, place_id),
+            Err(DbError::EntityInUse)
+        ));
+        assert_eq!(list_expense_places(&connection).unwrap().len(), 1);
     }
 
     #[test]

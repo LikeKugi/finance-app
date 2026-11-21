@@ -1793,7 +1793,7 @@ impl TableDelegate for TransactionsTable {
     }
 }
 
-fn comment_preview(text: &str) -> String {
+pub(crate) fn comment_preview(text: &str) -> String {
     let first_line = text.lines().next().unwrap_or_default();
     let mut chars = first_line.chars();
     let mut preview = chars.by_ref().take(25).collect::<String>();
