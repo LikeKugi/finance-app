@@ -28,10 +28,10 @@ const NONE_LABEL: &str = "Все";
 const ROW_HEIGHT: f32 = 30.0;
 const PIE_CHART_DIAMETER: f32 = 120.0;
 const COLUMN_HEADERS: [&str; 4] = ["Категория", "Операций", "Сумма", "Доля"];
-const COLUMN_WIDTHS: [f32; 4] = [260.0, 85.0, 155.0, 80.0];
+const COLUMN_WIDTHS: [f32; 4] = [235.0, 110.0, 155.0, 80.0];
 const ANALYSIS_TABLE_WIDTH: f32 =
     COLUMN_WIDTHS[0] + COLUMN_WIDTHS[1] + COLUMN_WIDTHS[2] + COLUMN_WIDTHS[3];
-const MIN_COLUMN_WIDTHS: [f32; 4] = [140.0, 80.0, 120.0, 72.0];
+const MIN_COLUMN_WIDTHS: [f32; 4] = [140.0, 110.0, 120.0, 72.0];
 const COL_CATEGORY: usize = 0;
 const COL_TRANSACTION_COUNT: usize = 1;
 const COL_AMOUNT: usize = 2;
