@@ -466,30 +466,30 @@ impl Render for QuickTransactionForm {
             .child(field(
                 "Валюта",
                 Select::new(&self.currency_select)
-                    .xsmall()
-                    .w(px(120.0))
+                    .small()
+                    .w_full()
                     .into_any_element(),
             ))
             .child(field(
                 "Категория",
                 Select::new(&self.category_select)
-                    .xsmall()
-                    .w(px(240.0))
+                    .small()
+                    .w_full()
                     .into_any_element(),
             ))
             .child(field(
                 CARD_FIELD_LABEL,
                 Select::new(&self.card_select)
-                    .xsmall()
-                    .w(px(240.0))
+                    .small()
+                    .w_full()
                     .into_any_element(),
             ));
         if self.kind == TransactionKind::Expense {
             selects = selects.child(field(
                 "Место траты",
                 Select::new(&self.place_select)
-                    .xsmall()
-                    .w(px(240.0))
+                    .small()
+                    .w_full()
                     .into_any_element(),
             ));
         }
