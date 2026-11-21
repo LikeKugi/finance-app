@@ -48,15 +48,21 @@ cargo +stable build --workspace --release
 
 ### Builds
 
+#### GitHub Actions
+
+The workflow in `.github/workflows/build.yml` builds release artifacts on every push and pull request, and can also be started manually from the repository's **Actions** tab. It produces separate downloadable artifacts for Windows x64, macOS Apple Silicon (`arm64`), and macOS Intel (`x86_64`).
+
+Open the completed workflow run, select **Artifacts**, and download the artifact for your platform. The macOS artifacts are `.tar.gz` archives containing the executable; extract the archive before running it. These builds are not signed or notarized, and the workflow does not create an installer or a macOS `.app` bundle.
+
 #### Windows
 
-For a Windows x64 release, install the `x86_64-pc-windows-gnu` Rust target and ensure the GNU cross-linker is available in `PATH`:
+Build a Windows x64 release on Windows with Rust stable and the Windows SDK installed. The release build needs the SDK's `fxc.exe` shader compiler, which must be available in `PATH` or specified with `GPUI_FXC_PATH`:
 
 ```sh
-cargo +stable build -p finance-app --release --locked --target x86_64-pc-windows-gnu
+cargo +stable build -p finance-app --release --locked
 ```
 
-The executable is written to `target/x86_64-pc-windows-gnu/release/finance-app.exe`.
+The executable is written to `target/release/finance-app.exe`. The GitHub Actions workflow locates `fxc.exe` in the Windows SDK automatically. The Windows release build is performed on a Windows runner; cross-compiling this release from macOS is not supported by the current shader build dependency.
 
 #### macOS
 

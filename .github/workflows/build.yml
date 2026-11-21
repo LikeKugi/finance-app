@@ -1,0 +1,78 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Locate DirectX shader compiler
+        shell: pwsh
+        run: |
+          $fxcRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+          $fxc = Get-ChildItem -Path $fxcRoot -Filter fxc.exe -File -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Directory.Name -eq 'x64' } |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+            Select-Object -First 1
+
+          if (-not $fxc) {
+            throw "fxc.exe was not found in the Windows SDK at $fxcRoot"
+          }
+
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+
+      - name: Build release executable
+        run: cargo +stable build -p finance-app --release --locked
+
+      - name: Upload Windows executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: finance-app-windows-x64
+          path: target/release/finance-app.exe
+          if-no-files-found: error
+
+  macos:
+    name: macOS ${{ matrix.architecture }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+          - runner: macos-15-intel
+            architecture: x86_64
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release executable
+        run: cargo +stable build -p finance-app --release --locked
+
+      - name: Package executable
+        run: |
+          mkdir -p dist
+          tar -czf "dist/finance-app-macos-${{ matrix.architecture }}.tar.gz" -C target/release finance-app
+
+      - name: Upload macOS archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: finance-app-macos-${{ matrix.architecture }}
+          path: dist/finance-app-macos-${{ matrix.architecture }}.tar.gz
+          if-no-files-found: error
