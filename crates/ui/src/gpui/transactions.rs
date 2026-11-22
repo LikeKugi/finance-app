@@ -42,6 +42,8 @@ const NONE_LABEL: &str = "Все";
 
 type Choice = Entity<SelectState<Vec<SharedString>>>;
 type CategoryChoice = Entity<SelectState<Vec<CategoryFilterItem>>>;
+type BankChoice = Entity<SelectState<Vec<BankFilterItem>>>;
+type CardChoice = Entity<SelectState<Vec<CardFilterItem>>>;
 
 #[derive(Clone)]
 struct CategoryFilterItem {
@@ -70,6 +72,60 @@ impl SelectItem for CategoryFilterItem {
     }
 }
 
+#[derive(Clone)]
+struct BankFilterItem {
+    id: usize,
+    label: String,
+}
+
+impl SelectItem for BankFilterItem {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone().into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.label
+    }
+
+    fn render(&self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let tooltip = self.label.clone();
+        div()
+            .id(("bank-filter-item", self.id))
+            .w_full()
+            .tooltip(move |window, cx| ComponentTooltip::new(tooltip.clone()).build(window, cx))
+            .child(self.label.clone())
+    }
+}
+
+#[derive(Clone)]
+struct CardFilterItem {
+    id: usize,
+    label: String,
+}
+
+impl SelectItem for CardFilterItem {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone().into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.label
+    }
+
+    fn render(&self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let tooltip = self.label.clone();
+        div()
+            .id(("card-filter-item", self.id))
+            .w_full()
+            .tooltip(move |window, cx| ComponentTooltip::new(tooltip.clone()).build(window, cx))
+            .child(self.label.clone())
+    }
+}
+
 fn choice(
     items: Vec<String>,
     selected: usize,
@@ -90,6 +146,34 @@ fn category_choice(
         .into_iter()
         .enumerate()
         .map(|(id, label)| CategoryFilterItem { id, label })
+        .collect();
+    cx.new(|cx| SelectState::new(items, Some(IndexPath::default().row(selected)), window, cx))
+}
+
+fn bank_choice(
+    labels: Vec<String>,
+    selected: usize,
+    window: &mut Window,
+    cx: &mut Context<TransactionsPage>,
+) -> BankChoice {
+    let items: Vec<BankFilterItem> = labels
+        .into_iter()
+        .enumerate()
+        .map(|(id, label)| BankFilterItem { id, label })
+        .collect();
+    cx.new(|cx| SelectState::new(items, Some(IndexPath::default().row(selected)), window, cx))
+}
+
+fn card_choice(
+    labels: Vec<String>,
+    selected: usize,
+    window: &mut Window,
+    cx: &mut Context<TransactionsPage>,
+) -> CardChoice {
+    let items: Vec<CardFilterItem> = labels
+        .into_iter()
+        .enumerate()
+        .map(|(id, label)| CardFilterItem { id, label })
         .collect();
     cx.new(|cx| SelectState::new(items, Some(IndexPath::default().row(selected)), window, cx))
 }
@@ -197,10 +281,10 @@ pub(crate) struct TransactionsPage {
     expense_place_filter_select: Choice,
     bank_filter: Option<i64>,
     bank_filter_ids: Vec<i64>,
-    bank_filter_select: Choice,
+    bank_filter_select: BankChoice,
     card_filter: Option<i64>,
     card_filter_ids: Vec<i64>,
-    card_filter_select: Choice,
+    card_filter_select: CardChoice,
     currency_filter: Option<Currency>,
     currency_filter_select: Choice,
     period_select: Choice,
@@ -221,8 +305,8 @@ impl TransactionsPage {
         let to = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
         let category_filter_select = category_choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
         let expense_place_filter_select = choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
-        let bank_filter_select = choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
-        let card_filter_select = choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
+        let bank_filter_select = bank_choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
+        let card_filter_select = card_choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
         let currency_filter_select = choice(Self::currency_filter_labels(), 0, window, cx);
         let period_select = choice(Self::period_labels(), 0, window, cx);
 
@@ -280,14 +364,14 @@ impl TransactionsPage {
         subscriptions.push(cx.subscribe_in(
             &bank_filter_select,
             window,
-            |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, window, cx| {
+            |this: &mut Self, _, event: &SelectEvent<Vec<BankFilterItem>>, window, cx| {
                 let SelectEvent::Confirm(value) = event;
                 let next_bank = value
-                    .as_ref()
+                    .as_deref()
                     .and_then(|label| {
                         this.bank_filter_labels()
                             .iter()
-                            .position(|item| item == label.as_ref())
+                            .position(|item| item.as_str() == label)
                     })
                     .and_then(|position| position.checked_sub(1))
                     .and_then(|position| this.bank_filter_ids.get(position).copied());
@@ -303,14 +387,14 @@ impl TransactionsPage {
         subscriptions.push(cx.subscribe_in(
             &card_filter_select,
             window,
-            |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+            |this: &mut Self, _, event: &SelectEvent<Vec<CardFilterItem>>, _, cx| {
                 let SelectEvent::Confirm(value) = event;
                 this.card_filter = value
-                    .as_ref()
+                    .as_deref()
                     .and_then(|label| {
                         this.card_filter_labels()
                             .iter()
-                            .position(|item| item == label.as_ref())
+                            .position(|item| item.as_str() == label)
                     })
                     .and_then(|position| position.checked_sub(1))
                     .and_then(|position| this.card_filter_ids.get(position).copied());
@@ -564,10 +648,11 @@ impl TransactionsPage {
                 cx,
             );
         });
-        let bank_items: Vec<SharedString> = self
+        let bank_items: Vec<BankFilterItem> = self
             .bank_filter_labels()
             .into_iter()
-            .map(SharedString::from)
+            .enumerate()
+            .map(|(id, label)| BankFilterItem { id, label })
             .collect();
         let selected_bank_index = self
             .bank_filter
@@ -606,10 +691,11 @@ impl TransactionsPage {
                 ),
             None => 0,
         };
-        let items: Vec<SharedString> = self
+        let items: Vec<CardFilterItem> = self
             .card_filter_labels()
             .into_iter()
-            .map(SharedString::from)
+            .enumerate()
+            .map(|(id, label)| CardFilterItem { id, label })
             .collect();
         self.card_filter_select.update(cx, |state, cx| {
             state.set_items(items, window, cx);
@@ -725,8 +811,6 @@ impl TransactionsPage {
         });
         for select in [
             &self.expense_place_filter_select,
-            &self.bank_filter_select,
-            &self.card_filter_select,
             &self.currency_filter_select,
             &self.period_select,
         ] {
@@ -734,6 +818,12 @@ impl TransactionsPage {
                 state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
             });
         }
+        self.bank_filter_select.update(cx, |state, cx| {
+            state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
+        });
+        self.card_filter_select.update(cx, |state, cx| {
+            state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
+        });
         self.refresh(cx);
     }
 
@@ -1238,6 +1328,22 @@ impl TransactionsPage {
             })
             .filter(|label| label != NONE_LABEL);
 
+        let bank_tooltip = self
+            .bank_filter_select
+            .read(cx)
+            .selected_index(cx)
+            .map(|ix| ix.row)
+            .and_then(|row| self.bank_filter_labels().get(row).cloned())
+            .filter(|label| label != NONE_LABEL);
+
+        let card_tooltip = self
+            .card_filter_select
+            .read(cx)
+            .selected_index(cx)
+            .map(|ix| ix.row)
+            .and_then(|row| self.card_filter_labels().get(row).cloned())
+            .filter(|label| label != NONE_LABEL);
+
         div()
             .flex()
             .flex_col()
@@ -1301,17 +1407,35 @@ impl TransactionsPage {
                     .child(filter(
                         "Банк",
                         180.0,
-                        Select::new(&self.bank_filter_select)
-                            .placeholder("Банк")
-                            .small()
+                        div()
+                            .id("bank-filter-select")
+                            .child(
+                                Select::new(&self.bank_filter_select)
+                                    .placeholder("Банк")
+                                    .small(),
+                            )
+                            .when_some(bank_tooltip.clone(), |el, tooltip| {
+                                el.tooltip(move |window, cx| {
+                                    ComponentTooltip::new(tooltip.clone()).build(window, cx)
+                                })
+                            })
                             .into_any_element(),
                     ))
                     .child(filter(
                         "Платёжная карта",
                         260.0,
-                        Select::new(&self.card_filter_select)
-                            .placeholder("Платёжная карта")
-                            .small()
+                        div()
+                            .id("card-filter-select")
+                            .child(
+                                Select::new(&self.card_filter_select)
+                                    .placeholder("Платёжная карта")
+                                    .small(),
+                            )
+                            .when_some(card_tooltip.clone(), |el, tooltip| {
+                                el.tooltip(move |window, cx| {
+                                    ComponentTooltip::new(tooltip.clone()).build(window, cx)
+                                })
+                            })
                             .into_any_element(),
                     ))
                     .child(filter(

@@ -32,7 +32,7 @@ Shared compact DatePicker controls retain previous/next-month arrow navigation a
 - Income filters appear above the table and wrap onto additional lines when they do not fit; horizontal scrolling is not used. Controls are Small, each control has a label above it, and Search has a Search icon suffix. Expenses uses the same presentation.
 - The filter order is `Поиск`, `Период`, start date (`С`), end date (`По`), category, bank, payment card, currency, and (on Expenses only) expense place.
 - Filter groups and wrapped rows have a small, consistent gap for visual separation.
-- Category filter options show the full hierarchical category path in a tooltip when hovered in the dropdown; the selected value also shows the full path in a tooltip. Long labels remain visually truncated by the Select control.
+- Category filter options show the full hierarchical category path in a tooltip when hovered in the dropdown; the selected value also shows the full path in a tooltip. Bank and payment-card options likewise show their full labels in the dropdown and on the selected value. Long labels remain visually truncated by the Select control.
 - `Применить` and `Сбросить фильтры` buttons on Income and Expenses use Small size and share a bottom row aligned to the right of the filters.
 - Search text and date edits do not reload the list on their own. Use `Применить` to apply them.
 - The date filters use compact DatePicker controls. The `Период` selector defaults to `Весь период`. Selecting it clears both dates; selecting year, quarter, month, week (Monday through Sunday), or day fills both controls using the current local calendar, with inclusive boundaries. Users can choose either date afterward. Use `Применить` to apply the selected range.
