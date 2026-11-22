@@ -19,7 +19,7 @@ use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{
-    Column, ColumnFixed, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
+    Column, ColumnFixed, ColumnGroup, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
 };
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _, WindowExt as _,
@@ -34,16 +34,19 @@ const NO_CURRENCY_LABEL: &str = "валюта не указана";
 const RATE_WARNING: &str =
     "Условие сохраняется как возможность; приложение не подтверждает выполнение порога трат.";
 const DEFAULT_COLUMN_WIDTHS: [f32; 13] = [
-    140.0, 120.0, 90.0, 110.0, 100.0, 120.0, 110.0, 100.0, 130.0, 140.0, 110.0, 220.0, 160.0,
+    140.0, 120.0, 90.0, 110.0, 100.0, 120.0, 100.0, 110.0, 130.0, 140.0, 110.0, 220.0, 160.0,
 ];
 const ACTIONS_COLUMN_WIDTH: f32 = 160.0;
 const MIN_COLUMN_WIDTH: f32 = 60.0;
 const MAX_COLUMN_WIDTH: f32 = 1200.0;
-const CARDS_COLUMN_WIDTHS_KEY: &str = "table_columns.payment_documents";
+const CARDS_COLUMN_WIDTHS_KEY: &str = "table_columns.payment_documents.v2";
+const LEGACY_CARDS_COLUMN_WIDTHS_KEY: &str = "table_columns.payment_documents";
 const COL_NAME: usize = 0;
 const COL_BANK: usize = 1;
 const COL_SYSTEM: usize = 2;
 const COL_AMOUNT: usize = 4;
+const COL_GRACE_PERIOD: usize = 6;
+const COL_NEXT_PAYMENT_DATE: usize = 7;
 const COL_NEXT_PAYMENT: usize = 8;
 const COL_SAVINGS: usize = 11;
 const COL_ACTIONS: usize = 12;
@@ -54,16 +57,30 @@ const HEADERS: [&str; 13] = [
     "Тип",
     "Сумма",
     "Валюта",
-    "Дата следующего платежа",
     "Льгота, дни",
-    "Размер след. платежа",
+    "Дата",
+    "Размер",
     "Условие ставки",
     "Минимум трат",
     "Связанные накопления",
     "Действия",
 ];
+const NEXT_PAYMENT_GROUP_LABEL: &str = "Следующий платёж";
+const NEXT_PAYMENT_GROUP_SPAN: usize = 2;
 
 type Choice = Entity<SelectState<Vec<SharedString>>>;
+
+/// Группа «Следующий платёж» объединяет колонки «Дата» и «Размер».
+/// Пустые группы нужны, чтобы сохранить позиции всех остальных колонок,
+/// включая закреплённую колонку «Действия».
+fn next_payment_group_headers() -> Vec<Vec<ColumnGroup>> {
+    vec![vec![
+        ColumnGroup::new("", COL_NEXT_PAYMENT_DATE),
+        ColumnGroup::new(NEXT_PAYMENT_GROUP_LABEL, NEXT_PAYMENT_GROUP_SPAN),
+        ColumnGroup::new("", COL_SAVINGS - COL_NEXT_PAYMENT),
+        ColumnGroup::new("", COL_ACTIONS - COL_SAVINGS),
+    ]]
+}
 
 fn choice(
     items: Vec<String>,
@@ -1154,10 +1171,33 @@ fn column_widths_with_fixed_actions(mut widths: Vec<f32>) -> Vec<f32> {
     widths
 }
 
+fn parse_saved_column_widths(value: &str) -> Option<Vec<f32>> {
+    parse_column_widths(value).map(column_widths_with_fixed_actions)
+}
+
+/// Ширины сохранялись по индексам; после перестановки колонок возвращаем каждой её ширину.
+fn migrate_legacy_column_widths(mut widths: Vec<f32>) -> Vec<f32> {
+    widths.swap(COL_GRACE_PERIOD, COL_NEXT_PAYMENT_DATE);
+    widths
+}
+
 fn load_column_widths(database: &Database) -> Vec<f32> {
     match finance_db::get_app_setting(database, CARDS_COLUMN_WIDTHS_KEY) {
-        Ok(Some(value)) => parse_column_widths(&value)
-            .map(column_widths_with_fixed_actions)
+        Ok(Some(value)) => {
+            return parse_saved_column_widths(&value).unwrap_or_else(|| {
+                eprintln!(
+                    "Некорректная сохранённая ширина колонок карт; использованы значения по умолчанию"
+                );
+                DEFAULT_COLUMN_WIDTHS.to_vec()
+            });
+        }
+        Ok(None) => {}
+        Err(error) => eprintln!("Не удалось прочитать ширину колонок карт: {error}"),
+    }
+
+    match finance_db::get_app_setting(database, LEGACY_CARDS_COLUMN_WIDTHS_KEY) {
+        Ok(Some(value)) => parse_saved_column_widths(&value)
+            .map(migrate_legacy_column_widths)
             .unwrap_or_else(|| {
                 eprintln!(
                     "Некорректная сохранённая ширина колонок карт; использованы значения по умолчанию"
@@ -1246,6 +1286,10 @@ impl TableDelegate for CardsTable {
 
     fn rows_count(&self, _: &App) -> usize {
         self.rows.len()
+    }
+
+    fn group_headers(&self, _: &App) -> Option<Vec<Vec<ColumnGroup>>> {
+        Some(next_payment_group_headers())
     }
 
     fn render_th(
@@ -1342,15 +1386,15 @@ impl TableDelegate for CardsTable {
                     .map_or(NO_CURRENCY_LABEL, Currency::code)
                     .to_owned(),
             ),
-            6 => text(
-                document
-                    .due_date
-                    .map_or_else(String::new, |d| d.format(DATE_FORMAT).to_string()),
-            ),
-            7 => text(
+            COL_GRACE_PERIOD => text(
                 document
                     .grace_period_days
                     .map_or_else(String::new, |d| d.to_string()),
+            ),
+            COL_NEXT_PAYMENT_DATE => text(
+                document
+                    .due_date
+                    .map_or_else(String::new, |d| d.format(DATE_FORMAT).to_string()),
             ),
             COL_NEXT_PAYMENT => text(
                 document
@@ -1503,9 +1547,11 @@ mod tests {
 
     use super::{
         build_details, currency_from_row, currency_row, format_column_widths, load_column_widths,
-        parse_column_widths, sort_cards, CardInput, Currency, Database, PaymentCardType,
-        PaymentDocument, PaymentSystem, ACTIONS_COLUMN_WIDTH, COL_ACTIONS, COL_AMOUNT, COL_BANK,
-        COL_NAME, COL_SYSTEM, DEFAULT_COLUMN_WIDTHS,
+        next_payment_group_headers, parse_column_widths, sort_cards, CardInput, Currency, Database,
+        PaymentCardType, PaymentDocument, PaymentSystem, ACTIONS_COLUMN_WIDTH, COL_ACTIONS,
+        COL_AMOUNT, COL_BANK, COL_GRACE_PERIOD, COL_NAME, COL_NEXT_PAYMENT, COL_NEXT_PAYMENT_DATE,
+        COL_SYSTEM, DEFAULT_COLUMN_WIDTHS, HEADERS, LEGACY_CARDS_COLUMN_WIDTHS_KEY,
+        NEXT_PAYMENT_GROUP_LABEL, NEXT_PAYMENT_GROUP_SPAN,
     };
 
     fn database_with_bank() -> Database {
@@ -1745,6 +1791,53 @@ mod tests {
         assert_eq!(parse_column_widths("100,200"), None);
         assert_eq!(parse_column_widths(&text.replacen("140", "5", 1)), None);
         assert_eq!(parse_column_widths(&text.replacen("140", "abc", 1)), None);
+    }
+
+    #[test]
+    fn next_payment_header_groups_date_and_amount() {
+        assert_eq!(HEADERS[COL_GRACE_PERIOD], "Льгота, дни");
+        assert_eq!(HEADERS[COL_NEXT_PAYMENT_DATE], "Дата");
+        assert_eq!(HEADERS[COL_NEXT_PAYMENT], "Размер");
+
+        let rows = next_payment_group_headers();
+        assert_eq!(rows.len(), 1);
+        let groups = &rows[0];
+        assert_eq!(
+            groups.iter().map(|group| group.span).sum::<usize>(),
+            HEADERS.len()
+        );
+
+        let grouped_from: usize = groups
+            .iter()
+            .take_while(|group| group.label.is_empty())
+            .map(|group| group.span)
+            .sum();
+        assert_eq!(grouped_from, COL_NEXT_PAYMENT_DATE);
+        assert_eq!(groups[1].label, NEXT_PAYMENT_GROUP_LABEL);
+        assert_eq!(groups[1].span, NEXT_PAYMENT_GROUP_SPAN);
+    }
+
+    #[test]
+    fn legacy_column_widths_follow_swapped_columns() {
+        let database = database_with_bank();
+        let mut legacy_widths = DEFAULT_COLUMN_WIDTHS;
+        legacy_widths[COL_GRACE_PERIOD] = 175.0;
+        legacy_widths[COL_NEXT_PAYMENT_DATE] = 195.0;
+        finance_db::set_app_setting(
+            &database,
+            LEGACY_CARDS_COLUMN_WIDTHS_KEY,
+            &format_column_widths(&legacy_widths),
+        )
+        .unwrap();
+
+        let widths = load_column_widths(&database);
+
+        assert_eq!(widths[COL_GRACE_PERIOD], 195.0);
+        assert_eq!(widths[COL_NEXT_PAYMENT_DATE], 175.0);
+        assert_eq!(
+            widths[COL_NEXT_PAYMENT],
+            DEFAULT_COLUMN_WIDTHS[COL_NEXT_PAYMENT]
+        );
     }
 
     #[test]
