@@ -18,6 +18,31 @@ impl TransactionKind {
     }
 }
 
+/// Фильтр операции по способу получения/списания через платёжную карту.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PaymentDocumentFilter {
+    /// Все операции, независимо от наличия карты.
+    #[default]
+    All,
+    /// Только операции без привязанной карты.
+    WithoutCard,
+    /// Только операции с указанной картой.
+    Card(i64),
+}
+
+impl PaymentDocumentFilter {
+    pub const fn card_id(self) -> Option<i64> {
+        match self {
+            Self::Card(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    pub const fn is_active(self) -> bool {
+        !matches!(self, Self::All)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Currency {
     Rub,

@@ -9,9 +9,9 @@ use finance_core::{
     canonical_amount, rebase_exchange_rate, validate_currency_code, validate_exchange_rate,
     AnalysisTransaction, Bank, Category, Currency, CurrencyDefinition, ExpensePlace,
     FinancialTransaction, InterestDestination, LinkedSavingsAccount, PaymentCardType,
-    PaymentDocument, PaymentDocumentDetails, PaymentSystem, SavingsAccount, SavingsDetails,
-    SavingsTerm, TransactionAmount, TransactionKind, TransferDetails, TransferEndpoint,
-    TransferOperationType, TransferRecord,
+    PaymentDocument, PaymentDocumentDetails, PaymentDocumentFilter, PaymentSystem, SavingsAccount,
+    SavingsDetails, SavingsTerm, TransactionAmount, TransactionKind, TransferDetails,
+    TransferEndpoint, TransferOperationType, TransferRecord,
 };
 use rusqlite::backup::Backup;
 use rusqlite::{
@@ -790,7 +790,7 @@ pub fn list_transactions(
         currency,
         search,
         None,
-        None,
+        PaymentDocumentFilter::All,
     )
 }
 
@@ -808,7 +808,7 @@ pub fn list_transactions_filtered(
     currency: Option<Currency>,
     search: &str,
     bank_id: Option<i64>,
-    payment_document_id: Option<i64>,
+    payment_document_filter: PaymentDocumentFilter,
 ) -> Result<Vec<FinancialTransaction>, DbError> {
     list_transactions_filtered_by_place(
         connection,
@@ -819,7 +819,7 @@ pub fn list_transactions_filtered(
         currency,
         search,
         bank_id,
-        payment_document_id,
+        payment_document_filter,
         None,
     )
 }
@@ -838,7 +838,7 @@ pub fn list_transactions_filtered_by_place(
     currency: Option<Currency>,
     search: &str,
     bank_id: Option<i64>,
-    payment_document_id: Option<i64>,
+    payment_document_filter: PaymentDocumentFilter,
     expense_place_id: Option<i64>,
 ) -> Result<Vec<FinancialTransaction>, DbError> {
     let (table, categories) = transaction_tables(kind);
@@ -871,12 +871,21 @@ pub fn list_transactions_filtered_by_place(
     let currency_param = 3 + cat_count;
     let bank_param = currency_param + 1;
     let card_param = bank_param + 1;
-    let place_param = card_param + 1;
+    // Плейсхолдер карты добавляется в SQL только для фильтра по конкретной карте.
+    let place_param = match payment_document_filter {
+        PaymentDocumentFilter::Card(_) => card_param + 1,
+        _ => card_param,
+    };
     let place_filter_sql = match kind {
         TransactionKind::Income => "1=1".to_owned(),
         TransactionKind::Expense => {
             format!("(?{place_param} IS NULL OR t.expense_place_id = ?{place_param})")
         }
+    };
+    let card_filter_sql = match payment_document_filter {
+        PaymentDocumentFilter::All => "1=1".to_owned(),
+        PaymentDocumentFilter::WithoutCard => "t.payment_document_id IS NULL".to_owned(),
+        PaymentDocumentFilter::Card(_) => format!("t.payment_document_id = ?{card_param}"),
     };
     let sql = format!(
         "SELECT t.id, t.date, t.category_id, c.name, t.amount, t.currency, t.comment,
@@ -892,13 +901,14 @@ pub fn list_transactions_filtered_by_place(
                SELECT 1 FROM payment_documents AS document
                WHERE document.id = t.payment_document_id AND document.bank_id = ?{bank_param}
            ))
-           AND (?{card_param} IS NULL OR t.payment_document_id = ?{card_param})
+           AND ({card_filter_sql})
            AND ({place_filter_sql})
          ORDER BY t.date DESC, t.id DESC"
     );
     let from_str = from.map(|date| date.format("%Y-%m-%d").to_string());
     let to_str = to.map(|date| date.format("%Y-%m-%d").to_string());
     let currency_str = currency.map(Currency::code);
+    let payment_document_id = payment_document_filter.card_id();
     let mut params: Vec<&dyn rusqlite::types::ToSql> = vec![&from_str, &to_str];
     if let Some(ids) = &category_ids {
         for id in ids {
@@ -907,7 +917,9 @@ pub fn list_transactions_filtered_by_place(
     }
     params.push(&currency_str);
     params.push(&bank_id);
-    params.push(&payment_document_id);
+    if let PaymentDocumentFilter::Card(_) = payment_document_filter {
+        params.push(&payment_document_id);
+    }
     if matches!(kind, TransactionKind::Expense) {
         params.push(&expense_place_id);
     }
@@ -3133,9 +3145,9 @@ mod tests {
     use chrono::NaiveDate;
     use finance_core::{
         summarize_analysis, Currency, CurrencyDefinition, DomainError, ExpensePlace,
-        InterestDestination, PaymentCardType, PaymentDocumentDetails, PaymentSystem, PriceFilter,
-        SavingsDetails, SavingsTerm, TransactionKind, TransferDetails, TransferEndpoint,
-        TransferOperationType,
+        InterestDestination, PaymentCardType, PaymentDocumentDetails, PaymentDocumentFilter,
+        PaymentSystem, PriceFilter, SavingsDetails, SavingsTerm, TransactionKind, TransferDetails,
+        TransferEndpoint, TransferOperationType,
     };
     use rusqlite::{params, Connection, OpenFlags};
     use rust_decimal::Decimal;
@@ -5419,7 +5431,7 @@ mod tests {
             None,
             "",
             None,
-            None,
+            PaymentDocumentFilter::All,
         )
         .unwrap();
         assert_eq!(unfiltered.len(), 3);
@@ -5433,10 +5445,11 @@ mod tests {
             None,
             "",
             Some(first_bank_id),
-            None,
+            PaymentDocumentFilter::All,
         )
         .unwrap();
         assert_eq!(bank_filtered.len(), 1);
+        assert_eq!(bank_filtered[0].payment_document_id, Some(first_card_id));
 
         let card_filtered = list_transactions_filtered(
             &connection,
@@ -5447,11 +5460,41 @@ mod tests {
             None,
             "",
             None,
-            Some(second_card_id),
+            PaymentDocumentFilter::Card(second_card_id),
         )
         .unwrap();
         assert_eq!(card_filtered.len(), 1);
         assert_eq!(card_filtered[0].payment_document_id, Some(second_card_id));
+
+        let without_card = list_transactions_filtered(
+            &connection,
+            TransactionKind::Income,
+            None,
+            None,
+            None,
+            None,
+            "",
+            None,
+            PaymentDocumentFilter::WithoutCard,
+        )
+        .unwrap();
+        assert_eq!(without_card.len(), 1);
+        assert_eq!(without_card[0].comment, "Без карты");
+        assert_eq!(without_card[0].payment_document_id, None);
+
+        let bank_and_no_card = list_transactions_filtered(
+            &connection,
+            TransactionKind::Income,
+            None,
+            None,
+            None,
+            None,
+            "",
+            Some(first_bank_id),
+            PaymentDocumentFilter::WithoutCard,
+        )
+        .unwrap();
+        assert!(bank_and_no_card.is_empty());
 
         let mismatched_filters = list_transactions_filtered(
             &connection,
@@ -5462,11 +5505,10 @@ mod tests {
             None,
             "",
             Some(first_bank_id),
-            Some(second_card_id),
+            PaymentDocumentFilter::Card(second_card_id),
         )
         .unwrap();
         assert!(mismatched_filters.is_empty());
-        assert_eq!(bank_filtered[0].payment_document_id, Some(first_card_id));
     }
 
     #[test]
@@ -5483,7 +5525,7 @@ mod tests {
             None,
             "",
             None,
-            None,
+            PaymentDocumentFilter::All,
         )
         .unwrap();
         assert_eq!(unfiltered.len(), 3);
@@ -5497,7 +5539,7 @@ mod tests {
             None,
             "",
             Some(first_bank_id),
-            None,
+            PaymentDocumentFilter::All,
         )
         .unwrap();
         assert_eq!(bank_filtered.len(), 1);
@@ -5512,11 +5554,27 @@ mod tests {
             None,
             "",
             None,
-            Some(second_card_id),
+            PaymentDocumentFilter::Card(second_card_id),
         )
         .unwrap();
         assert_eq!(card_filtered.len(), 1);
         assert_eq!(card_filtered[0].payment_document_id, Some(second_card_id));
+
+        let without_card = list_transactions_filtered(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            None,
+            None,
+            None,
+            "",
+            None,
+            PaymentDocumentFilter::WithoutCard,
+        )
+        .unwrap();
+        assert_eq!(without_card.len(), 1);
+        assert_eq!(without_card[0].comment, "Без карты");
+        assert_eq!(without_card[0].payment_document_id, None);
 
         let mismatched_filters = list_transactions_filtered(
             &connection,
@@ -5527,7 +5585,7 @@ mod tests {
             None,
             "",
             Some(first_bank_id),
-            Some(second_card_id),
+            PaymentDocumentFilter::Card(second_card_id),
         )
         .unwrap();
         assert!(mismatched_filters.is_empty());
@@ -5825,7 +5883,7 @@ mod tests {
             None,
             "",
             None,
-            None,
+            PaymentDocumentFilter::All,
             Some(first_place_id),
         )
         .unwrap();

@@ -9,7 +9,7 @@ use chrono::{Local, NaiveDate};
 use finance_core::{
     parse_amount_expression, summarize_transaction_balance, Bank, Category, Currency,
     CurrencyDefinition, ExpensePlace, FinancialTransaction, PaymentCardType, PaymentDocument,
-    TransactionBalance, TransactionKind,
+    PaymentDocumentFilter, TransactionBalance, TransactionKind,
 };
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -39,6 +39,8 @@ use super::support::{date_period_range, DatePeriod, DatePeriodRange};
 
 const DATE_FORMAT: &str = "%Y-%m-%d";
 const NONE_LABEL: &str = "Все";
+const NO_CARD_LABEL: &str = "Не по карте";
+const PAYMENT_FILTER_LABEL: &str = "Способ получения";
 
 type Choice = Entity<SelectState<Vec<SharedString>>>;
 type CategoryChoice = Entity<SelectState<Vec<CategoryFilterItem>>>;
@@ -204,15 +206,50 @@ fn cards_for_bank(cards: &[PaymentDocument], bank_id: Option<i64>) -> Vec<&Payme
 
 fn update_bank_filter_selection(
     bank_filter: &mut Option<i64>,
-    card_filter: &mut Option<i64>,
+    card_filter: &mut PaymentDocumentFilter,
     next_bank: Option<i64>,
 ) -> bool {
     if *bank_filter == next_bank {
         return false;
     }
     *bank_filter = next_bank;
-    *card_filter = None;
+    *card_filter = PaymentDocumentFilter::All;
     true
+}
+
+/// Индекс 0 — «Все», индекс 1 — «Не по карте», остальные — карты банка.
+fn card_filter_from_index(index: usize, card_ids: &[i64]) -> PaymentDocumentFilter {
+    match index {
+        0 => PaymentDocumentFilter::All,
+        1 => PaymentDocumentFilter::WithoutCard,
+        index => card_ids
+            .get(index - 2)
+            .map_or(PaymentDocumentFilter::All, |id| {
+                PaymentDocumentFilter::Card(*id)
+            }),
+    }
+}
+
+fn card_filter_index(filter: PaymentDocumentFilter, card_ids: &[i64]) -> Option<usize> {
+    match filter {
+        PaymentDocumentFilter::All => Some(0),
+        PaymentDocumentFilter::WithoutCard => Some(1),
+        PaymentDocumentFilter::Card(id) => card_ids
+            .iter()
+            .position(|candidate| *candidate == id)
+            .map(|position| position + 2),
+    }
+}
+
+fn payment_filter_labels(cards: &[PaymentDocument], bank_filter: Option<i64>) -> Vec<String> {
+    std::iter::once(NONE_LABEL.to_owned())
+        .chain(std::iter::once(NO_CARD_LABEL.to_owned()))
+        .chain(
+            cards_for_bank(cards, bank_filter)
+                .into_iter()
+                .map(card_label),
+        )
+        .collect()
 }
 
 struct Form {
@@ -282,7 +319,7 @@ pub(crate) struct TransactionsPage {
     bank_filter: Option<i64>,
     bank_filter_ids: Vec<i64>,
     bank_filter_select: BankChoice,
-    card_filter: Option<i64>,
+    card_filter: PaymentDocumentFilter,
     card_filter_ids: Vec<i64>,
     card_filter_select: CardChoice,
     currency_filter: Option<Currency>,
@@ -306,7 +343,12 @@ impl TransactionsPage {
         let category_filter_select = category_choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
         let expense_place_filter_select = choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
         let bank_filter_select = bank_choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
-        let card_filter_select = card_choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
+        let card_filter_select = card_choice(
+            vec![NONE_LABEL.to_owned(), NO_CARD_LABEL.to_owned()],
+            0,
+            window,
+            cx,
+        );
         let currency_filter_select = choice(Self::currency_filter_labels(), 0, window, cx);
         let period_select = choice(Self::period_labels(), 0, window, cx);
 
@@ -389,15 +431,14 @@ impl TransactionsPage {
             window,
             |this: &mut Self, _, event: &SelectEvent<Vec<CardFilterItem>>, _, cx| {
                 let SelectEvent::Confirm(value) = event;
-                this.card_filter = value
-                    .as_deref()
-                    .and_then(|label| {
-                        this.card_filter_labels()
-                            .iter()
-                            .position(|item| item.as_str() == label)
-                    })
-                    .and_then(|position| position.checked_sub(1))
-                    .and_then(|position| this.card_filter_ids.get(position).copied());
+                let selected_index = value.as_deref().and_then(|label| {
+                    this.card_filter_labels()
+                        .iter()
+                        .position(|item| item.as_str() == label)
+                });
+                this.card_filter = selected_index.map_or(PaymentDocumentFilter::All, |index| {
+                    card_filter_from_index(index, &this.card_filter_ids)
+                });
                 this.refresh(cx);
             },
         ));
@@ -468,7 +509,7 @@ impl TransactionsPage {
             bank_filter: None,
             bank_filter_ids: Vec::new(),
             bank_filter_select,
-            card_filter: None,
+            card_filter: PaymentDocumentFilter::All,
             card_filter_ids: Vec::new(),
             card_filter_select,
             currency_filter: None,
@@ -526,13 +567,7 @@ impl TransactionsPage {
     }
 
     fn card_filter_labels(&self) -> Vec<String> {
-        std::iter::once(NONE_LABEL.to_owned())
-            .chain(
-                cards_for_bank(&self.filter_cards, self.bank_filter)
-                    .into_iter()
-                    .map(card_label),
-            )
-            .collect()
+        payment_filter_labels(&self.filter_cards, self.bank_filter)
     }
 
     fn save_column_widths(&mut self, widths: &[Pixels], cx: &mut Context<Self>) {
@@ -609,14 +644,15 @@ impl TransactionsPage {
             .is_some_and(|bank_id| !self.banks.iter().any(|bank| bank.id == bank_id))
         {
             self.bank_filter = None;
-            self.card_filter = None;
+            self.card_filter = PaymentDocumentFilter::All;
         }
-        if self.card_filter.is_some_and(|card_id| {
-            !cards_for_bank(&self.filter_cards, self.bank_filter)
+        if let PaymentDocumentFilter::Card(card_id) = self.card_filter {
+            if !cards_for_bank(&self.filter_cards, self.bank_filter)
                 .iter()
                 .any(|card| card.id == card_id)
-        }) {
-            self.card_filter = None;
+            {
+                self.card_filter = PaymentDocumentFilter::All;
+            }
         }
         if self
             .expense_place_filter
@@ -677,20 +713,11 @@ impl TransactionsPage {
     fn sync_card_filter_options(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let available_cards = cards_for_bank(&self.filter_cards, self.bank_filter);
         self.card_filter_ids = available_cards.iter().map(|card| card.id).collect();
-        let selected_card_index = match self.card_filter {
-            Some(card_id) => self
-                .card_filter_ids
-                .iter()
-                .position(|candidate| *candidate == card_id)
-                .map_or_else(
-                    || {
-                        self.card_filter = None;
-                        0
-                    },
-                    |position| position + 1,
-                ),
-            None => 0,
-        };
+        let selected_card_index = card_filter_index(self.card_filter, &self.card_filter_ids)
+            .unwrap_or_else(|| {
+                self.card_filter = PaymentDocumentFilter::All;
+                0
+            });
         let items: Vec<CardFilterItem> = self
             .card_filter_labels()
             .into_iter()
@@ -788,7 +815,7 @@ impl TransactionsPage {
             || self.category_filter.is_some()
             || self.expense_place_filter.is_some()
             || self.bank_filter.is_some()
-            || self.card_filter.is_some()
+            || self.card_filter.is_active()
             || self.currency_filter.is_some()
     }
 
@@ -803,7 +830,7 @@ impl TransactionsPage {
         self.category_filter = None;
         self.expense_place_filter = None;
         self.bank_filter = None;
-        self.card_filter = None;
+        self.card_filter = PaymentDocumentFilter::All;
         self.currency_filter = None;
         self.sync_card_filter_options(window, cx);
         self.category_filter_select.update(cx, |state, cx| {
@@ -1342,7 +1369,7 @@ impl TransactionsPage {
             .selected_index(cx)
             .map(|ix| ix.row)
             .and_then(|row| self.card_filter_labels().get(row).cloned())
-            .filter(|label| label != NONE_LABEL);
+            .filter(|label| label != NONE_LABEL && label != NO_CARD_LABEL);
 
         div()
             .flex()
@@ -1422,13 +1449,13 @@ impl TransactionsPage {
                             .into_any_element(),
                     ))
                     .child(filter(
-                        "Платёжная карта",
+                        PAYMENT_FILTER_LABEL,
                         260.0,
                         div()
                             .id("card-filter-select")
                             .child(
                                 Select::new(&self.card_filter_select)
-                                    .placeholder("Платёжная карта")
+                                    .placeholder(PAYMENT_FILTER_LABEL)
                                     .small(),
                             )
                             .when_some(card_tooltip.clone(), |el, tooltip| {
@@ -2266,15 +2293,18 @@ impl Render for TransactionsPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        cards_for_bank, column_widths_with_fixed_actions, comment_preview, format_column_widths,
-        parse_column_widths, sort_transactions, update_bank_filter_selection, FormValues,
-        ACTIONS_COLUMN_WIDTH, COL_INCOME_ACTIONS,
+        card_filter_from_index, card_filter_index, cards_for_bank,
+        column_widths_with_fixed_actions, comment_preview, format_column_widths,
+        parse_column_widths, payment_filter_labels, sort_transactions,
+        update_bank_filter_selection, FormValues, ACTIONS_COLUMN_WIDTH, COL_INCOME_ACTIONS,
+        NONE_LABEL, NO_CARD_LABEL, PAYMENT_FILTER_LABEL,
     };
     use crate::gpui::support::card_label;
     use chrono::NaiveDate;
     use finance_core::FinancialTransaction;
     use finance_core::{
-        Currency, PaymentCardType, PaymentDocument, PaymentSystem, TransactionKind,
+        Currency, PaymentCardType, PaymentDocument, PaymentDocumentFilter, PaymentSystem,
+        TransactionKind,
     };
     use gpui_kit::component::table::ColumnSort;
     use rust_decimal::Decimal;
@@ -2372,13 +2402,65 @@ mod tests {
     #[test]
     fn changing_bank_filter_clears_the_selected_card() {
         let mut bank_filter = Some(1);
-        let mut card_filter = Some(10);
+        let mut card_filter = PaymentDocumentFilter::Card(10);
 
         let changed = update_bank_filter_selection(&mut bank_filter, &mut card_filter, Some(2));
 
         assert!(changed);
         assert_eq!(bank_filter, Some(2));
-        assert_eq!(card_filter, None);
+        assert_eq!(card_filter, PaymentDocumentFilter::All);
+    }
+
+    #[test]
+    fn payment_filter_labels_place_no_card_after_all() {
+        let card = payment_document(10, None, PaymentCardType::Debit, Some(Currency::Rub));
+
+        let labels = payment_filter_labels(&[card], None);
+
+        assert_eq!(labels.len(), 3);
+        assert_eq!(labels[0], NONE_LABEL);
+        assert_eq!(labels[1], NO_CARD_LABEL);
+        assert_eq!(PAYMENT_FILTER_LABEL, "Способ получения");
+        assert!(labels[2].contains("MIR #10"));
+    }
+
+    #[test]
+    fn card_filter_indexes_map_all_three_options() {
+        let card_ids = [10, 11];
+
+        assert_eq!(
+            card_filter_from_index(0, &card_ids),
+            PaymentDocumentFilter::All
+        );
+        assert_eq!(
+            card_filter_from_index(1, &card_ids),
+            PaymentDocumentFilter::WithoutCard
+        );
+        assert_eq!(
+            card_filter_from_index(2, &card_ids),
+            PaymentDocumentFilter::Card(10)
+        );
+        assert_eq!(
+            card_filter_from_index(3, &card_ids),
+            PaymentDocumentFilter::Card(11)
+        );
+        assert_eq!(
+            card_filter_from_index(9, &card_ids),
+            PaymentDocumentFilter::All
+        );
+
+        for filter in [
+            PaymentDocumentFilter::All,
+            PaymentDocumentFilter::WithoutCard,
+            PaymentDocumentFilter::Card(10),
+        ] {
+            let index = card_filter_index(filter, &card_ids).expect("filter has an option");
+            assert_eq!(card_filter_from_index(index, &card_ids), filter);
+        }
+        assert_eq!(
+            card_filter_index(PaymentDocumentFilter::Card(99), &card_ids),
+            None
+        );
     }
 
     #[test]
