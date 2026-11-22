@@ -22,10 +22,12 @@ use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{
     Column, ColumnFixed, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
 };
+use gpui_kit::component::tooltip::Tooltip as ComponentTooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _, WindowExt as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
@@ -1176,6 +1178,18 @@ impl TransactionsPage {
                 .child(control)
         };
 
+        // Полный текст выбранной категории для tooltip
+        let category_tooltip = self
+            .category_filter_select
+            .read(cx)
+            .selected_index(cx)
+            .map(|ix| ix.row)
+            .and_then(|row| {
+                let labels = self.category_filter_labels();
+                labels.get(row).cloned()
+            })
+            .filter(|label| label != NONE_LABEL);
+
         div()
             .flex()
             .flex_col()
@@ -1222,9 +1236,18 @@ impl TransactionsPage {
                     .child(filter(
                         "Категория",
                         260.0,
-                        Select::new(&self.category_filter_select)
-                            .placeholder("Категория")
-                            .small()
+                        div()
+                            .id("category-filter-select")
+                            .child(
+                                Select::new(&self.category_filter_select)
+                                    .placeholder("Категория")
+                                    .small(),
+                            )
+                            .when_some(category_tooltip.clone(), |el, tooltip| {
+                                el.tooltip(move |window, cx| {
+                                    ComponentTooltip::new(tooltip.clone()).build(window, cx)
+                                })
+                            })
                             .into_any_element(),
                     ))
                     .child(filter(

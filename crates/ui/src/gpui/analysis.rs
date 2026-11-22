@@ -19,10 +19,12 @@ use gpui_kit::component::dialog::Dialog;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{Column, ColumnSort, DataTable, TableDelegate, TableState};
+use gpui_kit::component::tooltip::Tooltip as ComponentTooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _, WindowExt as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::prelude::ToPrimitive;
 
@@ -821,9 +823,27 @@ impl AnalysisPage {
                                 |page, window, cx| page.clear_category(true, window, cx),
                             ))
                         }),
-                        Select::new(&self.income.select)
-                            .placeholder(NONE_LABEL)
-                            .small()
+                        div()
+                            .id("income-category-select")
+                            .child(
+                                Select::new(&self.income.select)
+                                    .placeholder(NONE_LABEL)
+                                    .small(),
+                            )
+                            .when_some(
+                                self.income
+                                    .select
+                                    .read(cx)
+                                    .selected_index(cx)
+                                    .map(|ix| ix.row)
+                                    .and_then(|row| self.income.labels.get(row).cloned())
+                                    .filter(|label| label != NONE_LABEL),
+                                |el, tooltip| {
+                                    el.tooltip(move |window, cx| {
+                                        ComponentTooltip::new(tooltip.clone()).build(window, cx)
+                                    })
+                                },
+                            )
                             .into_any_element(),
                     ))
                     .child(filter(
@@ -837,9 +857,27 @@ impl AnalysisPage {
                                 |page, window, cx| page.clear_category(false, window, cx),
                             ))
                         }),
-                        Select::new(&self.expense.select)
-                            .placeholder(NONE_LABEL)
-                            .small()
+                        div()
+                            .id("expense-category-select")
+                            .child(
+                                Select::new(&self.expense.select)
+                                    .placeholder(NONE_LABEL)
+                                    .small(),
+                            )
+                            .when_some(
+                                self.expense
+                                    .select
+                                    .read(cx)
+                                    .selected_index(cx)
+                                    .map(|ix| ix.row)
+                                    .and_then(|row| self.expense.labels.get(row).cloned())
+                                    .filter(|label| label != NONE_LABEL),
+                                |el, tooltip| {
+                                    el.tooltip(move |window, cx| {
+                                        ComponentTooltip::new(tooltip.clone()).build(window, cx)
+                                    })
+                                },
+                            )
                             .into_any_element(),
                     )),
             )
