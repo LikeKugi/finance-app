@@ -18,7 +18,7 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::table::{
     Column, ColumnFixed, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
 };
@@ -41,6 +41,34 @@ const DATE_FORMAT: &str = "%Y-%m-%d";
 const NONE_LABEL: &str = "Все";
 
 type Choice = Entity<SelectState<Vec<SharedString>>>;
+type CategoryChoice = Entity<SelectState<Vec<CategoryFilterItem>>>;
+
+#[derive(Clone)]
+struct CategoryFilterItem {
+    id: usize,
+    label: String,
+}
+
+impl SelectItem for CategoryFilterItem {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone().into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.label
+    }
+
+    fn render(&self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let tooltip = self.label.clone();
+        div()
+            .id(("category-filter-item", self.id))
+            .w_full()
+            .tooltip(move |window, cx| ComponentTooltip::new(tooltip.clone()).build(window, cx))
+            .child(self.label.clone())
+    }
+}
 
 fn choice(
     items: Vec<String>,
@@ -49,6 +77,20 @@ fn choice(
     cx: &mut Context<TransactionsPage>,
 ) -> Choice {
     let items: Vec<SharedString> = items.into_iter().map(SharedString::from).collect();
+    cx.new(|cx| SelectState::new(items, Some(IndexPath::default().row(selected)), window, cx))
+}
+
+fn category_choice(
+    labels: Vec<String>,
+    selected: usize,
+    window: &mut Window,
+    cx: &mut Context<TransactionsPage>,
+) -> CategoryChoice {
+    let items: Vec<CategoryFilterItem> = labels
+        .into_iter()
+        .enumerate()
+        .map(|(id, label)| CategoryFilterItem { id, label })
+        .collect();
     cx.new(|cx| SelectState::new(items, Some(IndexPath::default().row(selected)), window, cx))
 }
 
@@ -149,7 +191,7 @@ pub(crate) struct TransactionsPage {
     to: Entity<DatePickerState>,
     category_filter: Option<i64>,
     category_filter_ids: Vec<i64>,
-    category_filter_select: Choice,
+    category_filter_select: CategoryChoice,
     expense_place_filter: Option<i64>,
     expense_place_filter_ids: Vec<i64>,
     expense_place_filter_select: Choice,
@@ -177,7 +219,7 @@ impl TransactionsPage {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Поиск"));
         let from = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
         let to = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
-        let category_filter_select = choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
+        let category_filter_select = category_choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
         let expense_place_filter_select = choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
         let bank_filter_select = choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
         let card_filter_select = choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
@@ -204,14 +246,14 @@ impl TransactionsPage {
         subscriptions.push(cx.subscribe_in(
             &category_filter_select,
             window,
-            |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+            |this: &mut Self, _, event: &SelectEvent<Vec<CategoryFilterItem>>, _, cx| {
                 let SelectEvent::Confirm(value) = event;
                 this.category_filter = value
-                    .as_ref()
+                    .as_deref()
                     .and_then(|label| {
                         this.category_filter_labels()
                             .iter()
-                            .position(|l| l == label.as_ref())
+                            .position(|l| l == label)
                     })
                     .and_then(|position| position.checked_sub(1))
                     .and_then(|position| this.category_filter_ids.get(position).copied());
@@ -443,7 +485,11 @@ impl TransactionsPage {
             .map(|(id, _)| id)
             .collect();
         let labels = self.category_filter_labels();
-        let items: Vec<SharedString> = labels.into_iter().map(SharedString::from).collect();
+        let items: Vec<CategoryFilterItem> = labels
+            .into_iter()
+            .enumerate()
+            .map(|(id, label)| CategoryFilterItem { id, label })
+            .collect();
         self.category_filter_select.update(cx, |state, cx| {
             state.set_items(items, window, cx);
         });
@@ -674,8 +720,10 @@ impl TransactionsPage {
         self.card_filter = None;
         self.currency_filter = None;
         self.sync_card_filter_options(window, cx);
+        self.category_filter_select.update(cx, |state, cx| {
+            state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
+        });
         for select in [
-            &self.category_filter_select,
             &self.expense_place_filter_select,
             &self.bank_filter_select,
             &self.card_filter_select,
