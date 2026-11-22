@@ -13,6 +13,7 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
+use gpui_kit::component::table::{Column, ColumnFixed, DataTable, TableDelegate, TableState};
 use gpui_kit::component::tooltip::Tooltip as ComponentTooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _, WindowExt as _,
@@ -30,9 +31,13 @@ use super::support::currency_rate_label;
 use super::transactions::comment_preview;
 
 const DATE_FORMAT: &str = "%Y-%m-%d";
-const ROW_HEIGHT: f32 = 36.0;
 const NO_PARENT_LABEL: &str = "Нет";
 const NO_PARENT_TOOLTIP: &str = "Без родительской категории";
+const VISIBLE_TABLE_ROWS: usize = 10;
+const TABLE_ROW_HEIGHT: f32 = 32.0;
+/// Высота таблицы: 10 строк данных плюс строка заголовка.
+const TABLE_HEIGHT: f32 = TABLE_ROW_HEIGHT * (VISIBLE_TABLE_ROWS as f32 + 1.0);
+const ACTIONS_WIDTH: f32 = 160.0;
 
 type ParentChoice = Entity<SelectState<Vec<ParentCategoryItem>>>;
 
@@ -65,6 +70,39 @@ impl SelectItem for ParentCategoryItem {
             .tooltip(move |window, cx| ComponentTooltip::new(tooltip.clone()).build(window, cx))
             .child(self.label.clone())
     }
+}
+
+#[derive(Clone)]
+struct CategoryRow {
+    category: Category,
+    depth: usize,
+}
+
+#[derive(Clone)]
+struct CurrencyRow {
+    currency: CurrencyDefinition,
+    rate_label: String,
+    used: bool,
+}
+
+struct CategoriesTable {
+    page: WeakEntity<DirectoriesPage>,
+    rows: Vec<CategoryRow>,
+}
+
+struct BanksTable {
+    page: WeakEntity<DirectoriesPage>,
+    rows: Vec<Bank>,
+}
+
+struct ExpensePlacesTable {
+    page: WeakEntity<DirectoriesPage>,
+    rows: Vec<ExpensePlace>,
+}
+
+struct CurrenciesTable {
+    page: WeakEntity<DirectoriesPage>,
+    rows: Vec<CurrencyRow>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -134,6 +172,10 @@ pub(crate) struct DirectoriesPage {
     bank_form: Option<BankForm>,
     expense_place_form: Option<ExpensePlaceForm>,
     currency_form: Option<CurrencyForm>,
+    categories_table: Entity<TableState<CategoriesTable>>,
+    banks_table: Entity<TableState<BanksTable>>,
+    expense_places_table: Entity<TableState<ExpensePlacesTable>>,
+    currencies_table: Entity<TableState<CurrenciesTable>>,
     prices: Entity<PricesSection>,
     _subscriptions: Vec<Subscription>,
 }
@@ -185,9 +227,96 @@ fn parent_category_options(
     options
 }
 
+fn directory_column(key: &'static str, name: &'static str, width: f32, actions: bool) -> Column {
+    let mut column = Column::new(key, name)
+        .width(px(width))
+        .min_width(px(width))
+        .max_width(px(width))
+        .resizable(false)
+        .movable(false)
+        .selectable(!actions);
+    if actions {
+        column = column.fixed(ColumnFixed::Right);
+    }
+    column
+}
+
+fn directory_cell(content: AnyElement, col_ix: usize, cx: &App) -> AnyElement {
+    let border = cx.theme().border;
+    div()
+        .w_full()
+        .h_full()
+        .flex()
+        .items_center()
+        .when(col_ix > 0, |cell| cell.border_l_1().border_color(border))
+        .child(content)
+        .into_any_element()
+}
+
 impl DirectoriesPage {
     pub(crate) fn new(database: Rc<Database>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let prices = cx.new(|cx| PricesSection::new(database.clone(), window, cx));
+        let page_ref = cx.entity().downgrade();
+        let categories_table = cx.new(|cx| {
+            TableState::new(
+                CategoriesTable {
+                    page: page_ref.clone(),
+                    rows: Vec::new(),
+                },
+                window,
+                cx,
+            )
+            .sortable(false)
+            .col_movable(false)
+            .col_resizable(false)
+            .row_selectable(false)
+            .col_selectable(false)
+        });
+        let banks_table = cx.new(|cx| {
+            TableState::new(
+                BanksTable {
+                    page: page_ref.clone(),
+                    rows: Vec::new(),
+                },
+                window,
+                cx,
+            )
+            .sortable(false)
+            .col_movable(false)
+            .col_resizable(false)
+            .row_selectable(false)
+            .col_selectable(false)
+        });
+        let expense_places_table = cx.new(|cx| {
+            TableState::new(
+                ExpensePlacesTable {
+                    page: page_ref.clone(),
+                    rows: Vec::new(),
+                },
+                window,
+                cx,
+            )
+            .sortable(false)
+            .col_movable(false)
+            .col_resizable(false)
+            .row_selectable(false)
+            .col_selectable(false)
+        });
+        let currencies_table = cx.new(|cx| {
+            TableState::new(
+                CurrenciesTable {
+                    page: page_ref.clone(),
+                    rows: Vec::new(),
+                },
+                window,
+                cx,
+            )
+            .sortable(false)
+            .col_movable(false)
+            .col_resizable(false)
+            .row_selectable(false)
+            .col_selectable(false)
+        });
         let mut page = Self {
             database,
             prices,
@@ -203,6 +332,10 @@ impl DirectoriesPage {
             bank_form: None,
             expense_place_form: None,
             currency_form: None,
+            categories_table,
+            banks_table,
+            expense_places_table,
+            currencies_table,
             _subscriptions: Vec::new(),
         };
         page.reload(window, cx);
@@ -253,8 +386,50 @@ impl DirectoriesPage {
                 cx.notify();
             }
         }
+        self.sync_tables(cx);
         self.prices
             .update(cx, |prices, cx| prices.reload_places(window, cx));
+    }
+
+    fn sync_tables(&mut self, cx: &mut Context<Self>) {
+        let category_rows = category_tree_rows(&self.categories)
+            .into_iter()
+            .map(|(index, depth)| CategoryRow {
+                category: self.categories[index].clone(),
+                depth,
+            })
+            .collect();
+        let primary_code = self
+            .currencies
+            .iter()
+            .find(|currency| currency.is_primary)
+            .map_or("—".to_owned(), |currency| currency.code.clone());
+        let currency_rows = self
+            .currencies
+            .iter()
+            .map(|currency| CurrencyRow {
+                rate_label: currency_rate_label(currency, &primary_code),
+                used: self.used_currencies.contains(&currency.code),
+                currency: currency.clone(),
+            })
+            .collect();
+
+        self.categories_table.update(cx, |table, cx| {
+            table.delegate_mut().rows = category_rows;
+            cx.notify();
+        });
+        self.banks_table.update(cx, |table, cx| {
+            table.delegate_mut().rows = self.banks.clone();
+            cx.notify();
+        });
+        self.expense_places_table.update(cx, |table, cx| {
+            table.delegate_mut().rows = self.expense_places.clone();
+            cx.notify();
+        });
+        self.currencies_table.update(cx, |table, cx| {
+            table.delegate_mut().rows = currency_rows;
+            cx.notify();
+        });
     }
 
     fn set_kind(&mut self, kind: TransactionKind, window: &mut Window, cx: &mut Context<Self>) {
@@ -762,85 +937,7 @@ impl DirectoriesPage {
 
     // ---- отрисовка ----
 
-    fn list(&self, has_rows: bool, cx: &App) -> Div {
-        div().flex().flex_col().when(has_rows, |list| {
-            list.border_1().border_color(cx.theme().border)
-        })
-    }
-
-    fn row(&self, id: impl Into<ElementId>, index: usize, cx: &App) -> Stateful<Div> {
-        div()
-            .id(id)
-            .flex()
-            .h(px(ROW_HEIGHT))
-            .items_center()
-            .when(index > 0, |row| {
-                row.border_t_1().border_color(cx.theme().border)
-            })
-            .when(index % 2 == 1, |row| row.bg(cx.theme().muted))
-    }
-
-    fn action_cell(&self, cx: &App) -> Div {
-        div()
-            .flex()
-            .flex_none()
-            .h_full()
-            .items_center()
-            .border_l_1()
-            .border_color(cx.theme().border)
-            .px_1()
-    }
-
-    fn render_categories(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = category_tree_rows(&self.categories);
-        let mut list = self.list(!rows.is_empty(), cx);
-        for (position, (index, depth)) in rows.into_iter().enumerate() {
-            let category = self.categories[index].clone();
-            let id = category.id;
-            let prefix = if depth == 0 {
-                String::new()
-            } else {
-                format!("{}> ", "  ".repeat(depth))
-            };
-            let suffix = if category.is_active {
-                ""
-            } else {
-                " (неактивна)"
-            };
-            let label = format!("{prefix}{}{suffix}", category.name);
-            let subject = format!("категорию «{}»", category.name);
-            let edit = category.clone();
-            list = list.child(
-                self.row(("category", id as usize), position, cx)
-                    .child(div().flex_1().px_2().child(label))
-                    .child(
-                        self.action_cell(cx).child(
-                            Button::new(("category-edit", id as usize))
-                                .xsmall()
-                                .label("Изменить")
-                                .on_click(cx.listener(move |page, _, window, cx| {
-                                    page.open_category_form(Some(&edit), window, cx)
-                                })),
-                        ),
-                    )
-                    .child(
-                        self.action_cell(cx).child(
-                            Button::new(("category-delete", id as usize))
-                                .danger()
-                                .xsmall()
-                                .label("Удалить")
-                                .on_click(cx.listener(move |page, _, window, cx| {
-                                    page.confirm_delete(
-                                        Delete::Category(id),
-                                        subject.clone(),
-                                        window,
-                                        cx,
-                                    )
-                                })),
-                        ),
-                    ),
-            );
-        }
+    fn render_categories(&mut self, cx: &mut Context<Self>) -> Div {
         div()
             .flex_1()
             .flex()
@@ -868,78 +965,311 @@ impl DirectoriesPage {
                             })),
                     ),
             )
-            .child(list)
-    }
-
-    fn render_banks(&mut self, cx: &mut Context<Self>) -> Div {
-        let mut list = self.list(!self.banks.is_empty(), cx);
-        for (position, bank) in self.banks.iter().cloned().enumerate() {
-            let id = bank.id;
-            let subject = format!("банк «{}»", bank.name);
-            let edit = bank.clone();
-            list = list.child(
-                self.row(("bank", id as usize), position, cx)
-                    .child(div().flex_1().px_2().child(bank.name.clone()))
-                    .child(
-                        self.action_cell(cx).child(
-                            Button::new(("bank-edit", id as usize))
-                                .xsmall()
-                                .label("Изменить")
-                                .on_click(cx.listener(move |page, _, window, cx| {
-                                    page.open_bank_form(Some(&edit), window, cx)
-                                })),
-                        ),
-                    )
-                    .child(
-                        self.action_cell(cx).child(
-                            Button::new(("bank-delete", id as usize))
-                                .danger()
-                                .xsmall()
-                                .label("Удалить")
-                                .on_click(cx.listener(move |page, _, window, cx| {
-                                    page.confirm_delete(
-                                        Delete::Bank(id),
-                                        subject.clone(),
-                                        window,
-                                        cx,
-                                    )
-                                })),
-                        ),
-                    ),
-            );
-        }
-        div().flex().flex_col().gap_2().child(list)
-    }
-
-    fn render_expense_places(&mut self, cx: &mut Context<Self>) -> Div {
-        let mut list = self.list(true, cx);
-        list = list.child(
-            self.row("expense-places-header", 0, cx)
-                .bg(cx.theme().muted)
-                .font_weight(FontWeight::BOLD)
-                .child(div().flex_1().px_2().child("Название"))
-                .child(div().flex_1().px_2().child("Комментарий"))
-                .child(
-                    self.action_cell(cx)
-                        .w(px(168.0))
-                        .justify_center()
-                        .child("Действия"),
+            .child(
+                div().h(px(TABLE_HEIGHT)).child(
+                    DataTable::new(&self.categories_table)
+                        .stripe(true)
+                        .bordered(true)
+                        .accessibility_label("Категории"),
                 ),
-        );
+            )
+    }
 
-        for (position, place) in self.expense_places.iter().cloned().enumerate() {
-            let id = place.id;
-            let subject = format!("место трат «{}»", place.name);
-            let edit = place.clone();
-            let comment_cell = match place.comment.as_deref() {
+    fn render_banks(&mut self, _: &mut Context<Self>) -> Div {
+        div().h(px(TABLE_HEIGHT)).child(
+            DataTable::new(&self.banks_table)
+                .stripe(true)
+                .bordered(true)
+                .accessibility_label("Банки"),
+        )
+    }
+
+    fn render_expense_places(&mut self, _: &mut Context<Self>) -> Div {
+        div().h(px(TABLE_HEIGHT)).child(
+            DataTable::new(&self.expense_places_table)
+                .stripe(true)
+                .bordered(true)
+                .accessibility_label("Места трат"),
+        )
+    }
+
+    fn render_currencies(&mut self, cx: &mut Context<Self>) -> Div {
+        let muted = cx.theme().muted_foreground;
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .h(px(TABLE_HEIGHT))
+                    .child(
+                        DataTable::new(&self.currencies_table)
+                            .stripe(true)
+                            .bordered(true)
+                            .accessibility_label("Валюты"),
+                    ),
+            )
+            .child(div().text_color(muted).child(
+                "Курс означает количество единиц основной валюты за 1 единицу выбранной валюты.",
+            ))
+            .child(div().text_color(muted).child(
+                "Дополнительные валюты пока нельзя выбирать в формах доходов и расходов (поддерживаются RUB и USD).",
+            ))
+    }
+}
+
+impl TableDelegate for CategoriesTable {
+    fn columns_count(&self, _: &App) -> usize {
+        2
+    }
+
+    fn rows_count(&self, _: &App) -> usize {
+        self.rows.len()
+    }
+
+    fn column(&self, col_ix: usize, _: &App) -> Column {
+        match col_ix {
+            0 => directory_column("name", "Название", 480.0, false),
+            _ => directory_column("actions", "Действия", ACTIONS_WIDTH, true),
+        }
+    }
+
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child("Категории не найдены.")
+    }
+
+    fn render_td(
+        &mut self,
+        row_ix: usize,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let row = self.rows[row_ix].clone();
+        let content = if col_ix == 0 {
+            let prefix = if row.depth == 0 {
+                String::new()
+            } else {
+                format!("{}> ", "  ".repeat(row.depth))
+            };
+            let suffix = if row.category.is_active {
+                ""
+            } else {
+                " (неактивна)"
+            };
+            div()
+                .w_full()
+                .truncate()
+                .child(format!("{prefix}{}{suffix}", row.category.name))
+                .into_any_element()
+        } else {
+            let id = row.category.id;
+            let edit_page = self.page.clone();
+            let edit = row.category.clone();
+            let delete_page = self.page.clone();
+            let subject = format!("категорию «{}»", row.category.name);
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .child(
+                    Button::new(("category-edit", row_ix))
+                        .xsmall()
+                        .label("Изменить")
+                        .on_click(move |_, window, cx| {
+                            let edit = edit.clone();
+                            let _ = edit_page.update(cx, |page, cx| {
+                                page.open_category_form(Some(&edit), window, cx)
+                            });
+                        }),
+                )
+                .child(
+                    Button::new(("category-delete", row_ix))
+                        .danger()
+                        .xsmall()
+                        .label("Удалить")
+                        .on_click(move |_, window, cx| {
+                            let subject = subject.clone();
+                            let _ = delete_page.update(cx, |page, cx| {
+                                page.confirm_delete(Delete::Category(id), subject, window, cx)
+                            });
+                        }),
+                )
+                .into_any_element()
+        };
+        directory_cell(content, col_ix, cx)
+    }
+
+    fn cell_label(&self, row_ix: usize, col_ix: usize, _: &App) -> Option<SharedString> {
+        let row = &self.rows[row_ix];
+        Some(
+            if col_ix == 0 {
+                row.category.name.clone()
+            } else {
+                "Действия".to_owned()
+            }
+            .into(),
+        )
+    }
+}
+
+impl TableDelegate for BanksTable {
+    fn columns_count(&self, _: &App) -> usize {
+        2
+    }
+
+    fn rows_count(&self, _: &App) -> usize {
+        self.rows.len()
+    }
+
+    fn column(&self, col_ix: usize, _: &App) -> Column {
+        match col_ix {
+            0 => directory_column("name", "Название", 480.0, false),
+            _ => directory_column("actions", "Действия", ACTIONS_WIDTH, true),
+        }
+    }
+
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child("Банки не найдены.")
+    }
+
+    fn render_td(
+        &mut self,
+        row_ix: usize,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let bank = self.rows[row_ix].clone();
+        let content = if col_ix == 0 {
+            div()
+                .w_full()
+                .truncate()
+                .child(bank.name.clone())
+                .into_any_element()
+        } else {
+            let id = bank.id;
+            let edit_page = self.page.clone();
+            let edit = bank.clone();
+            let delete_page = self.page.clone();
+            let subject = format!("банк «{}»", bank.name);
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .child(
+                    Button::new(("bank-edit", row_ix))
+                        .xsmall()
+                        .label("Изменить")
+                        .on_click(move |_, window, cx| {
+                            let edit = edit.clone();
+                            let _ = edit_page.update(cx, |page, cx| {
+                                page.open_bank_form(Some(&edit), window, cx)
+                            });
+                        }),
+                )
+                .child(
+                    Button::new(("bank-delete", row_ix))
+                        .danger()
+                        .xsmall()
+                        .label("Удалить")
+                        .on_click(move |_, window, cx| {
+                            let subject = subject.clone();
+                            let _ = delete_page.update(cx, |page, cx| {
+                                page.confirm_delete(Delete::Bank(id), subject, window, cx)
+                            });
+                        }),
+                )
+                .into_any_element()
+        };
+        directory_cell(content, col_ix, cx)
+    }
+
+    fn cell_label(&self, row_ix: usize, col_ix: usize, _: &App) -> Option<SharedString> {
+        let bank = &self.rows[row_ix];
+        Some(
+            if col_ix == 0 {
+                bank.name.clone()
+            } else {
+                "Действия".to_owned()
+            }
+            .into(),
+        )
+    }
+}
+
+impl TableDelegate for ExpensePlacesTable {
+    fn columns_count(&self, _: &App) -> usize {
+        3
+    }
+
+    fn rows_count(&self, _: &App) -> usize {
+        self.rows.len()
+    }
+
+    fn column(&self, col_ix: usize, _: &App) -> Column {
+        match col_ix {
+            0 => directory_column("name", "Название", 220.0, false),
+            1 => directory_column("comment", "Комментарий", 320.0, false),
+            _ => directory_column("actions", "Действия", ACTIONS_WIDTH, true),
+        }
+    }
+
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child("Места трат не найдены.")
+    }
+
+    fn render_td(
+        &mut self,
+        row_ix: usize,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let place = self.rows[row_ix].clone();
+        let content = match col_ix {
+            0 => div()
+                .w_full()
+                .truncate()
+                .child(place.name.clone())
+                .into_any_element(),
+            1 => match place.comment.as_deref() {
                 Some(comment) if !comment.is_empty() => {
                     let full_comment = comment.to_owned();
+                    let comment_id = place.id;
                     div()
-                        .id(("expense-place-comment", id as usize))
-                        .flex_1()
-                        .px_2()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
+                        .id(("expense-place-comment", row_ix))
+                        .w_full()
+                        .truncate()
                         .cursor_pointer()
                         .child(comment_preview(comment))
                         .on_click(move |_, window, cx| {
@@ -947,7 +1277,7 @@ impl DirectoriesPage {
                             window.open_dialog(cx, move |dialog: Dialog, _, _| {
                                 dialog.title("Комментарий").centered().child(
                                     div()
-                                        .id(("expense-place-comment-dialog", id as usize))
+                                        .id(("expense-place-comment-dialog", comment_id as usize))
                                         .max_h(px(420.0))
                                         .overflow_y_scroll()
                                         .overflow_x_scroll()
@@ -957,133 +1287,216 @@ impl DirectoriesPage {
                         })
                         .into_any_element()
                 }
-                _ => div().flex_1().px_2().into_any_element(),
-            };
-            list = list.child(
-                self.row(("expense-place", id as usize), position + 1, cx)
-                    .child(div().flex_1().px_2().child(place.name))
-                    .child(comment_cell)
+                _ => div().w_full().into_any_element(),
+            },
+            _ => {
+                let id = place.id;
+                let edit_page = self.page.clone();
+                let edit = place.clone();
+                let delete_page = self.page.clone();
+                let subject = format!("место трат «{}»", place.name);
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
                     .child(
-                        self.action_cell(cx)
-                            .w(px(168.0))
-                            .justify_center()
-                            .gap_1()
-                            .child(
-                                Button::new(("expense-place-edit", id as usize))
-                                    .xsmall()
-                                    .label("Изменить")
-                                    .on_click(cx.listener(move |page, _, window, cx| {
-                                        page.open_expense_place_form(Some(&edit), window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new(("expense-place-delete", id as usize))
-                                    .danger()
-                                    .xsmall()
-                                    .label("Удалить")
-                                    .on_click(cx.listener(move |page, _, window, cx| {
-                                        page.confirm_delete(
-                                            Delete::ExpensePlace(id),
-                                            subject.clone(),
-                                            window,
-                                            cx,
-                                        )
-                                    })),
-                            ),
-                    ),
-            );
-        }
-
-        div().flex().flex_col().gap_2().child(list)
-    }
-
-    fn render_currencies(&mut self, cx: &mut Context<Self>) -> Div {
-        let primary_code = self
-            .currencies
-            .iter()
-            .find(|c| c.is_primary)
-            .map_or("—".to_owned(), |c| c.code.clone());
-        let muted = cx.theme().muted_foreground;
-        let mut list = self.list(!self.currencies.is_empty(), cx);
-        for (position, currency) in self.currencies.iter().cloned().enumerate() {
-            let code = currency.code.clone();
-            let used = self.used_currencies.contains(&code);
-            let rate_label = currency_rate_label(&currency, &primary_code);
-            let subject = format!("валюту {code}");
-            let edit = currency.clone();
-            let (c1, c2, c3) = (code.clone(), code.clone(), code.clone());
-            list = list.child(
-                self.row(("currency", position), position, cx)
-                    .h(px(ROW_HEIGHT + 12.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .px_2()
-                            .child(div().child(format!("{} {}", currency.code, currency.name)))
-                            .child(div().text_color(muted).child(rate_label)),
-                    )
-                    .child(
-                        self.action_cell(cx).child(Button::new(("currency-rate", position))
+                        Button::new(("expense-place-edit", row_ix))
                             .xsmall()
-                            .label("Изменить курс")
-                            .disabled(currency.is_primary)
-                            .on_click(cx.listener(move |page, _, window, cx| {
-                                page.open_currency_form(Some(&edit), window, cx)
-                            }))),
-                    )
-                    .child(
-                        self.action_cell(cx)
-                            .w(px(152.0))
-                            .justify_center()
-                            .child(if currency.is_primary {
-                                div().text_color(muted).child("Основная")
-                            } else {
-                                div().child(
-                                    Button::new(("currency-primary", position))
-                                        .compact()
-                                        .label("Сделать основной")
-                                        .tooltip("Сначала задайте курс этой валюты")
-                                        .disabled(currency.rate_to_primary.is_none())
-                                        .on_click(cx.listener(move |page, _, window, cx| {
-                                            page.make_primary(&c1, window, cx)
-                                        })),
-                                )
+                            .label("Изменить")
+                            .on_click(move |_, window, cx| {
+                                let edit = edit.clone();
+                                let _ = edit_page.update(cx, |page, cx| {
+                                    page.open_expense_place_form(Some(&edit), window, cx)
+                                });
                             }),
                     )
                     .child(
-                        self.action_cell(cx).child(Button::new(("currency-delete", position))
+                        Button::new(("expense-place-delete", row_ix))
                             .danger()
                             .xsmall()
                             .label("Удалить")
-                            .disabled(currency.is_primary || used)
-                            .tooltip(if currency.is_primary {
+                            .on_click(move |_, window, cx| {
+                                let subject = subject.clone();
+                                let _ = delete_page.update(cx, |page, cx| {
+                                    page.confirm_delete(
+                                        Delete::ExpensePlace(id),
+                                        subject,
+                                        window,
+                                        cx,
+                                    )
+                                });
+                            }),
+                    )
+                    .into_any_element()
+            }
+        };
+        directory_cell(content, col_ix, cx)
+    }
+
+    fn cell_label(&self, row_ix: usize, col_ix: usize, _: &App) -> Option<SharedString> {
+        let place = &self.rows[row_ix];
+        Some(
+            match col_ix {
+                0 => place.name.clone(),
+                1 => place.comment.clone().unwrap_or_default(),
+                _ => "Действия".to_owned(),
+            }
+            .into(),
+        )
+    }
+}
+
+impl TableDelegate for CurrenciesTable {
+    fn columns_count(&self, _: &App) -> usize {
+        4
+    }
+
+    fn rows_count(&self, _: &App) -> usize {
+        self.rows.len()
+    }
+
+    fn column(&self, col_ix: usize, _: &App) -> Column {
+        match col_ix {
+            0 => directory_column("currency", "Валюта", 220.0, false),
+            1 => directory_column("rate", "Курс", 300.0, false),
+            2 => directory_column("primary", "Основная", 160.0, false),
+            _ => directory_column("actions", "Действия", 240.0, true),
+        }
+    }
+
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child("Валюты не найдены.")
+    }
+
+    fn render_td(
+        &mut self,
+        row_ix: usize,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let row = self.rows[row_ix].clone();
+        let content = match col_ix {
+            0 => div()
+                .w_full()
+                .truncate()
+                .child(format!("{} {}", row.currency.code, row.currency.name))
+                .into_any_element(),
+            1 => {
+                let tooltip = row.rate_label.clone();
+                div()
+                    .id(("currency-rate-label", row_ix))
+                    .w_full()
+                    .truncate()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(row.rate_label.clone())
+                    .tooltip(move |window, cx| {
+                        ComponentTooltip::new(tooltip.clone()).build(window, cx)
+                    })
+                    .into_any_element()
+            }
+            2 => {
+                if row.currency.is_primary {
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Основная")
+                        .into_any_element()
+                } else {
+                    let page = self.page.clone();
+                    let code = row.currency.code.clone();
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            Button::new(("currency-primary", row_ix))
+                                .compact()
+                                .label("Сделать основной")
+                                .tooltip("Сначала задайте курс этой валюты")
+                                .disabled(row.currency.rate_to_primary.is_none())
+                                .on_click(move |_, window, cx| {
+                                    let code = code.clone();
+                                    let _ = page.update(cx, |page, cx| {
+                                        page.make_primary(&code, window, cx)
+                                    });
+                                }),
+                        )
+                        .into_any_element()
+                }
+            }
+            _ => {
+                let rate_page = self.page.clone();
+                let edit = row.currency.clone();
+                let delete_page = self.page.clone();
+                let code = row.currency.code.clone();
+                let subject = format!("валюту {code}");
+                let delete_code = code.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .child(
+                        Button::new(("currency-rate", row_ix))
+                            .xsmall()
+                            .label("Изменить курс")
+                            .disabled(row.currency.is_primary)
+                            .on_click(move |_, window, cx| {
+                                let edit = edit.clone();
+                                let _ = rate_page.update(cx, |page, cx| {
+                                    page.open_currency_form(Some(&edit), window, cx)
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new(("currency-delete", row_ix))
+                            .danger()
+                            .xsmall()
+                            .label("Удалить")
+                            .disabled(row.currency.is_primary || row.used)
+                            .tooltip(if row.currency.is_primary {
                                 "Сначала выберите другую основную валюту"
                             } else {
                                 "Валюта используется; сначала удалите связанные финансовые записи"
                             })
-                            .on_click(cx.listener(move |page, _, window, cx| {
-                                page.confirm_delete(
-                                    Delete::Currency(c2.clone()),
-                                    subject.clone(),
-                                    window,
-                                    cx,
-                                )
-                            }))),
-                    ),
-            );
-            let _ = &c3;
-        }
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(list)
-            .child(div().text_color(muted).child(
-                "Курс означает количество единиц основной валюты за 1 единицу выбранной валюты.",
-            ))
-            .child(div().text_color(muted).child(
-                "Дополнительные валюты пока нельзя выбирать в формах доходов и расходов (поддерживаются RUB и USD).",
-            ))
+                            .on_click(move |_, window, cx| {
+                                let subject = subject.clone();
+                                let code = delete_code.clone();
+                                let _ = delete_page.update(cx, |page, cx| {
+                                    page.confirm_delete(Delete::Currency(code), subject, window, cx)
+                                });
+                            }),
+                    )
+                    .into_any_element()
+            }
+        };
+        directory_cell(content, col_ix, cx)
+    }
+
+    fn cell_label(&self, row_ix: usize, col_ix: usize, _: &App) -> Option<SharedString> {
+        let row = &self.rows[row_ix];
+        Some(
+            match col_ix {
+                0 => format!("{} {}", row.currency.code, row.currency.name),
+                1 => row.rate_label.clone(),
+                2 if row.currency.is_primary => "Основная".to_owned(),
+                _ => "Действия".to_owned(),
+            }
+            .into(),
+        )
     }
 }
 
@@ -1268,7 +1681,11 @@ impl Render for DirectoriesPage {
 
 #[cfg(test)]
 mod tests {
-    use super::{parent_category_options, Category};
+    use super::{
+        directory_column, parent_category_options, Category, ACTIONS_WIDTH, TABLE_HEIGHT,
+        TABLE_ROW_HEIGHT, VISIBLE_TABLE_ROWS,
+    };
+    use gpui_kit::component::table::ColumnFixed;
 
     fn category(id: i64, parent_id: Option<i64>, name: &str) -> Category {
         Category {
@@ -1320,5 +1737,23 @@ mod tests {
         let options = parent_category_options(&categories(), Some(3));
         assert!(options.contains(&(Some(2), "Транспорт".to_owned())));
         assert!(!options.iter().any(|(id, _)| *id == Some(3)));
+    }
+
+    #[test]
+    fn directory_table_height_contains_ten_rows_and_a_header() {
+        assert_eq!(VISIBLE_TABLE_ROWS, 10);
+        assert_eq!(TABLE_HEIGHT, TABLE_ROW_HEIGHT * 11.0);
+    }
+
+    #[test]
+    fn directory_action_columns_are_fixed_at_the_right_edge() {
+        let actions = directory_column("actions", "Действия", ACTIONS_WIDTH, true);
+        assert_eq!(actions.fixed, Some(ColumnFixed::Right));
+        assert_eq!(f32::from(actions.width), ACTIONS_WIDTH);
+        assert!(!actions.selectable);
+
+        let name = directory_column("name", "Название", 480.0, false);
+        assert_eq!(name.fixed, None);
+        assert!(name.selectable);
     }
 }

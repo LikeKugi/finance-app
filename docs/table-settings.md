@@ -30,3 +30,10 @@
 - Saved widths use the `table_columns.transfers.v1` setting; invalid or missing values fall back to defaults.
 - The table has an outer border and internal vertical and horizontal borders for every column and row, including the headers.
 - The pinned `Действия` column is 160 logical pixels wide. The saved width for that column is ignored and the other widths are preserved.
+
+## Directories
+
+- The `Категории`, `Банки`, `Валюты`, `Места трат` and `Цены` tables use `DataTable` with built-in virtual scrolling.
+- Each table is sized for exactly 10 data rows plus the header row (352 logical pixels with the default 32-pixel row height). When a directory has more rows, the table body scrolls without rendering the whole list.
+- The `Действия` column is pinned to the right edge and is not selectable or resizable.
+- Category rows keep their tree indentation and inactive-state marker; currency and place cells truncate long values and expose the full rate or comment text through a tooltip or the existing comment dialog.

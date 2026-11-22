@@ -39,6 +39,10 @@ const DEFAULT_WIDTHS: [f32; 6] = [220.0, 120.0, 140.0, 100.0, 190.0, 170.0];
 const MIN_WIDTH: f32 = 70.0;
 const MAX_WIDTH: f32 = 600.0;
 const ACTIONS_WIDTH: f32 = 170.0;
+const VISIBLE_TABLE_ROWS: usize = 10;
+const TABLE_ROW_HEIGHT: f32 = 32.0;
+/// Высота таблицы: 10 строк данных плюс строка заголовка.
+const TABLE_HEIGHT: f32 = TABLE_ROW_HEIGHT * (VISIBLE_TABLE_ROWS as f32 + 1.0);
 
 type Choice = Entity<SelectState<Vec<SharedString>>>;
 
@@ -856,8 +860,7 @@ impl Render for PricesSection {
             })
             .child(
                 div()
-                    .h(px(360.0))
-                    .min_h(px(240.0))
+                    .h(px(TABLE_HEIGHT))
                     .child(DataTable::new(&self.table).stripe(true).bordered(true)),
             )
     }
@@ -908,7 +911,10 @@ mod tests {
     use finance_core::{Currency, PriceRecord};
     use rust_decimal::Decimal;
 
-    use super::{sort_prices, widths_with_fixed_actions, ACTIONS_WIDTH};
+    use super::{
+        sort_prices, widths_with_fixed_actions, ACTIONS_WIDTH, TABLE_HEIGHT, TABLE_ROW_HEIGHT,
+        VISIBLE_TABLE_ROWS,
+    };
     use gpui_kit::component::table::ColumnSort;
 
     fn record(
@@ -958,5 +964,11 @@ mod tests {
         assert_eq!(widths[4], 250.0);
         assert_eq!(widths[5], ACTIONS_WIDTH);
         assert!(widths_with_fixed_actions(&[100.0]).is_none());
+    }
+
+    #[test]
+    fn price_table_height_contains_ten_rows_and_a_header() {
+        assert_eq!(VISIBLE_TABLE_ROWS, 10);
+        assert_eq!(TABLE_HEIGHT, TABLE_ROW_HEIGHT * 11.0);
     }
 }
