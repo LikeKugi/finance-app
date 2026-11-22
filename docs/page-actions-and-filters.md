@@ -78,6 +78,7 @@ Shared compact DatePicker controls retain previous/next-month arrow navigation a
 
 - Search, bank, currency, status, term, and interest-destination filters appear above the table and wrap onto additional lines when they do not fit; horizontal scrolling is not used.
 - Filter groups and wrapped rows have a small, consistent gap for visual separation.
+- Bank, term, and interest-destination options show their full labels in a tooltip when hovered in the dropdown.
 - `Применить` and `Сбросить фильтры` remain aligned to the right of the final filter row, moving to the bottom-right row when needed.
 - Search edits do not reload the results until `Применить` is clicked or Enter is pressed. Selecting bank, currency, status, term, or interest destination applies the filter immediately.
 - The Savings results use a resizable `DataTable`; column widths are persisted in the database and legacy widths are remapped when the column order changes. Columns appear as `Дата открытия` followed by `Срок`. Sorting applies to the complete filtered result set for `Банк`, `Название`, `Сумма`, `Базовая ставка`, `Ставка при выполнении условий`, `Порог`, `Дата открытия`, and `Срок`.

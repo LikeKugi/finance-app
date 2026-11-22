@@ -17,14 +17,16 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::table::{
     Column, ColumnFixed, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
 };
+use gpui_kit::component::tooltip::Tooltip as ComponentTooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _, WindowExt as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 
 const DATE_FORMAT: &str = "%Y-%m-%d";
@@ -68,7 +70,67 @@ const FOOTER_NOTE: &str = "Даты открытия и начисления п�
 const FOOTER_WARNING: &str =
     "Валюта накопления указывается отдельно; фактические начисления процентов здесь не рассчитываются.";
 
+const BANK_FILTER_ITEM_ID: &str = "savings-bank-filter-item";
+const TERM_FILTER_ITEM_ID: &str = "savings-term-filter-item";
+const DESTINATION_FILTER_ITEM_ID: &str = "savings-destination-filter-item";
+
 type Choice = Entity<SelectState<Vec<SharedString>>>;
+type TooltipChoice = Entity<SelectState<Vec<TooltipFilterItem>>>;
+
+#[derive(Clone)]
+struct TooltipFilterItem {
+    id: usize,
+    label: String,
+    item_id: &'static str,
+}
+
+impl SelectItem for TooltipFilterItem {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone().into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.label
+    }
+
+    fn render(&self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let tooltip = self.label.clone();
+        let item_id = self.item_id;
+        div()
+            .id((item_id, self.id))
+            .w_full()
+            .tooltip(move |window, cx| ComponentTooltip::new(tooltip.clone()).build(window, cx))
+            .child(self.label.clone())
+    }
+}
+
+fn tooltip_items(labels: Vec<String>, item_id: &'static str) -> Vec<TooltipFilterItem> {
+    labels
+        .into_iter()
+        .enumerate()
+        .map(|(id, label)| TooltipFilterItem { id, label, item_id })
+        .collect()
+}
+
+fn tooltip_choice(
+    labels: Vec<String>,
+    selected: Option<usize>,
+    item_id: &'static str,
+    window: &mut Window,
+    cx: &mut Context<SavingsPage>,
+) -> TooltipChoice {
+    let items = tooltip_items(labels, item_id);
+    cx.new(|cx| {
+        SelectState::new(
+            items,
+            selected.map(|row| IndexPath::default().row(row)),
+            window,
+            cx,
+        )
+    })
+}
 
 fn choice(
     items: Vec<String>,
@@ -298,15 +360,15 @@ pub(crate) struct SavingsPage {
     message: Option<(String, bool)>,
     search: Entity<InputState>,
     bank_filter: Option<i64>,
-    bank_filter_select: Choice,
+    bank_filter_select: TooltipChoice,
     currency_filter: Option<Currency>,
     currency_filter_select: Choice,
     active_filter: Option<bool>,
     active_filter_select: Choice,
     term_filter: Option<SavingsTerm>,
-    term_filter_select: Choice,
+    term_filter_select: TooltipChoice,
     destination_filter: Option<InterestDestination>,
-    destination_filter_select: Choice,
+    destination_filter_select: TooltipChoice,
     form: Option<Form>,
     confirm_discard: bool,
     _subscriptions: Vec<Subscription>,
@@ -315,11 +377,29 @@ pub(crate) struct SavingsPage {
 impl SavingsPage {
     pub(crate) fn new(database: Rc<Database>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Название или банк"));
-        let bank_filter_select = choice(vec![ALL_BANKS_LABEL.to_owned()], Some(0), window, cx);
+        let bank_filter_select = tooltip_choice(
+            vec![ALL_BANKS_LABEL.to_owned()],
+            Some(0),
+            BANK_FILTER_ITEM_ID,
+            window,
+            cx,
+        );
         let currency_filter_select = choice(currency_labels(ALL_LABEL), Some(0), window, cx);
         let active_filter_select = choice(status_labels(), Some(0), window, cx);
-        let term_filter_select = choice(term_filter_labels(), Some(0), window, cx);
-        let destination_filter_select = choice(destination_filter_labels(), Some(0), window, cx);
+        let term_filter_select = tooltip_choice(
+            term_filter_labels(),
+            Some(0),
+            TERM_FILTER_ITEM_ID,
+            window,
+            cx,
+        );
+        let destination_filter_select = tooltip_choice(
+            destination_filter_labels(),
+            Some(0),
+            DESTINATION_FILTER_ITEM_ID,
+            window,
+            cx,
+        );
 
         let mut subscriptions = vec![
             cx.subscribe_in(
@@ -334,12 +414,12 @@ impl SavingsPage {
             cx.subscribe_in(
                 &bank_filter_select,
                 window,
-                |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                |this: &mut Self, _, event: &SelectEvent<Vec<TooltipFilterItem>>, _, cx| {
                     let SelectEvent::Confirm(value) = event;
-                    this.bank_filter = value.as_ref().and_then(|label| {
+                    this.bank_filter = value.as_deref().and_then(|label| {
                         this.banks
                             .iter()
-                            .find(|bank| bank.name == label.as_ref())
+                            .find(|bank| bank.name == label)
                             .map(|bank| bank.id)
                     });
                     this.apply_filters(cx);
@@ -371,25 +451,23 @@ impl SavingsPage {
             cx.subscribe_in(
                 &term_filter_select,
                 window,
-                |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                |this: &mut Self, _, event: &SelectEvent<Vec<TooltipFilterItem>>, _, cx| {
                     let SelectEvent::Confirm(value) = event;
-                    this.term_filter = value.as_ref().and_then(|label| {
-                        TERMS
-                            .into_iter()
-                            .find(|term| term.title() == label.as_ref())
-                    });
+                    this.term_filter = value
+                        .as_deref()
+                        .and_then(|label| TERMS.into_iter().find(|term| term.title() == label));
                     this.apply_filters(cx);
                 },
             ),
             cx.subscribe_in(
                 &destination_filter_select,
                 window,
-                |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                |this: &mut Self, _, event: &SelectEvent<Vec<TooltipFilterItem>>, _, cx| {
                     let SelectEvent::Confirm(value) = event;
-                    this.destination_filter = value.as_ref().and_then(|label| {
+                    this.destination_filter = value.as_deref().and_then(|label| {
                         InterestDestination::ALL
                             .into_iter()
-                            .find(|destination| destination.title() == label.as_ref())
+                            .find(|destination| destination.title() == label)
                     });
                     this.apply_filters(cx);
                 },
@@ -473,10 +551,10 @@ impl SavingsPage {
                 self.bank_filter = None;
             }
         }
-        let items: Vec<SharedString> = std::iter::once(ALL_BANKS_LABEL.to_owned())
+        let labels = std::iter::once(ALL_BANKS_LABEL.to_owned())
             .chain(self.banks.iter().map(|bank| bank.name.clone()))
-            .map(SharedString::from)
             .collect();
+        let items = tooltip_items(labels, BANK_FILTER_ITEM_ID);
         let selected = self
             .bank_filter
             .and_then(|id| self.banks.iter().position(|bank| bank.id == id))
@@ -560,10 +638,13 @@ impl SavingsPage {
         self.active_filter = None;
         self.term_filter = None;
         self.destination_filter = None;
+        for select in [&self.currency_filter_select, &self.active_filter_select] {
+            select.update(cx, |state, cx| {
+                state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
+            });
+        }
         for select in [
             &self.bank_filter_select,
-            &self.currency_filter_select,
-            &self.active_filter_select,
             &self.term_filter_select,
             &self.destination_filter_select,
         ] {
@@ -1607,10 +1688,10 @@ mod tests {
     use super::{
         column_widths_key, column_widths_with_fixed_actions, destination_filter_labels,
         filter_savings, format_column_widths, load_column_widths, parse_column_widths,
-        parse_legacy_column_widths, sort_savings, term_filter_labels, SavingsForm,
-        ACTIONS_COLUMN_WIDTH, COLUMN_HEADINGS, COL_ACTIONS, COL_AMOUNT, COL_BANK, COL_BASE_RATE,
-        COL_OPENED_DATE, COL_RATE_AFTER_THRESHOLD, COL_TERM, COL_THRESHOLD, COL_TITLE,
-        DEFAULT_COLUMN_WIDTHS, LEGACY_SAVINGS_COLUMN_WIDTHS_KEY,
+        parse_legacy_column_widths, sort_savings, term_filter_labels, tooltip_items, SavingsForm,
+        ACTIONS_COLUMN_WIDTH, BANK_FILTER_ITEM_ID, COLUMN_HEADINGS, COL_ACTIONS, COL_AMOUNT,
+        COL_BANK, COL_BASE_RATE, COL_OPENED_DATE, COL_RATE_AFTER_THRESHOLD, COL_TERM,
+        COL_THRESHOLD, COL_TITLE, DEFAULT_COLUMN_WIDTHS, LEGACY_SAVINGS_COLUMN_WIDTHS_KEY,
     };
 
     fn valid_savings_form() -> SavingsForm {
@@ -1813,6 +1894,23 @@ mod tests {
         assert_eq!(COL_TERM, 8);
         assert_eq!(COLUMN_HEADINGS[COL_OPENED_DATE], "Дата открытия");
         assert_eq!(COLUMN_HEADINGS[COL_TERM], "Срок");
+    }
+
+    #[test]
+    fn savings_filter_tooltip_items_keep_labels_and_have_unique_ids() {
+        let labels = vec!["Все банки".to_owned(), "Банк".to_owned()];
+
+        let items = tooltip_items(labels.clone(), BANK_FILTER_ITEM_ID);
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            labels.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert_eq!(items.iter().map(|item| item.id).collect::<Vec<_>>(), [0, 1]);
+        assert!(items.iter().all(|item| item.item_id == BANK_FILTER_ITEM_ID));
     }
 
     #[test]
