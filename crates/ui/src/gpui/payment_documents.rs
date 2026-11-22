@@ -2119,7 +2119,7 @@ impl TableDelegate for CardsTable {
                         .child(
                             Button::new(("next-payment-edit", document.id as usize))
                                 .xsmall()
-                                .label("Изменить")
+                                .icon(IconName::Inspector)
                                 .on_click(move |_, window, cx| {
                                     let _ = page.update(cx, |page, cx| {
                                         page.open_next_payment(&target, window, cx)

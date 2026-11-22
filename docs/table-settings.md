@@ -17,7 +17,7 @@
 ## Payment Cards
 
 - The table columns are `Название`, `Банк`, `Система`, `Тип`, `Сумма`, `Валюта`, `Льгота, дни`, then the grouped header `Следующий платёж` over `Дата`, `Размер`, and an unnamed edit-action column, followed by `Условие ставки`, `Минимум трат`, `Связанные накопления`, and `Действия`.
-- The unnamed next-payment action column is fixed at 76 logical pixels and cannot be resized. Its XSmall `Изменить` button appears only when a card has a next-payment date or amount.
+- The unnamed next-payment action column is fixed at 76 logical pixels and cannot be resized. Its XSmall `Inspector` icon button appears only when a card has a next-payment date or amount.
 - Existing 13-column width settings gain the fixed-width action column without changing the saved widths of other columns.
 - The table has an outer border and internal vertical and horizontal borders for every column and row, including the headers.
 - The pinned `Действия` column is 160 logical pixels wide.
