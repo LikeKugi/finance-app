@@ -16,14 +16,16 @@ use gpui_kit::component::calendar::Date;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerState};
 use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::table::{
     Column, ColumnFixed, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
 };
+use gpui_kit::component::tooltip::Tooltip as ComponentTooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _, WindowExt as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
@@ -49,9 +51,68 @@ const MIN_COLUMN_WIDTH: f32 = 60.0;
 const MAX_COLUMN_WIDTH: f32 = 1200.0;
 const FOOTER_NOTE: &str = "Пополнения и снятие наличных не создают доходы и расходы: они изменяют только остатки и журнал переводов. Поэтому сумма остатков может отличаться от отчёта «Анализ».";
 const FOOTER_WARNING: &str = "Переводы выполняются только между счетами с явно заданной и совпадающей валютой. Кредитные карты не участвуют: их лимит не является денежными средствами.";
+const TYPE_FILTER_ITEM_ID: &str = "transfers-type-filter-item";
+const SOURCE_FILTER_ITEM_ID: &str = "transfers-source-filter-item";
+const DESTINATION_FILTER_ITEM_ID: &str = "transfers-destination-filter-item";
 
 type Choice = Entity<SelectState<Vec<SharedString>>>;
+type TooltipChoice = Entity<SelectState<Vec<TooltipFilterItem>>>;
 type EndpointOptions = Vec<(TransferEndpoint, String)>;
+
+#[derive(Clone)]
+struct TooltipFilterItem {
+    id: usize,
+    label: String,
+    item_id: &'static str,
+}
+
+impl SelectItem for TooltipFilterItem {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone().into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.label
+    }
+
+    fn render(&self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let tooltip = self.label.clone();
+        let item_id = self.item_id;
+        div()
+            .id((item_id, self.id))
+            .w_full()
+            .tooltip(move |window, cx| ComponentTooltip::new(tooltip.clone()).build(window, cx))
+            .child(self.label.clone())
+    }
+}
+
+fn tooltip_items(labels: Vec<String>, item_id: &'static str) -> Vec<TooltipFilterItem> {
+    labels
+        .into_iter()
+        .enumerate()
+        .map(|(id, label)| TooltipFilterItem { id, label, item_id })
+        .collect()
+}
+
+fn tooltip_choice(
+    labels: Vec<String>,
+    selected: Option<usize>,
+    item_id: &'static str,
+    window: &mut Window,
+    cx: &mut App,
+) -> TooltipChoice {
+    let items = tooltip_items(labels, item_id);
+    cx.new(|cx| {
+        SelectState::new(
+            items,
+            selected.map(|row| IndexPath::default().row(row)),
+            window,
+            cx,
+        )
+    })
+}
 
 fn choice(
     items: Vec<String>,
@@ -361,9 +422,9 @@ pub(crate) struct TransfersPage {
     source_filter: Option<TransferEndpoint>,
     destination_filter: Option<TransferEndpoint>,
     currency_filter: Option<Currency>,
-    type_filter_select: Choice,
-    source_filter_select: Choice,
-    destination_filter_select: Choice,
+    type_filter_select: TooltipChoice,
+    source_filter_select: TooltipChoice,
+    destination_filter_select: TooltipChoice,
     currency_filter_select: Choice,
     source_filter_options: Vec<Option<TransferEndpoint>>,
     destination_filter_options: Vec<Option<TransferEndpoint>>,
@@ -412,9 +473,22 @@ impl TransfersPage {
                     .map(|item| item.title().to_owned()),
             )
             .collect();
-        let type_filter_select = choice(type_items, Some(0), window, cx);
-        let source_filter_select = choice(vec![ALL_LABEL.to_owned()], Some(0), window, cx);
-        let destination_filter_select = choice(vec![ALL_LABEL.to_owned()], Some(0), window, cx);
+        let type_filter_select =
+            tooltip_choice(type_items, Some(0), TYPE_FILTER_ITEM_ID, window, cx);
+        let source_filter_select = tooltip_choice(
+            vec![ALL_LABEL.to_owned()],
+            Some(0),
+            SOURCE_FILTER_ITEM_ID,
+            window,
+            cx,
+        );
+        let destination_filter_select = tooltip_choice(
+            vec![ALL_LABEL.to_owned()],
+            Some(0),
+            DESTINATION_FILTER_ITEM_ID,
+            window,
+            cx,
+        );
         let currency_filter_select = choice(currency_labels(ALL_LABEL), Some(0), window, cx);
 
         let mut subscriptions = vec![
@@ -430,12 +504,12 @@ impl TransfersPage {
             cx.subscribe_in(
                 &type_filter_select,
                 window,
-                |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                |this: &mut Self, _, event: &SelectEvent<Vec<TooltipFilterItem>>, _, cx| {
                     let SelectEvent::Confirm(value) = event;
-                    this.type_filter = value.as_ref().and_then(|label| {
+                    this.type_filter = value.as_deref().and_then(|label| {
                         TransferOperationType::ALL
                             .into_iter()
-                            .find(|item| item.title() == label.as_ref())
+                            .find(|item| item.title() == label)
                     });
                     cx.notify();
                 },
@@ -443,13 +517,13 @@ impl TransfersPage {
             cx.subscribe_in(
                 &source_filter_select,
                 window,
-                |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                |this: &mut Self, _, event: &SelectEvent<Vec<TooltipFilterItem>>, _, cx| {
                     let SelectEvent::Confirm(value) = event;
-                    this.source_filter = value.as_ref().and_then(|label| {
+                    this.source_filter = value.as_deref().and_then(|label| {
                         let options = filter_endpoint_options(&this.cards, &this.savings);
                         options
                             .into_iter()
-                            .find(|(_, item)| item.as_str() == label.as_ref())
+                            .find(|(_, item)| item.as_str() == label)
                             .and_then(|(endpoint, _)| endpoint)
                     });
                     cx.notify();
@@ -458,13 +532,13 @@ impl TransfersPage {
             cx.subscribe_in(
                 &destination_filter_select,
                 window,
-                |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                |this: &mut Self, _, event: &SelectEvent<Vec<TooltipFilterItem>>, _, cx| {
                     let SelectEvent::Confirm(value) = event;
-                    this.destination_filter = value.as_ref().and_then(|label| {
+                    this.destination_filter = value.as_deref().and_then(|label| {
                         let options = filter_endpoint_options(&this.cards, &this.savings);
                         options
                             .into_iter()
-                            .find(|(_, item)| item.as_str() == label.as_ref())
+                            .find(|(_, item)| item.as_str() == label)
                             .and_then(|(endpoint, _)| endpoint)
                     });
                     cx.notify();
@@ -589,13 +663,12 @@ impl TransfersPage {
             self.destination_filter = None;
         }
 
-        let mut set_items = |select: &Choice,
-                             options: &[(Option<TransferEndpoint>, String)],
-                             selected: Option<TransferEndpoint>| {
-            let items: Vec<SharedString> = options
-                .iter()
-                .map(|(_, label)| SharedString::from(label.clone()))
-                .collect();
+        let mut set_endpoint_items = |select: &TooltipChoice,
+                                      options: &[(Option<TransferEndpoint>, String)],
+                                      selected: Option<TransferEndpoint>,
+                                      item_id: &'static str| {
+            let labels: Vec<String> = options.iter().map(|(_, label)| label.clone()).collect();
+            let items = tooltip_items(labels, item_id);
             let row = selected
                 .and_then(|endpoint| {
                     options
@@ -608,15 +681,17 @@ impl TransfersPage {
                 state.set_selected_index(Some(IndexPath::default().row(row)), window, cx);
             });
         };
-        set_items(
+        set_endpoint_items(
             &self.source_filter_select,
             &source_options,
             self.source_filter,
+            SOURCE_FILTER_ITEM_ID,
         );
-        set_items(
+        set_endpoint_items(
             &self.destination_filter_select,
             &destination_options,
             self.destination_filter,
+            DESTINATION_FILTER_ITEM_ID,
         );
         self.rebuild_form_endpoints(window, cx);
     }
@@ -685,12 +760,14 @@ impl TransfersPage {
             &self.type_filter_select,
             &self.source_filter_select,
             &self.destination_filter_select,
-            &self.currency_filter_select,
         ] {
             select.update(cx, |state, cx| {
                 state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
             });
         }
+        self.currency_filter_select.update(cx, |state, cx| {
+            state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
+        });
         self.apply_filters(cx);
     }
 
@@ -1931,6 +2008,38 @@ mod tests {
             term_end_date: None,
             interest_destination: InterestDestination::Reinvest,
             is_active,
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn transfer_filter_tooltip_items_keep_labels_and_have_unique_ids() {
+        let labels = vec![
+            ALL_LABEL.to_owned(),
+            EXTERNAL_LABEL.to_owned(),
+            CASH_LABEL.to_owned(),
+        ];
+
+        for item_id in [
+            TYPE_FILTER_ITEM_ID,
+            SOURCE_FILTER_ITEM_ID,
+            DESTINATION_FILTER_ITEM_ID,
+        ] {
+            let items = tooltip_items(labels.clone(), item_id);
+
+            assert_eq!(
+                items
+                    .iter()
+                    .map(|item| item.label.as_str())
+                    .collect::<Vec<_>>(),
+                labels.iter().map(String::as_str).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                items.iter().map(|item| item.id).collect::<Vec<_>>(),
+                [0, 1, 2]
+            );
+            assert!(items.iter().all(|item| item.item_id == item_id));
+            assert_eq!(items[1].title().to_string(), EXTERNAL_LABEL);
+            assert_eq!(items[1].value(), &labels[1]);
         }
     }
 
