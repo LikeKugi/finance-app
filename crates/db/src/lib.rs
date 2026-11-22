@@ -109,6 +109,8 @@ pub enum DbError {
     ForeignKeyIntegrity(String),
     #[error("Сумма должна быть положительным числом")]
     InvalidAmount,
+    #[error("Размер следующего платежа не может быть отрицательным")]
+    InvalidNextPaymentAmount,
     #[error("Категория не найдена или неактивна")]
     CategoryUnavailable,
     #[error("Место траты не найдено")]
@@ -123,6 +125,8 @@ pub enum DbError {
     SavingsBankUnavailable,
     #[error("Банк платёжной карты не найден")]
     PaymentDocumentBankUnavailable,
+    #[error("Следующий платёж можно изменить только у кредитной карты")]
+    PaymentDocumentCreditOnly,
     #[error("Одно или несколько накоплений не найдены")]
     PaymentDocumentSavingsUnavailable,
     #[error("Банк платёжной карты и выбранных накоплений должен совпадать")]
@@ -1273,6 +1277,42 @@ fn save_transaction_impl(
     affects_deposit_rate: bool,
     place_update: Option<Option<i64>>,
 ) -> Result<i64, DbError> {
+    let transaction =
+        rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    let saved_id = save_transaction_in_transaction(
+        &transaction,
+        kind,
+        id,
+        date,
+        category_id,
+        amount,
+        currency,
+        comment,
+        payment_document_id,
+        affects_deposit_rate,
+        place_update,
+    )?;
+    transaction.commit()?;
+    Ok(saved_id)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Shared implementation of transaction APIs"
+)]
+fn save_transaction_in_transaction(
+    transaction: &Connection,
+    kind: TransactionKind,
+    id: Option<i64>,
+    date: NaiveDate,
+    category_id: i64,
+    amount: Decimal,
+    currency: Currency,
+    comment: &str,
+    payment_document_id: Option<i64>,
+    affects_deposit_rate: bool,
+    place_update: Option<Option<i64>>,
+) -> Result<i64, DbError> {
     if amount <= Decimal::ZERO {
         return Err(DbError::InvalidAmount);
     }
@@ -1285,8 +1325,6 @@ fn save_transaction_impl(
     if kind == TransactionKind::Expense && affects_deposit_rate && payment_document_id.is_none() {
         return Err(DbError::ExpenseCardUnavailable);
     }
-    let transaction =
-        rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
     let (table, categories) = transaction_tables(kind);
     let expense_place_id = match (place_update, kind, id) {
         (Some(place_id), _, _) => place_id,
@@ -1401,15 +1439,15 @@ fn save_transaction_impl(
                 {
                     return Err(DbError::CardBalanceOverflow);
                 }
-                adjust_card_balance(&transaction, old_card, delta)?;
+                adjust_card_balance(transaction, old_card, delta)?;
             } else {
-                adjust_card_balance(&transaction, old_card, -old_amount)?;
+                adjust_card_balance(transaction, old_card, -old_amount)?;
                 if let Some(new_card) = payment_document_id {
-                    adjust_card_balance(&transaction, new_card, amount)?;
+                    adjust_card_balance(transaction, new_card, amount)?;
                 }
             }
         } else if let Some(new_card) = payment_document_id {
-            adjust_card_balance(&transaction, new_card, amount)?;
+            adjust_card_balance(transaction, new_card, amount)?;
         }
     } else {
         match old_debit_expense {
@@ -1423,15 +1461,15 @@ fn save_transaction_impl(
                     {
                         return Err(DbError::CardBalanceOverflow);
                     }
-                    adjust_card_balance(&transaction, old_card, delta)?;
+                    adjust_card_balance(transaction, old_card, delta)?;
                 } else {
-                    adjust_card_balance(&transaction, old_card, old_amount)?;
+                    adjust_card_balance(transaction, old_card, old_amount)?;
                     if payment_document_is_debit {
                         let debit = Decimal::ZERO
                             .checked_sub(amount)
                             .ok_or(DbError::CardBalanceOverflow)?;
                         adjust_card_balance(
-                            &transaction,
+                            transaction,
                             payment_document_id.ok_or(DbError::ExpenseCardUnavailable)?,
                             debit,
                         )?;
@@ -1444,7 +1482,7 @@ fn save_transaction_impl(
                     .checked_sub(amount)
                     .ok_or(DbError::CardBalanceOverflow)?;
                 adjust_card_balance(
-                    &transaction,
+                    transaction,
                     payment_document_id.ok_or(DbError::ExpenseCardUnavailable)?,
                     debit,
                 )?;
@@ -1530,8 +1568,77 @@ fn save_transaction_impl(
             params![payment_document_id, saved_id],
         )?;
     }
-    transaction.commit()?;
     Ok(saved_id)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NextPaymentExpense {
+    pub date: NaiveDate,
+    pub category_id: i64,
+    pub amount: Decimal,
+    pub currency: Currency,
+    pub comment: String,
+    pub payment_document_id: Option<i64>,
+    pub expense_place_id: Option<i64>,
+    pub affects_deposit_rate: bool,
+}
+
+/// Updates a credit-card payment and, optionally, records its expense atomically.
+pub fn save_next_payment(
+    connection: &Connection,
+    payment_document_id: i64,
+    due_date: NaiveDate,
+    next_payment_amount: Option<Decimal>,
+    expense: Option<NextPaymentExpense>,
+) -> Result<Option<i64>, DbError> {
+    if next_payment_amount.is_some_and(|amount| amount < Decimal::ZERO) {
+        return Err(DbError::InvalidNextPaymentAmount);
+    }
+
+    let transaction =
+        rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    let card_type: String = transaction.query_row(
+        "SELECT card_type FROM payment_documents WHERE id = ?1",
+        [payment_document_id],
+        |row| row.get(0),
+    )?;
+    if card_type != PaymentCardType::Credit.code() {
+        return Err(DbError::PaymentDocumentCreditOnly);
+    }
+
+    let next_payment_amount_text = next_payment_amount.map(canonical_amount);
+    let changed = transaction.execute(
+        "UPDATE payment_documents SET due_date = ?1, next_payment_amount = ?2 WHERE id = ?3",
+        params![
+            due_date.format("%Y-%m-%d").to_string(),
+            next_payment_amount_text,
+            payment_document_id
+        ],
+    )?;
+    if changed == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows.into());
+    }
+
+    let expense_id = if let Some(expense) = expense {
+        Some(save_transaction_in_transaction(
+            &transaction,
+            TransactionKind::Expense,
+            None,
+            expense.date,
+            expense.category_id,
+            expense.amount,
+            expense.currency,
+            &expense.comment,
+            expense.payment_document_id,
+            expense.affects_deposit_rate,
+            Some(expense.expense_place_id),
+        )?)
+    } else {
+        None
+    };
+
+    transaction.commit()?;
+    Ok(expense_id)
 }
 
 fn adjust_card_balance(connection: &Connection, id: i64, delta: Decimal) -> Result<(), DbError> {
@@ -2908,10 +3015,11 @@ mod tests {
         list_transactions, list_transactions_filtered, list_transactions_filtered_by_place,
         list_transfers_filtered, load_analysis_transactions,
         load_analysis_transactions_by_category, restore_pending_database_import, save_bank,
-        save_category, save_expense_place, save_payment_document, save_savings, save_transaction,
-        save_transaction_with_card, save_transaction_with_card_and_rate_effect_and_place,
-        save_transfer, set_app_setting, set_currency_exchange_rate, set_primary_currency,
-        stage_database_import, DbError, MIGRATIONS,
+        save_category, save_expense_place, save_next_payment, save_payment_document, save_savings,
+        save_transaction, save_transaction_with_card,
+        save_transaction_with_card_and_rate_effect_and_place, save_transfer, set_app_setting,
+        set_currency_exchange_rate, set_primary_currency, stage_database_import, DbError,
+        NextPaymentExpense, MIGRATIONS,
     };
 
     fn transfer_fixture() -> (tempfile::TempDir, Connection, i64, i64, i64) {
@@ -3126,6 +3234,194 @@ mod tests {
         .unwrap();
         let place_id = save_expense_place(&connection, None, "Магазин у дома", None).unwrap();
         (directory, connection, category_id, place_id)
+    }
+
+    fn next_payment_fixture() -> (tempfile::TempDir, Connection, i64, i64, i64, i64) {
+        let (directory, connection, category_id, place_id) = expense_place_fixture();
+        let bank_id = save_bank(&connection, None, "Банк платежа", "").unwrap();
+        let mut credit = payment_document_details(bank_id);
+        credit.card_type = PaymentCardType::Credit;
+        credit.amount = Decimal::from(5000);
+        credit.currency = Some(Currency::Rub);
+        credit.due_date = NaiveDate::from_ymd_opt(2026, 12, 10);
+        credit.grace_period_days = Some(30);
+        let credit_card_id = save_payment_document(&connection, None, &credit).unwrap();
+
+        let mut debit = payment_document_details(bank_id);
+        debit.amount = Decimal::from(2000);
+        debit.currency = Some(Currency::Rub);
+        let debit_card_id = save_payment_document(&connection, None, &debit).unwrap();
+
+        (
+            directory,
+            connection,
+            credit_card_id,
+            debit_card_id,
+            category_id,
+            place_id,
+        )
+    }
+
+    fn next_payment_expense(
+        date: NaiveDate,
+        category_id: i64,
+        payment_document_id: Option<i64>,
+        expense_place_id: Option<i64>,
+    ) -> NextPaymentExpense {
+        NextPaymentExpense {
+            date,
+            category_id,
+            amount: Decimal::from_str("250.75").unwrap(),
+            currency: Currency::Rub,
+            comment: "Погашение кредитной карты".to_owned(),
+            payment_document_id,
+            expense_place_id,
+            affects_deposit_rate: false,
+        }
+    }
+
+    #[test]
+    fn save_next_payment_updates_fields_without_creating_an_expense() {
+        let (_directory, connection, credit_card_id, _, _, _) = next_payment_fixture();
+        let due_date = NaiveDate::from_ymd_opt(2027, 1, 10).unwrap();
+        let amount = Decimal::from_str("250.75").unwrap();
+
+        let expense_id =
+            save_next_payment(&connection, credit_card_id, due_date, Some(amount), None).unwrap();
+
+        assert_eq!(expense_id, None);
+        let document = list_payment_documents(&connection, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|document| document.id == credit_card_id)
+            .unwrap();
+        assert_eq!(document.due_date, Some(due_date));
+        assert_eq!(document.next_payment_amount, Some(amount));
+        let expenses_count: i64 = connection
+            .query_row("SELECT count(*) FROM expenses", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(expenses_count, 0);
+    }
+
+    #[test]
+    fn save_next_payment_creates_expense_and_updates_selected_card_balance() {
+        let (_directory, connection, credit_card_id, debit_card_id, category_id, place_id) =
+            next_payment_fixture();
+        let due_date = NaiveDate::from_ymd_opt(2027, 1, 10).unwrap();
+        let expense_date = NaiveDate::from_ymd_opt(2027, 1, 9).unwrap();
+        let expense = next_payment_expense(
+            expense_date,
+            category_id,
+            Some(debit_card_id),
+            Some(place_id),
+        );
+
+        let expense_id = save_next_payment(
+            &connection,
+            credit_card_id,
+            due_date,
+            Some(Decimal::from(400)),
+            Some(expense),
+        )
+        .unwrap()
+        .unwrap();
+
+        let (stored_date, stored_amount, stored_category, stored_card, stored_place): (
+            String,
+            String,
+            i64,
+            Option<i64>,
+            Option<i64>,
+        ) = connection
+            .query_row(
+                "SELECT date, amount, category_id, payment_document_id, expense_place_id
+                 FROM expenses WHERE id = ?1",
+                [expense_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(stored_date, expense_date.format("%Y-%m-%d").to_string());
+        assert_eq!(stored_amount, "250.75");
+        assert_eq!(stored_category, category_id);
+        assert_eq!(stored_card, Some(debit_card_id));
+        assert_eq!(stored_place, Some(place_id));
+        assert_eq!(card_balance(&connection, debit_card_id), "1749.25");
+        let document = list_payment_documents(&connection, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|document| document.id == credit_card_id)
+            .unwrap();
+        assert_eq!(document.next_payment_amount, Some(Decimal::from(400)));
+    }
+
+    #[test]
+    fn save_next_payment_rolls_back_card_fields_when_expense_is_invalid() {
+        let (_directory, connection, credit_card_id, debit_card_id, _, _) = next_payment_fixture();
+        let new_due_date = NaiveDate::from_ymd_opt(2027, 1, 10).unwrap();
+        let invalid_expense =
+            next_payment_expense(new_due_date, i64::MAX, Some(debit_card_id), None);
+
+        let result = save_next_payment(
+            &connection,
+            credit_card_id,
+            new_due_date,
+            Some(Decimal::from(250)),
+            Some(invalid_expense),
+        );
+
+        assert!(matches!(result, Err(DbError::CategoryUnavailable)));
+        let document = list_payment_documents(&connection, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|document| document.id == credit_card_id)
+            .unwrap();
+        assert_eq!(document.due_date, NaiveDate::from_ymd_opt(2026, 12, 10));
+        assert_eq!(document.next_payment_amount, None);
+        assert_eq!(card_balance(&connection, debit_card_id), "2000");
+        let expenses_count: i64 = connection
+            .query_row("SELECT count(*) FROM expenses", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(expenses_count, 0);
+    }
+
+    #[test]
+    fn save_next_payment_rolls_back_balance_when_expense_insert_fails() {
+        let (_directory, connection, credit_card_id, debit_card_id, category_id, place_id) =
+            next_payment_fixture();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_test_expense BEFORE INSERT ON expenses
+             BEGIN SELECT RAISE(ABORT, 'expense write failed'); END;",
+            )
+            .unwrap();
+        let date = NaiveDate::from_ymd_opt(2027, 1, 10).unwrap();
+        let expense = next_payment_expense(date, category_id, Some(debit_card_id), Some(place_id));
+
+        assert!(save_next_payment(
+            &connection,
+            credit_card_id,
+            date,
+            Some(Decimal::from(400)),
+            Some(expense)
+        )
+        .is_err());
+
+        assert_eq!(card_balance(&connection, debit_card_id), "2000");
+        let document = list_payment_documents(&connection, None, None, None)
+            .unwrap()
+            .into_iter()
+            .find(|document| document.id == credit_card_id)
+            .unwrap();
+        assert_eq!(document.due_date, NaiveDate::from_ymd_opt(2026, 12, 10));
+        assert_eq!(document.next_payment_amount, None);
     }
 
     fn create_legacy_database(path: &std::path::Path, version: i64) -> Connection {

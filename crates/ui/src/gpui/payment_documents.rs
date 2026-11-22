@@ -7,8 +7,9 @@ use std::rc::Rc;
 
 use chrono::NaiveDate;
 use finance_core::{
-    canonical_amount, parse_amount, parse_non_negative_decimal, Bank, Currency, PaymentCardType,
-    PaymentDocument, PaymentDocumentDetails, PaymentSystem, SavingsAccount,
+    canonical_amount, parse_amount, parse_amount_expression, parse_non_negative_decimal, Bank,
+    Currency, PaymentCardType, PaymentDocument, PaymentDocumentDetails, PaymentSystem,
+    SavingsAccount, TransactionKind,
 };
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -16,7 +17,7 @@ use gpui_kit::component::calendar::Date;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::dialog::{AlertDialog, Dialog};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{
     Column, ColumnFixed, ColumnGroup, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
@@ -26,6 +27,11 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use rust_decimal::Decimal;
+
+use super::support::{
+    card_label, category_tree_labels, comment_suggestions, eligible_cards, expense_place_label,
+};
 
 const DATE_FORMAT: &str = "%Y-%m-%d";
 const ALL_LABEL: &str = "Все";
@@ -33,10 +39,11 @@ const ALL_BANKS_LABEL: &str = "Все банки";
 const NO_CURRENCY_LABEL: &str = "валюта не указана";
 const RATE_WARNING: &str =
     "Условие сохраняется как возможность; приложение не подтверждает выполнение порога трат.";
-const DEFAULT_COLUMN_WIDTHS: [f32; 13] = [
-    140.0, 120.0, 90.0, 110.0, 100.0, 120.0, 100.0, 110.0, 130.0, 140.0, 110.0, 220.0, 160.0,
+const DEFAULT_COLUMN_WIDTHS: [f32; 14] = [
+    140.0, 120.0, 90.0, 110.0, 100.0, 120.0, 100.0, 110.0, 130.0, 76.0, 140.0, 110.0, 220.0, 160.0,
 ];
 const ACTIONS_COLUMN_WIDTH: f32 = 160.0;
+const NEXT_PAYMENT_ACTION_COLUMN_WIDTH: f32 = 76.0;
 const MIN_COLUMN_WIDTH: f32 = 60.0;
 const MAX_COLUMN_WIDTH: f32 = 1200.0;
 const CARDS_COLUMN_WIDTHS_KEY: &str = "table_columns.payment_documents.v2";
@@ -48,9 +55,10 @@ const COL_AMOUNT: usize = 4;
 const COL_GRACE_PERIOD: usize = 6;
 const COL_NEXT_PAYMENT_DATE: usize = 7;
 const COL_NEXT_PAYMENT: usize = 8;
-const COL_SAVINGS: usize = 11;
-const COL_ACTIONS: usize = 12;
-const HEADERS: [&str; 13] = [
+const COL_NEXT_PAYMENT_ACTION: usize = 9;
+const COL_SAVINGS: usize = 12;
+const COL_ACTIONS: usize = 13;
+const HEADERS: [&str; 14] = [
     "Название",
     "Банк",
     "Система",
@@ -60,25 +68,27 @@ const HEADERS: [&str; 13] = [
     "Льгота, дни",
     "Дата",
     "Размер",
+    "",
     "Условие ставки",
     "Минимум трат",
     "Связанные накопления",
     "Действия",
 ];
 const NEXT_PAYMENT_GROUP_LABEL: &str = "Следующий платёж";
-const NEXT_PAYMENT_GROUP_SPAN: usize = 2;
+const NEXT_PAYMENT_GROUP_SPAN: usize = 3;
 
 type Choice = Entity<SelectState<Vec<SharedString>>>;
 
-/// Группа «Следующий платёж» объединяет колонки «Дата» и «Размер».
+/// Группа «Следующий платёж» объединяет дату, размер и кнопку редактирования.
 /// Пустые группы нужны, чтобы сохранить позиции всех остальных колонок,
 /// включая закреплённую колонку «Действия».
 fn next_payment_group_headers() -> Vec<Vec<ColumnGroup>> {
     vec![vec![
         ColumnGroup::new("", COL_NEXT_PAYMENT_DATE),
         ColumnGroup::new(NEXT_PAYMENT_GROUP_LABEL, NEXT_PAYMENT_GROUP_SPAN),
-        ColumnGroup::new("", COL_SAVINGS - COL_NEXT_PAYMENT),
+        ColumnGroup::new("", COL_SAVINGS - COL_NEXT_PAYMENT_ACTION - 1),
         ColumnGroup::new("", COL_ACTIONS - COL_SAVINGS),
+        ColumnGroup::new("", 1),
     ]]
 }
 
@@ -276,6 +286,125 @@ impl CardForm {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct NextPaymentInput {
+    due_date: Option<NaiveDate>,
+    next_payment_amount: String,
+    create_expense: bool,
+    expense_amount: String,
+    expense_currency: Option<Currency>,
+    expense_date: Option<NaiveDate>,
+    category_id: Option<i64>,
+    payment_document_id: Option<i64>,
+    expense_place_id: Option<i64>,
+    affects_deposit_rate: bool,
+    comment: String,
+}
+
+fn selected_date(state: &DatePickerState) -> Option<NaiveDate> {
+    match state.date() {
+        Date::Single(date) => date,
+        Date::Range(_, _) => None,
+    }
+}
+
+fn build_next_payment_update(
+    input: &NextPaymentInput,
+) -> Result<
+    (
+        NaiveDate,
+        Option<Decimal>,
+        Option<finance_db::NextPaymentExpense>,
+    ),
+    String,
+> {
+    let due_date = input
+        .due_date
+        .ok_or_else(|| "Выберите дату следующего платежа".to_owned())?;
+    let next_payment_amount = if input.next_payment_amount.trim().is_empty() {
+        None
+    } else {
+        Some(
+            parse_non_negative_decimal(&input.next_payment_amount).map_err(|_| {
+                "Размер следующего платежа должен быть неотрицательным числом".to_owned()
+            })?,
+        )
+    };
+    let expense = if input.create_expense {
+        let expense_date = input
+            .expense_date
+            .ok_or_else(|| "Выберите дату расхода".to_owned())?;
+        let category_id = input
+            .category_id
+            .ok_or_else(|| "Выберите категорию расхода".to_owned())?;
+        let amount =
+            parse_amount_expression(&input.expense_amount).map_err(|error| error.to_string())?;
+        let currency = input
+            .expense_currency
+            .ok_or_else(|| "Выберите валюту расхода".to_owned())?;
+        Some(finance_db::NextPaymentExpense {
+            date: expense_date,
+            category_id,
+            amount,
+            currency,
+            comment: input.comment.clone(),
+            payment_document_id: input.payment_document_id,
+            expense_place_id: input.expense_place_id,
+            affects_deposit_rate: input.affects_deposit_rate,
+        })
+    } else {
+        None
+    };
+    Ok((due_date, next_payment_amount, expense))
+}
+
+struct NextPaymentForm {
+    id: i64,
+    due_date: Entity<DatePickerState>,
+    next_payment_amount: Entity<InputState>,
+    create_expense: bool,
+    expense_amount: Entity<InputState>,
+    expense_currency: Option<Currency>,
+    currency_select: Choice,
+    expense_date: Entity<DatePickerState>,
+    category_ids: Vec<i64>,
+    category_id: Option<i64>,
+    category_select: Choice,
+    available_cards: Vec<PaymentDocument>,
+    card_ids: Vec<Option<i64>>,
+    payment_document_id: Option<i64>,
+    affects_deposit_rate: bool,
+    card_select: Choice,
+    expense_place_ids: Vec<Option<i64>>,
+    expense_place_id: Option<i64>,
+    expense_place_select: Choice,
+    comment: Entity<TextareaState>,
+    comment_history: Vec<String>,
+    suggestions: Vec<String>,
+    error: Option<String>,
+    initial: NextPaymentInput,
+    confirm_discard: bool,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl NextPaymentForm {
+    fn input(&self, cx: &App) -> NextPaymentInput {
+        NextPaymentInput {
+            due_date: selected_date(self.due_date.read(cx)),
+            next_payment_amount: self.next_payment_amount.read(cx).value().to_string(),
+            create_expense: self.create_expense,
+            expense_amount: self.expense_amount.read(cx).value().to_string(),
+            expense_currency: self.expense_currency,
+            expense_date: selected_date(self.expense_date.read(cx)),
+            category_id: self.category_id,
+            payment_document_id: self.payment_document_id,
+            expense_place_id: self.expense_place_id,
+            affects_deposit_rate: self.affects_deposit_rate,
+            comment: self.comment.read(cx).value().to_string(),
+        }
+    }
+}
+
 pub(crate) struct PaymentDocumentsPage {
     database: Rc<Database>,
     banks: Vec<Bank>,
@@ -291,6 +420,7 @@ pub(crate) struct PaymentDocumentsPage {
     currency_filter_select: Choice,
     message: Option<(String, bool)>,
     form: Option<CardForm>,
+    next_payment_form: Option<NextPaymentForm>,
     confirm_discard: bool,
     _subscriptions: Vec<Subscription>,
 }
@@ -388,6 +518,7 @@ impl PaymentDocumentsPage {
             currency_filter_select,
             message: None,
             form: None,
+            next_payment_form: None,
             confirm_discard: false,
             _subscriptions: subscriptions,
         };
@@ -512,6 +643,7 @@ impl PaymentDocumentsPage {
     ) {
         self.message = None;
         self.confirm_discard = false;
+        self.next_payment_form = None;
         let bank_id = match existing {
             Some(document) => Some(document.bank_id),
             None => self.bank_filter,
@@ -805,6 +937,554 @@ impl PaymentDocumentsPage {
             }
             Err(message) => {
                 if let Some(form) = self.form.as_mut() {
+                    form.error = Some(message);
+                }
+                cx.notify();
+                false
+            }
+        }
+    }
+
+    fn open_next_payment(
+        &mut self,
+        document: &PaymentDocument,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.form.is_some() || self.next_payment_form.is_some() {
+            return;
+        }
+        let categories =
+            match finance_db::list_categories(&self.database, TransactionKind::Expense, true) {
+                Ok(categories) => categories,
+                Err(error) => {
+                    self.error(error.to_string(), cx);
+                    return;
+                }
+            };
+        let places = match finance_db::list_expense_places(&self.database) {
+            Ok(places) => places,
+            Err(error) => {
+                self.error(error.to_string(), cx);
+                return;
+            }
+        };
+        let cards = match finance_db::list_payment_documents(&self.database, None, None, None) {
+            Ok(cards) => cards,
+            Err(error) => {
+                self.error(error.to_string(), cx);
+                return;
+            }
+        };
+        let comment_history = match finance_db::list_transaction_comments(&self.database) {
+            Ok(comments) => comments,
+            Err(error) => {
+                self.error(error.to_string(), cx);
+                return;
+            }
+        };
+        let category_labels: Vec<_> = category_tree_labels(&categories)
+            .into_iter()
+            .filter(|(id, _)| {
+                categories
+                    .iter()
+                    .any(|category| category.id == *id && category.is_active)
+            })
+            .collect();
+        let category_ids: Vec<i64> = category_labels.iter().map(|(id, _)| *id).collect();
+        let category_id = category_ids.first().copied();
+        let category_select = choice(
+            category_labels
+                .iter()
+                .map(|(_, label)| label.clone())
+                .collect(),
+            0,
+            window,
+            cx,
+        );
+        let eligible: Vec<PaymentDocument> = eligible_cards(&cards, document.currency)
+            .into_iter()
+            .cloned()
+            .collect();
+        let card_ids: Vec<Option<i64>> = std::iter::once(None)
+            .chain(eligible.iter().map(|card| Some(card.id)))
+            .collect();
+        let payment_document_id = None;
+        let card_select = choice(
+            std::iter::once("Без карты".to_owned())
+                .chain(eligible.iter().map(card_label))
+                .collect(),
+            card_ids
+                .iter()
+                .position(|id| *id == payment_document_id)
+                .unwrap_or(0),
+            window,
+            cx,
+        );
+        let expense_place_ids: Vec<Option<i64>> = std::iter::once(None)
+            .chain(places.iter().map(|place| Some(place.id)))
+            .collect();
+        let expense_place_select = choice(
+            std::iter::once("Не указано".to_owned())
+                .chain(places.iter().map(expense_place_label))
+                .collect(),
+            0,
+            window,
+            cx,
+        );
+        let due_date = cx.new(|cx| {
+            let mut state = DatePickerState::new(window, cx).date_format(DATE_FORMAT);
+            state.set_date(Date::Single(document.due_date), window, cx);
+            state
+        });
+        let expense_date = cx.new(|cx| {
+            let mut state = DatePickerState::new(window, cx).date_format(DATE_FORMAT);
+            state.set_date(Date::Single(document.due_date), window, cx);
+            state
+        });
+        let next_payment_amount = text_input(
+            "Размер следующего платежа",
+            &document
+                .next_payment_amount
+                .map_or_else(String::new, canonical_amount),
+            window,
+            cx,
+        );
+        let expense_amount = text_input(
+            "Сумма расхода",
+            &document
+                .next_payment_amount
+                .map_or_else(String::new, canonical_amount),
+            window,
+            cx,
+        );
+        let currency_select = choice(
+            currency_labels("Выберите валюту"),
+            currency_row(document.currency),
+            window,
+            cx,
+        );
+        let comment = cx.new(|cx| TextareaState::new(window, cx).rows(3));
+        let subscriptions = vec![
+            cx.subscribe_in(&due_date, window, |_, _, _: &DatePickerEvent, _, cx| {
+                cx.notify()
+            }),
+            cx.subscribe_in(&expense_date, window, |_, _, _: &DatePickerEvent, _, cx| {
+                cx.notify()
+            }),
+            cx.subscribe_in(
+                &next_payment_amount,
+                window,
+                |_, _, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        cx.notify();
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &expense_amount,
+                window,
+                |_, _, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        cx.notify();
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &currency_select,
+                window,
+                |this: &mut Self, state, _: &SelectEvent<Vec<SharedString>>, window, cx| {
+                    if let Some(form) = this.next_payment_form.as_mut() {
+                        form.expense_currency = selected_row(state, cx).and_then(currency_from_row);
+                        form.payment_document_id = None;
+                        form.affects_deposit_rate = false;
+                        let eligible = eligible_cards(&form.available_cards, form.expense_currency);
+                        form.card_ids = std::iter::once(None)
+                            .chain(eligible.iter().map(|card| Some(card.id)))
+                            .collect();
+                        let items = std::iter::once("Без карты".to_owned())
+                            .chain(eligible.iter().map(|card| card_label(card)))
+                            .map(SharedString::from)
+                            .collect();
+                        form.card_select.update(cx, |state, cx| {
+                            state.set_items(items, window, cx);
+                            state.set_selected_index(Some(IndexPath::default().row(0)), window, cx);
+                        });
+                    }
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &comment,
+                window,
+                |this: &mut Self, state, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        if let Some(form) = this.next_payment_form.as_mut() {
+                            form.suggestions =
+                                comment_suggestions(&form.comment_history, &state.read(cx).value());
+                        }
+                        cx.notify();
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &category_select,
+                window,
+                |this: &mut Self, state, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                    let SelectEvent::Confirm(_) = event;
+                    if let Some(form) = this.next_payment_form.as_mut() {
+                        form.category_id = selected_row(state, cx)
+                            .and_then(|row| form.category_ids.get(row).copied());
+                    }
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &card_select,
+                window,
+                |this: &mut Self, state, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                    let SelectEvent::Confirm(_) = event;
+                    if let Some(form) = this.next_payment_form.as_mut() {
+                        form.payment_document_id = selected_row(state, cx)
+                            .and_then(|row| form.card_ids.get(row).copied().flatten());
+                        if !form.available_cards.iter().any(|card| {
+                            Some(card.id) == form.payment_document_id && card.affects_deposit_rate
+                        }) {
+                            form.affects_deposit_rate = false;
+                        }
+                    }
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &expense_place_select,
+                window,
+                |this: &mut Self, state, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                    let SelectEvent::Confirm(_) = event;
+                    if let Some(form) = this.next_payment_form.as_mut() {
+                        form.expense_place_id = selected_row(state, cx)
+                            .and_then(|row| form.expense_place_ids.get(row).copied().flatten());
+                    }
+                    cx.notify();
+                },
+            ),
+        ];
+        let mut form = NextPaymentForm {
+            id: document.id,
+            due_date,
+            next_payment_amount,
+            create_expense: false,
+            expense_amount,
+            expense_currency: document.currency,
+            currency_select,
+            expense_date,
+            category_ids,
+            category_id,
+            category_select,
+            available_cards: cards,
+            card_ids,
+            payment_document_id,
+            affects_deposit_rate: false,
+            card_select,
+            expense_place_ids,
+            expense_place_id: None,
+            expense_place_select,
+            comment,
+            comment_history,
+            suggestions: Vec::new(),
+            error: None,
+            initial: NextPaymentInput {
+                due_date: None,
+                next_payment_amount: String::new(),
+                create_expense: false,
+                expense_amount: String::new(),
+                expense_currency: None,
+                expense_date: None,
+                category_id: None,
+                payment_document_id: None,
+                expense_place_id: None,
+                affects_deposit_rate: false,
+                comment: String::new(),
+            },
+            confirm_discard: false,
+            _subscriptions: Vec::new(),
+        };
+        form.initial = form.input(cx);
+        form._subscriptions = subscriptions;
+        self.message = None;
+        self.next_payment_form = Some(form);
+        cx.notify();
+        self.open_next_payment_dialog(window, cx);
+    }
+
+    fn open_next_payment_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity();
+        window.open_dialog(cx, move |dialog: Dialog, _, cx| {
+            let body = this.update(cx, |page, cx| page.render_next_payment_dialog(cx));
+            dialog
+                .title("Изменить следующий платёж")
+                .centered()
+                .w(px(720.0))
+                .close_button(false)
+                .overlay_closable(false)
+                .keyboard(false)
+                .child(body)
+        });
+    }
+
+    fn render_next_payment_dialog(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(form) = self.next_payment_form.as_ref() else {
+            return div().into_any_element();
+        };
+        if form.confirm_discard {
+            let this = cx.entity();
+            return div()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .p_4()
+                .child("Несохранённые изменения будут потеряны.")
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("next-payment-continue-editing")
+                                .label("Вернуться к форме")
+                                .on_click(move |_, _, cx| {
+                                    this.update(cx, |page, cx| {
+                                        if let Some(form) = page.next_payment_form.as_mut() {
+                                            form.confirm_discard = false;
+                                        }
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new("next-payment-discard-changes")
+                                .primary()
+                                .label("Не сохранять")
+                                .on_click(cx.listener(|page, _, window, cx| {
+                                    page.next_payment_form = None;
+                                    window.close_dialog(cx);
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .into_any_element();
+        }
+
+        let field = |label: &'static str, control: AnyElement| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_size(px(12.0)).child(label))
+                .child(control)
+        };
+        let mut fields = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_4()
+            .child(
+                div()
+                    .flex()
+                    .gap_4()
+                    .child(field(
+                        "Дата следующего платежа",
+                        DatePicker::new(&form.due_date)
+                            .placeholder("Выбрать дату")
+                            .cleanable(true)
+                            .into_any_element(),
+                    ))
+                    .child(field(
+                        "Размер следующего платежа",
+                        Input::new(&form.next_payment_amount).into_any_element(),
+                    )),
+            )
+            .child(
+                Checkbox::new("next-payment-create-expense")
+                    .label("Сформировать расход")
+                    .checked(form.create_expense)
+                    .on_click(cx.listener(|page, checked: &bool, _, cx| {
+                        if let Some(form) = page.next_payment_form.as_mut() {
+                            form.create_expense = *checked;
+                        }
+                        cx.notify();
+                    })),
+            );
+        if form.create_expense {
+            let rate_eligible = form
+                .available_cards
+                .iter()
+                .any(|card| Some(card.id) == form.payment_document_id && card.affects_deposit_rate);
+            fields = fields
+                .child(
+                    div()
+                        .flex()
+                        .gap_4()
+                        .child(field(
+                            "Сумма расхода",
+                            Input::new(&form.expense_amount).into_any_element(),
+                        ))
+                        .child(field(
+                            "Валюта расхода",
+                            Select::new(&form.currency_select).into_any_element(),
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_4()
+                        .child(field(
+                            "Категория",
+                            Select::new(&form.category_select)
+                                .placeholder("Выберите категорию")
+                                .into_any_element(),
+                        ))
+                        .child(field(
+                            "Списать с карты",
+                            Select::new(&form.card_select)
+                                .placeholder("Без карты")
+                                .into_any_element(),
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_4()
+                        .child(field(
+                            "Место траты",
+                            Select::new(&form.expense_place_select)
+                                .placeholder("Не указано")
+                                .into_any_element(),
+                        ))
+                        .child(field(
+                            "Дата расхода",
+                            DatePicker::new(&form.expense_date)
+                                .placeholder("Выбрать дату")
+                                .cleanable(true)
+                                .into_any_element(),
+                        )),
+                )
+                .child(field(
+                    "Комментарий",
+                    Textarea::new(&form.comment).into_any_element(),
+                ))
+                .child(
+                    Checkbox::new("next-payment-affects-rate")
+                        .label("Учитывать расход при расчёте процентов по вкладам")
+                        .checked(form.affects_deposit_rate)
+                        .disabled(!rate_eligible)
+                        .on_click(cx.listener(|page, checked: &bool, _, cx| {
+                            if let Some(form) = page.next_payment_form.as_mut() {
+                                form.affects_deposit_rate = *checked;
+                            }
+                            cx.notify();
+                        })),
+                );
+            if !form.suggestions.is_empty() {
+                fields = fields.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child("Ранее использованные комментарии:")
+                        .children(form.suggestions.iter().enumerate().map(|(index, text)| {
+                            let text = text.clone();
+                            Button::new(("next-payment-suggestion", index))
+                                .compact()
+                                .label(text.clone())
+                                .on_click(cx.listener(move |page, _, window, cx| {
+                                    if let Some(form) = page.next_payment_form.as_mut() {
+                                        form.suggestions.clear();
+                                        form.comment.update(cx, |state, cx| {
+                                            state.set_value(text.clone(), window, cx);
+                                        });
+                                    }
+                                    cx.notify();
+                                }))
+                        })),
+                );
+            }
+        }
+        if let Some(error) = &form.error {
+            fields = fields.child(div().text_color(cx.theme().danger).child(error.clone()));
+        }
+        let this = cx.entity();
+        fields
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(Button::new("next-payment-cancel").label("Отмена").on_click(
+                        cx.listener(|page, _, window, cx| {
+                            page.request_cancel_next_payment(window, cx);
+                        }),
+                    ))
+                    .child(
+                        Button::new("next-payment-save")
+                            .primary()
+                            .label("Сохранить")
+                            .on_click(move |_, window, cx| {
+                                let saved = this.update(cx, |page, cx| page.save_next_payment(cx));
+                                if saved {
+                                    window.close_dialog(cx);
+                                }
+                            }),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn request_cancel_next_payment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let has_changes = self
+            .next_payment_form
+            .as_ref()
+            .is_some_and(|form| form.input(cx) != form.initial);
+        if has_changes {
+            if let Some(form) = self.next_payment_form.as_mut() {
+                form.confirm_discard = true;
+            }
+        } else {
+            self.next_payment_form = None;
+            window.close_dialog(cx);
+        }
+        cx.notify();
+    }
+
+    fn save_next_payment(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(form) = self.next_payment_form.as_ref() else {
+            return false;
+        };
+        let input = form.input(cx);
+        let id = form.id;
+        let result = build_next_payment_update(&input).and_then(|(due_date, amount, expense)| {
+            finance_db::save_next_payment(&self.database, id, due_date, amount, expense)
+                .map_err(|error| error.to_string())
+        });
+        match result {
+            Ok(expense_id) => {
+                self.next_payment_form = None;
+                self.refresh(cx);
+                let message = if expense_id.is_some() {
+                    "Следующий платёж изменён, расход добавлен"
+                } else {
+                    "Следующий платёж изменён"
+                };
+                if !matches!(&self.message, Some((_, true))) {
+                    self.message = Some((message.to_owned(), false));
+                    cx.notify();
+                }
+                true
+            }
+            Err(message) => {
+                if let Some(form) = self.next_payment_form.as_mut() {
                     form.error = Some(message);
                 }
                 cx.notify();
@@ -1157,7 +1837,7 @@ fn parse_column_widths(value: &str) -> Option<Vec<f32>> {
         .split(',')
         .map(|part| part.trim().parse::<f32>().ok())
         .collect::<Option<Vec<_>>>()?;
-    (widths.len() == HEADERS.len()
+    ((widths.len() == HEADERS.len() || widths.len() + 1 == HEADERS.len())
         && widths.iter().all(|width| {
             width.is_finite() && (MIN_COLUMN_WIDTH..=MAX_COLUMN_WIDTH).contains(width)
         }))
@@ -1165,6 +1845,12 @@ fn parse_column_widths(value: &str) -> Option<Vec<f32>> {
 }
 
 fn column_widths_with_fixed_actions(mut widths: Vec<f32>) -> Vec<f32> {
+    if widths.len() + 1 == HEADERS.len() {
+        widths.insert(COL_NEXT_PAYMENT_ACTION, NEXT_PAYMENT_ACTION_COLUMN_WIDTH);
+    }
+    if let Some(width) = widths.get_mut(COL_NEXT_PAYMENT_ACTION) {
+        *width = NEXT_PAYMENT_ACTION_COLUMN_WIDTH;
+    }
     if let Some(width) = widths.get_mut(COL_ACTIONS) {
         *width = ACTIONS_COLUMN_WIDTH;
     }
@@ -1178,7 +1864,7 @@ fn parse_saved_column_widths(value: &str) -> Option<Vec<f32>> {
 /// Ширины сохранялись по индексам; после перестановки колонок возвращаем каждой её ширину.
 fn migrate_legacy_column_widths(mut widths: Vec<f32>) -> Vec<f32> {
     widths.swap(COL_GRACE_PERIOD, COL_NEXT_PAYMENT_DATE);
-    widths
+    column_widths_with_fixed_actions(widths)
 }
 
 fn load_column_widths(database: &Database) -> Vec<f32> {
@@ -1239,11 +1925,10 @@ fn sort_cards(rows: &mut [PaymentDocument], sort: Option<(usize, ColumnSort)>) {
                 .to_lowercase()
                 .cmp(&b.payment_system.code().to_lowercase()),
             COL_AMOUNT => a.amount.cmp(&b.amount),
-            COL_NEXT_PAYMENT_DATE => {
-                a.due_date.cmp(&b.due_date).then_with(|| {
-                    Option::cmp(&a.next_payment_amount, &b.next_payment_amount)
-                })
-            }
+            COL_NEXT_PAYMENT_DATE => a
+                .due_date
+                .cmp(&b.due_date)
+                .then_with(|| Option::cmp(&a.next_payment_amount, &b.next_payment_amount)),
             COL_NEXT_PAYMENT => Option::cmp(&a.next_payment_amount, &b.next_payment_amount),
             _ => Ordering::Equal,
         };
@@ -1254,6 +1939,10 @@ fn sort_cards(rows: &mut [PaymentDocument], sort: Option<(usize, ColumnSort)>) {
         };
         ordering.then_with(|| default_order(a, b))
     });
+}
+
+fn has_next_payment_data(document: &PaymentDocument) -> bool {
+    document.due_date.is_some() || document.next_payment_amount.is_some()
 }
 
 struct CardsTable {
@@ -1314,19 +2003,24 @@ impl TableDelegate for CardsTable {
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
         let is_actions = col_ix == COL_ACTIONS;
+        let is_next_payment_action = col_ix == COL_NEXT_PAYMENT_ACTION;
         let column = Column::new(HEADERS[col_ix], HEADERS[col_ix])
             .width(px(self.widths[col_ix]))
             .min_width(px(if is_actions {
                 ACTIONS_COLUMN_WIDTH
+            } else if is_next_payment_action {
+                NEXT_PAYMENT_ACTION_COLUMN_WIDTH
             } else {
                 MIN_COLUMN_WIDTH
             }))
             .max_width(px(if is_actions {
                 ACTIONS_COLUMN_WIDTH
+            } else if is_next_payment_action {
+                NEXT_PAYMENT_ACTION_COLUMN_WIDTH
             } else {
                 MAX_COLUMN_WIDTH
             }))
-            .resizable(!is_actions)
+            .resizable(!is_actions && !is_next_payment_action)
             .movable(false);
         let column = if is_actions {
             column.fixed(ColumnFixed::Right)
@@ -1338,7 +2032,12 @@ impl TableDelegate for CardsTable {
             _ => ColumnSort::Default,
         };
         match col_ix {
-            COL_NAME | COL_BANK | COL_SYSTEM | COL_AMOUNT | COL_NEXT_PAYMENT_DATE | COL_NEXT_PAYMENT => column.sort(direction),
+            COL_NAME
+            | COL_BANK
+            | COL_SYSTEM
+            | COL_AMOUNT
+            | COL_NEXT_PAYMENT_DATE
+            | COL_NEXT_PAYMENT => column.sort(direction),
             _ => column,
         }
     }
@@ -1407,7 +2106,32 @@ impl TableDelegate for CardsTable {
                     .next_payment_amount
                     .map_or_else(String::new, canonical_amount),
             ),
-            9 => text(
+            COL_NEXT_PAYMENT_ACTION => {
+                if has_next_payment_data(document) {
+                    let target = document.clone();
+                    let page = self.page.clone();
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w_full()
+                        .h_full()
+                        .child(
+                            Button::new(("next-payment-edit", document.id as usize))
+                                .xsmall()
+                                .label("Изменить")
+                                .on_click(move |_, window, cx| {
+                                    let _ = page.update(cx, |page, cx| {
+                                        page.open_next_payment(&target, window, cx)
+                                    });
+                                }),
+                        )
+                        .into_any_element()
+                } else {
+                    div().into_any_element()
+                }
+            }
+            10 => text(
                 if document.affects_deposit_rate {
                     "Условно повышает"
                 } else {
@@ -1415,7 +2139,7 @@ impl TableDelegate for CardsTable {
                 }
                 .to_owned(),
             ),
-            10 => text(
+            11 => text(
                 document
                     .min_monthly_spend
                     .map_or_else(String::new, canonical_amount),
@@ -1549,15 +2273,20 @@ impl Render for PaymentDocumentsPage {
 
 #[cfg(test)]
 mod tests {
+    use chrono::NaiveDate;
     use gpui_kit::component::table::ColumnSort;
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
 
     use super::{
-        build_details, currency_from_row, currency_row, format_column_widths, load_column_widths,
-        next_payment_group_headers, parse_column_widths, sort_cards, CardInput, Currency, Database,
-        PaymentCardType, PaymentDocument, PaymentSystem, ACTIONS_COLUMN_WIDTH, COL_ACTIONS,
-        COL_AMOUNT, COL_BANK, COL_GRACE_PERIOD, COL_NAME, COL_NEXT_PAYMENT, COL_NEXT_PAYMENT_DATE,
-        COL_SYSTEM, DEFAULT_COLUMN_WIDTHS, HEADERS, LEGACY_CARDS_COLUMN_WIDTHS_KEY,
-        NEXT_PAYMENT_GROUP_LABEL, NEXT_PAYMENT_GROUP_SPAN,
+        build_details, build_next_payment_update, currency_from_row, currency_row,
+        format_column_widths, has_next_payment_data, load_column_widths,
+        next_payment_group_headers, parse_column_widths, parse_saved_column_widths, sort_cards,
+        CardInput, Currency, Database, NextPaymentInput, PaymentCardType, PaymentDocument,
+        PaymentSystem, ACTIONS_COLUMN_WIDTH, COL_ACTIONS, COL_AMOUNT, COL_BANK, COL_GRACE_PERIOD,
+        COL_NAME, COL_NEXT_PAYMENT, COL_NEXT_PAYMENT_ACTION, COL_NEXT_PAYMENT_DATE, COL_SYSTEM,
+        DEFAULT_COLUMN_WIDTHS, HEADERS, LEGACY_CARDS_COLUMN_WIDTHS_KEY,
+        NEXT_PAYMENT_ACTION_COLUMN_WIDTH, NEXT_PAYMENT_GROUP_LABEL, NEXT_PAYMENT_GROUP_SPAN,
     };
 
     fn database_with_bank() -> Database {
@@ -1610,6 +2339,22 @@ mod tests {
 
     fn list(database: &Database, currency: Option<Currency>) -> Vec<PaymentDocument> {
         finance_db::list_payment_documents_filtered(database, None, None, None, currency).unwrap()
+    }
+
+    fn next_payment_input() -> NextPaymentInput {
+        NextPaymentInput {
+            due_date: NaiveDate::from_ymd_opt(2026, 12, 10),
+            next_payment_amount: "250.75".to_owned(),
+            create_expense: false,
+            expense_amount: "250.75".to_owned(),
+            expense_currency: Some(Currency::Rub),
+            expense_date: NaiveDate::from_ymd_opt(2026, 12, 10),
+            category_id: None,
+            payment_document_id: None,
+            expense_place_id: None,
+            affects_deposit_rate: false,
+            comment: String::new(),
+        }
     }
 
     #[test]
@@ -1800,10 +2545,27 @@ mod tests {
     }
 
     #[test]
+    fn old_column_width_settings_gain_a_fixed_next_payment_action_column() {
+        let mut old_widths = DEFAULT_COLUMN_WIDTHS.to_vec();
+        old_widths.remove(COL_NEXT_PAYMENT_ACTION);
+        old_widths[COL_BANK] = 245.0;
+
+        let widths = parse_saved_column_widths(&format_column_widths(&old_widths)).unwrap();
+
+        assert_eq!(widths.len(), HEADERS.len());
+        assert_eq!(
+            widths[COL_NEXT_PAYMENT_ACTION],
+            NEXT_PAYMENT_ACTION_COLUMN_WIDTH
+        );
+        assert_eq!(widths[COL_BANK], 245.0);
+    }
+
+    #[test]
     fn next_payment_header_groups_date_and_amount() {
         assert_eq!(HEADERS[COL_GRACE_PERIOD], "Льгота, дни");
         assert_eq!(HEADERS[COL_NEXT_PAYMENT_DATE], "Дата");
         assert_eq!(HEADERS[COL_NEXT_PAYMENT], "Размер");
+        assert_eq!(HEADERS[COL_NEXT_PAYMENT_ACTION], "");
 
         let rows = next_payment_group_headers();
         assert_eq!(rows.len(), 1);
@@ -1826,7 +2588,8 @@ mod tests {
     #[test]
     fn legacy_column_widths_follow_swapped_columns() {
         let database = database_with_bank();
-        let mut legacy_widths = DEFAULT_COLUMN_WIDTHS;
+        let mut legacy_widths = DEFAULT_COLUMN_WIDTHS.to_vec();
+        legacy_widths.remove(COL_NEXT_PAYMENT_ACTION);
         legacy_widths[COL_GRACE_PERIOD] = 175.0;
         legacy_widths[COL_NEXT_PAYMENT_DATE] = 195.0;
         finance_db::set_app_setting(
@@ -1844,6 +2607,63 @@ mod tests {
             widths[COL_NEXT_PAYMENT],
             DEFAULT_COLUMN_WIDTHS[COL_NEXT_PAYMENT]
         );
+        assert_eq!(
+            widths[COL_NEXT_PAYMENT_ACTION],
+            NEXT_PAYMENT_ACTION_COLUMN_WIDTH
+        );
+    }
+
+    #[test]
+    fn next_payment_button_is_available_when_either_payment_field_is_set() {
+        let mut entry = card(1, "Карта", "Банк", PaymentSystem::Visa, 100);
+        assert!(!has_next_payment_data(&entry));
+        entry.due_date = NaiveDate::from_ymd_opt(2026, 12, 10);
+        assert!(has_next_payment_data(&entry));
+        entry.due_date = None;
+        entry.next_payment_amount = Some(Decimal::ONE);
+        assert!(has_next_payment_data(&entry));
+    }
+
+    #[test]
+    fn next_payment_update_preserves_amount_without_creating_an_expense() {
+        let input = next_payment_input();
+
+        let (due_date, amount, expense) = build_next_payment_update(&input).unwrap();
+
+        assert_eq!(due_date, NaiveDate::from_ymd_opt(2026, 12, 10).unwrap());
+        assert_eq!(amount, Some(Decimal::from_str("250.75").unwrap()));
+        assert!(expense.is_none());
+    }
+
+    #[test]
+    fn next_payment_expense_uses_its_own_date_and_selected_currency() {
+        let mut input = next_payment_input();
+        input.create_expense = true;
+        input.category_id = Some(7);
+        input.payment_document_id = Some(3);
+        input.expense_place_id = Some(5);
+        input.comment = "Оплата карты".to_owned();
+        input.next_payment_amount = "400".to_owned();
+
+        let (_, amount, expense) = build_next_payment_update(&input).unwrap();
+        let expense = expense.unwrap();
+
+        assert_eq!(amount, Some(Decimal::from(400)));
+        assert_eq!(expense.amount, Decimal::from_str("250.75").unwrap());
+        assert_eq!(expense.date, NaiveDate::from_ymd_opt(2026, 12, 10).unwrap());
+        assert_eq!(expense.currency, Currency::Rub);
+        assert_eq!(expense.payment_document_id, Some(3));
+        assert_eq!(expense.expense_place_id, Some(5));
+    }
+
+    #[test]
+    fn next_payment_expense_requires_a_positive_payment_amount() {
+        let mut input = next_payment_input();
+        input.create_expense = true;
+        input.category_id = Some(7);
+        input.expense_amount.clear();
+
+        assert!(build_next_payment_update(&input).is_err());
     }
 
     #[test]

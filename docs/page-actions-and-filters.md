@@ -94,6 +94,9 @@ Shared compact DatePicker controls retain previous/next-month arrow navigation a
 - `Применить` and `Сбросить фильтры` remain aligned to the right of the final filter row, moving to the bottom-right row when needed.
 - Currency options are `Все`, `RUB`, and `USD`; selecting a currency and clicking `Применить` filters the full combination of selected conditions. A currency-specific selection excludes cards with unknown currency.
 - The `×` control clears the currency filter and immediately reloads using the other conditions. `Сбросить фильтры` clears all four filters and reloads the full list.
+- In the `Следующий платёж` group, a fixed-width unnamed column shows an XSmall `Изменить` button only if either the payment date or amount is present. The dialog edits the payment date and amount without opening the full card editor.
+- `Сформировать расход` reveals the expense fields: amount, currency, active category, optional same-currency payment card (default `Без карты`), optional expense place, date, and comment. Expense date and amount initially match the payment values when the dialog opened, and are edited independently of the new payment values. Currency initially matches the card's currency, if known. Missing required values must be entered explicitly; validation errors do not modify the card or create an expense.
+- Saving the optional expense and the edited next-payment data is one database transaction. A successful operation reloads the card table; a failed expense validation rolls back the next-payment changes too. Cancelling after edits asks for confirmation.
 
 ### Transfers
 
