@@ -12,20 +12,59 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
-use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
+use gpui_kit::component::tooltip::Tooltip as ComponentTooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _, WindowExt as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
+use super::support::category_tree_labels;
 use super::support::category_tree_rows;
+use super::support::collect_category_descendants;
 use super::support::currency_rate_label;
 use super::transactions::comment_preview;
 
 const DATE_FORMAT: &str = "%Y-%m-%d";
 const ROW_HEIGHT: f32 = 36.0;
+const NO_PARENT_LABEL: &str = "Нет";
+const NO_PARENT_TOOLTIP: &str = "Без родительской категории";
+
+type ParentChoice = Entity<SelectState<Vec<ParentCategoryItem>>>;
+
+#[derive(Clone)]
+struct ParentCategoryItem {
+    id: usize,
+    label: String,
+}
+
+impl SelectItem for ParentCategoryItem {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone().into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.label
+    }
+
+    fn render(&self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let tooltip = if self.label == NO_PARENT_LABEL {
+            NO_PARENT_TOOLTIP.to_owned()
+        } else {
+            self.label.clone()
+        };
+        div()
+            .id(("parent-category-option", self.id))
+            .w_full()
+            .tooltip(move |window, cx| ComponentTooltip::new(tooltip.clone()).build(window, cx))
+            .child(self.label.clone())
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RightTab {
@@ -38,8 +77,9 @@ struct CategoryForm {
     id: Option<i64>,
     name: Entity<InputState>,
     parent_ids: Vec<Option<i64>>,
+    parent_labels: Vec<String>,
     parent_id: Option<i64>,
-    parent_select: Entity<SelectState<Vec<SharedString>>>,
+    parent_select: ParentChoice,
     is_active: bool,
 }
 
@@ -111,6 +151,36 @@ fn input(
         }
         state
     })
+}
+
+/// Варианты родителя в том же порядке дерева, что и фильтр категорий на
+/// страницах операций: сначала корневые категории, затем их потомки с полным
+/// путём. Редактируемая категория и её потомки исключаются, чтобы нельзя было
+/// выбрать родителя, образующего цикл.
+fn parent_category_options(
+    categories: &[Category],
+    own_id: Option<i64>,
+) -> Vec<(Option<i64>, String)> {
+    let excluded: HashSet<i64> = own_id
+        .map(|id| {
+            collect_category_descendants(categories, id)
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default();
+    let available: Vec<Category> = categories
+        .iter()
+        .filter(|category| !excluded.contains(&category.id))
+        .cloned()
+        .collect();
+
+    let mut options = vec![(None, NO_PARENT_LABEL.to_owned())];
+    options.extend(
+        category_tree_labels(&available)
+            .into_iter()
+            .map(|(id, label)| (Some(id), label)),
+    );
+    options
 }
 
 impl DirectoriesPage {
@@ -214,17 +284,14 @@ impl DirectoriesPage {
             cx,
         );
         let own_id = existing.map(|c| c.id);
-        let parents: Vec<&Category> = self
-            .categories
+        let options = parent_category_options(&self.categories, own_id);
+        let parent_ids: Vec<Option<i64>> = options.iter().map(|(id, _)| *id).collect();
+        let parent_labels: Vec<String> = options.into_iter().map(|(_, label)| label).collect();
+        let items: Vec<ParentCategoryItem> = parent_labels
             .iter()
-            .filter(|c| Some(c.id) != own_id)
-            .collect();
-        let parent_ids: Vec<Option<i64>> = std::iter::once(None)
-            .chain(parents.iter().map(|c| Some(c.id)))
-            .collect();
-        let items: Vec<SharedString> = std::iter::once("Нет".to_owned())
-            .chain(parents.iter().map(|c| c.name.clone()))
-            .map(SharedString::from)
+            .cloned()
+            .enumerate()
+            .map(|(id, label)| ParentCategoryItem { id, label })
             .collect();
         let parent_id = existing.and_then(|c| c.parent_id);
         let selected = parent_ids.iter().position(|p| *p == parent_id).unwrap_or(0);
@@ -234,7 +301,7 @@ impl DirectoriesPage {
         let sub = cx.subscribe_in(
             &parent_select,
             window,
-            |this: &mut Self, state, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+            |this: &mut Self, state, event: &SelectEvent<Vec<ParentCategoryItem>>, _, cx| {
                 let SelectEvent::Confirm(Some(_)) = event else {
                     return;
                 };
@@ -250,6 +317,7 @@ impl DirectoriesPage {
             id: own_id,
             name,
             parent_ids,
+            parent_labels,
             parent_id,
             parent_select,
             is_active: existing.is_none_or(|c| c.is_active),
@@ -531,6 +599,18 @@ impl DirectoriesPage {
                     (false, TransactionKind::Income) => "Новая категория доходов",
                     (false, TransactionKind::Expense) => "Новая категория расходов",
                 };
+                let parent_tooltip = form
+                    .parent_select
+                    .read(cx)
+                    .selected_index(cx)
+                    .and_then(|index| form.parent_labels.get(index.row))
+                    .map(|label| {
+                        if label == NO_PARENT_LABEL {
+                            NO_PARENT_TOOLTIP.to_owned()
+                        } else {
+                            label.clone()
+                        }
+                    });
                 let fields = div()
                     .flex()
                     .flex_col()
@@ -538,7 +618,16 @@ impl DirectoriesPage {
                     .child("Название")
                     .child(Input::new(&form.name))
                     .child("Родительская категория")
-                    .child(Select::new(&form.parent_select))
+                    .child(
+                        div()
+                            .id("parent-category-select")
+                            .child(Select::new(&form.parent_select))
+                            .when_some(parent_tooltip, |el, tooltip| {
+                                el.tooltip(move |window, cx| {
+                                    ComponentTooltip::new(tooltip.clone()).build(window, cx)
+                                })
+                            }),
+                    )
                     .child(
                         Checkbox::new("category-active")
                             .label("Активна")
@@ -1167,5 +1256,62 @@ impl Render for DirectoriesPage {
                             .child(right),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parent_category_options, Category};
+
+    fn category(id: i64, parent_id: Option<i64>, name: &str) -> Category {
+        Category {
+            id,
+            name: name.to_owned(),
+            parent_id,
+            is_active: true,
+        }
+    }
+
+    fn categories() -> Vec<Category> {
+        vec![
+            category(2, None, "Транспорт"),
+            category(3, Some(2), "Разное"),
+            category(1, None, "Зарплата"),
+            category(4, Some(1), "Премия"),
+        ]
+    }
+
+    #[test]
+    fn parent_options_use_the_same_tree_paths_as_transaction_filters() {
+        let options = parent_category_options(&categories(), None);
+
+        assert_eq!(
+            options,
+            vec![
+                (None, "Нет".to_owned()),
+                (Some(2), "Транспорт".to_owned()),
+                (Some(3), "Транспорт > Разное".to_owned()),
+                (Some(1), "Зарплата".to_owned()),
+                (Some(4), "Зарплата > Премия".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parent_options_exclude_edited_category_and_its_descendants() {
+        let options = parent_category_options(&categories(), Some(2));
+
+        assert_eq!(
+            options,
+            vec![
+                (None, "Нет".to_owned()),
+                (Some(1), "Зарплата".to_owned()),
+                (Some(4), "Зарплата > Премия".to_owned()),
+            ]
+        );
+
+        let options = parent_category_options(&categories(), Some(3));
+        assert!(options.contains(&(Some(2), "Транспорт".to_owned())));
+        assert!(!options.iter().any(|(id, _)| *id == Some(3)));
     }
 }
