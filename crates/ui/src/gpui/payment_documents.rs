@@ -12,7 +12,9 @@ use finance_core::{
 };
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::calendar::Date;
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
@@ -209,7 +211,7 @@ struct CardForm {
     savings_ids: Vec<i64>,
     available_savings: Vec<SavingsAccount>,
     amount: Entity<InputState>,
-    due_date: Entity<InputState>,
+    due_date: Entity<DatePickerState>,
     grace_period_days: Entity<InputState>,
     min_monthly_spend: Entity<InputState>,
     bank_select: Choice,
@@ -230,7 +232,10 @@ impl CardForm {
             card_type: self.card_type,
             amount: self.amount.read(cx).value().to_string(),
             currency: self.currency,
-            due_date: self.due_date.read(cx).value().to_string(),
+            due_date: match self.due_date.read(cx).date() {
+                Date::Single(Some(date)) => date.format(DATE_FORMAT).to_string(),
+                _ => String::new(),
+            },
             grace_period_days: self.grace_period_days.read(cx).value().to_string(),
             affects_deposit_rate: self.affects_deposit_rate,
             min_monthly_spend: self.min_monthly_spend.read(cx).value().to_string(),
@@ -574,6 +579,22 @@ impl PaymentDocumentsPage {
             },
         ));
 
+        let due_date = {
+            let date = existing
+                .and_then(|d| d.due_date)
+                .or_else(|| NaiveDate::parse_from_str("2026-12-01", DATE_FORMAT).ok());
+            cx.new(|cx| {
+                let mut state = DatePickerState::new(window, cx).date_format(DATE_FORMAT);
+                state.set_date(Date::Single(date), window, cx);
+                state
+            })
+        };
+        subscriptions.push(cx.subscribe_in(
+            &due_date,
+            window,
+            |_, _, _: &DatePickerEvent, _, cx| cx.notify(),
+        ));
+
         let mut form = CardForm {
             id: existing.map(|d| d.id),
             name: text_input(
@@ -597,14 +618,7 @@ impl PaymentDocumentsPage {
                 window,
                 cx,
             ),
-            due_date: text_input(
-                "2026-12-01",
-                &existing
-                    .and_then(|d| d.due_date)
-                    .map_or_else(String::new, |d| d.format(DATE_FORMAT).to_string()),
-                window,
-                cx,
-            ),
+            due_date,
             grace_period_days: text_input(
                 "Дни",
                 &existing
@@ -949,10 +963,21 @@ impl PaymentDocumentsPage {
             ));
         if is_credit {
             amounts = amounts
-                .child(field(
-                    "Дата платежа (ГГГГ-ММ-ДД)",
-                    Input::new(&form.due_date).into_any_element(),
-                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().text_size(px(12.0)).child("Дата платежа"))
+                        .child(
+                            DatePicker::new(&form.due_date)
+                                .placeholder("Выбрать дату")
+                                .cleanable(true)
+                                .small(),
+                        ),
+                )
                 .child(field(
                     "Льготный период, дней",
                     Input::new(&form.grace_period_days).into_any_element(),
