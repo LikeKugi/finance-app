@@ -40,10 +40,10 @@ const NO_CURRENCY_LABEL: &str = "валюта не указана";
 const RATE_WARNING: &str =
     "Условие сохраняется как возможность; приложение не подтверждает выполнение порога трат.";
 const DEFAULT_COLUMN_WIDTHS: [f32; 14] = [
-    140.0, 120.0, 90.0, 110.0, 100.0, 120.0, 100.0, 110.0, 130.0, 76.0, 140.0, 110.0, 220.0, 160.0,
+    140.0, 120.0, 90.0, 110.0, 100.0, 120.0, 100.0, 110.0, 130.0, 40.0, 140.0, 110.0, 220.0, 160.0,
 ];
 const ACTIONS_COLUMN_WIDTH: f32 = 160.0;
-const NEXT_PAYMENT_ACTION_COLUMN_WIDTH: f32 = 76.0;
+const NEXT_PAYMENT_ACTION_COLUMN_WIDTH: f32 = 40.0;
 const MIN_COLUMN_WIDTH: f32 = 60.0;
 const MAX_COLUMN_WIDTH: f32 = 1200.0;
 const CARDS_COLUMN_WIDTHS_KEY: &str = "table_columns.payment_documents.v2";
@@ -1837,10 +1837,12 @@ fn parse_column_widths(value: &str) -> Option<Vec<f32>> {
         .split(',')
         .map(|part| part.trim().parse::<f32>().ok())
         .collect::<Option<Vec<_>>>()?;
-    ((widths.len() == HEADERS.len() || widths.len() + 1 == HEADERS.len())
-        && widths.iter().all(|width| {
-            width.is_finite() && (MIN_COLUMN_WIDTH..=MAX_COLUMN_WIDTH).contains(width)
-        }))
+    let len_ok = widths.len() == HEADERS.len() || widths.len() + 1 == HEADERS.len();
+    let min_allowed = MIN_COLUMN_WIDTH.min(NEXT_PAYMENT_ACTION_COLUMN_WIDTH);
+    (len_ok
+        && widths
+            .iter()
+            .all(|w| w.is_finite() && (min_allowed..=MAX_COLUMN_WIDTH).contains(w)))
     .then_some(widths)
 }
 
