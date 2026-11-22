@@ -575,7 +575,7 @@ impl DirectoriesPage {
         }
     }
 
-    // ---- места трат ----
+    // ---- места покупок ----
 
     fn open_expense_place_form(
         &mut self,
@@ -846,9 +846,9 @@ impl DirectoriesPage {
                     return (String::new(), div().into_any_element());
                 };
                 let title = if form.id.is_some() {
-                    "Изменить место трат"
+                    "Изменить место покупок"
                 } else {
-                    "Новое место трат"
+                    "Новое место покупок"
                 };
                 let fields = div()
                     .flex()
@@ -989,7 +989,7 @@ impl DirectoriesPage {
             DataTable::new(&self.expense_places_table)
                 .stripe(true)
                 .bordered(true)
-                .accessibility_label("Места трат"),
+                .accessibility_label("Места покупок"),
         )
     }
 
@@ -1245,7 +1245,7 @@ impl TableDelegate for ExpensePlacesTable {
             .flex()
             .items_center()
             .justify_center()
-            .child("Места трат не найдены.")
+            .child("Места покупок не найдены.")
     }
 
     fn render_td(
@@ -1294,7 +1294,7 @@ impl TableDelegate for ExpensePlacesTable {
                 let edit_page = self.page.clone();
                 let edit = place.clone();
                 let delete_page = self.page.clone();
-                let subject = format!("место трат «{}»", place.name);
+                let subject = format!("место покупок «{}»", place.name);
                 div()
                     .flex()
                     .items_center()
@@ -1648,7 +1648,7 @@ impl Render for DirectoriesPage {
                                     .child(
                                         toggle(
                                             "tab-expense-places",
-                                            "Места трат",
+                                            "Места покупок",
                                             tab == RightTab::ExpensePlaces,
                                         )
                                         .on_click(
@@ -1667,7 +1667,7 @@ impl Render for DirectoriesPage {
                                         match tab {
                                             RightTab::Banks => "Банки",
                                             RightTab::Currencies => "Валюты",
-                                            RightTab::ExpensePlaces => "Места трат",
+                                            RightTab::ExpensePlaces => "Места покупок",
                                         },
                                     ))
                                     .child(add_right),
