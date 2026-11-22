@@ -40,7 +40,8 @@ use super::support::{date_period_range, DatePeriod, DatePeriodRange};
 const DATE_FORMAT: &str = "%Y-%m-%d";
 const NONE_LABEL: &str = "Все";
 const NO_CARD_LABEL: &str = "Не по карте";
-const PAYMENT_FILTER_LABEL: &str = "Способ получения";
+const INCOME_PAYMENT_FILTER_LABEL: &str = "Способ получения";
+const PAYMENT_FILTER_LABEL: &str = "Способ оплаты";
 
 type Choice = Entity<SelectState<Vec<SharedString>>>;
 type CategoryChoice = Entity<SelectState<Vec<CategoryFilterItem>>>;
@@ -250,6 +251,14 @@ fn payment_filter_labels(cards: &[PaymentDocument], bank_filter: Option<i64>) ->
                 .map(card_label),
         )
         .collect()
+}
+
+/// Подпись фильтра карты зависит от операции: доход получают, расход оплачивают.
+fn payment_filter_label(kind: TransactionKind) -> &'static str {
+    match kind {
+        TransactionKind::Income => INCOME_PAYMENT_FILTER_LABEL,
+        TransactionKind::Expense => PAYMENT_FILTER_LABEL,
+    }
 }
 
 struct Form {
@@ -1333,6 +1342,7 @@ impl TransactionsPage {
     fn render_filters(&mut self, cx: &mut Context<Self>) -> Div {
         let active = self.has_active_filters(cx);
         let this = cx.entity();
+        let payment_label = payment_filter_label(self.kind);
         let filter = |label: &'static str, width: f32, control: AnyElement| {
             div()
                 .w(px(width))
@@ -1449,13 +1459,13 @@ impl TransactionsPage {
                             .into_any_element(),
                     ))
                     .child(filter(
-                        PAYMENT_FILTER_LABEL,
+                        payment_label,
                         260.0,
                         div()
                             .id("card-filter-select")
                             .child(
                                 Select::new(&self.card_filter_select)
-                                    .placeholder(PAYMENT_FILTER_LABEL)
+                                    .placeholder(payment_label)
                                     .small(),
                             )
                             .when_some(card_tooltip.clone(), |el, tooltip| {
@@ -2295,9 +2305,10 @@ mod tests {
     use super::{
         card_filter_from_index, card_filter_index, cards_for_bank,
         column_widths_with_fixed_actions, comment_preview, format_column_widths,
-        parse_column_widths, payment_filter_labels, sort_transactions,
-        update_bank_filter_selection, FormValues, ACTIONS_COLUMN_WIDTH, COL_INCOME_ACTIONS,
-        NONE_LABEL, NO_CARD_LABEL, PAYMENT_FILTER_LABEL,
+        parse_column_widths, payment_filter_label, payment_filter_labels, sort_transactions,
+        update_bank_filter_selection, BankFilterItem, FormValues, ACTIONS_COLUMN_WIDTH,
+        COL_INCOME_ACTIONS, INCOME_PAYMENT_FILTER_LABEL, NONE_LABEL, NO_CARD_LABEL,
+        PAYMENT_FILTER_LABEL,
     };
     use crate::gpui::support::card_label;
     use chrono::NaiveDate;
@@ -2420,8 +2431,37 @@ mod tests {
         assert_eq!(labels.len(), 3);
         assert_eq!(labels[0], NONE_LABEL);
         assert_eq!(labels[1], NO_CARD_LABEL);
-        assert_eq!(PAYMENT_FILTER_LABEL, "Способ получения");
+        assert_eq!(PAYMENT_FILTER_LABEL, "Способ оплаты");
         assert!(labels[2].contains("MIR #10"));
+    }
+
+    #[test]
+    fn payment_filter_label_uses_receiving_wording_for_income() {
+        assert_eq!(
+            payment_filter_label(TransactionKind::Income),
+            INCOME_PAYMENT_FILTER_LABEL
+        );
+        assert_eq!(INCOME_PAYMENT_FILTER_LABEL, "Способ получения");
+    }
+
+    #[test]
+    fn payment_filter_label_uses_payment_wording_for_expense() {
+        assert_eq!(
+            payment_filter_label(TransactionKind::Expense),
+            PAYMENT_FILTER_LABEL
+        );
+        assert_eq!(PAYMENT_FILTER_LABEL, "Способ оплаты");
+    }
+
+    #[test]
+    fn bank_filter_item_keeps_full_label_for_tooltip() {
+        let item = BankFilterItem {
+            id: 3,
+            label: "Альфа-Банк".to_owned(),
+        };
+
+        assert_eq!(item.label, "Альфа-Банк");
+        assert_eq!(item.id, 3);
     }
 
     #[test]
