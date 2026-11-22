@@ -1239,6 +1239,12 @@ fn sort_cards(rows: &mut [PaymentDocument], sort: Option<(usize, ColumnSort)>) {
                 .to_lowercase()
                 .cmp(&b.payment_system.code().to_lowercase()),
             COL_AMOUNT => a.amount.cmp(&b.amount),
+            COL_NEXT_PAYMENT_DATE => {
+                a.due_date.cmp(&b.due_date).then_with(|| {
+                    Option::cmp(&a.next_payment_amount, &b.next_payment_amount)
+                })
+            }
+            COL_NEXT_PAYMENT => Option::cmp(&a.next_payment_amount, &b.next_payment_amount),
             _ => Ordering::Equal,
         };
         let ordering = if direction == ColumnSort::Descending {
@@ -1332,7 +1338,7 @@ impl TableDelegate for CardsTable {
             _ => ColumnSort::Default,
         };
         match col_ix {
-            COL_NAME | COL_BANK | COL_SYSTEM | COL_AMOUNT => column.sort(direction),
+            COL_NAME | COL_BANK | COL_SYSTEM | COL_AMOUNT | COL_NEXT_PAYMENT_DATE | COL_NEXT_PAYMENT => column.sort(direction),
             _ => column,
         }
     }
