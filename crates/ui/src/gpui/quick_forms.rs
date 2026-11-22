@@ -27,7 +27,15 @@ type Choice = Entity<SelectState<Vec<SharedString>>>;
 const NO_CARD_LABEL: &str = "Без карты";
 const NO_PLACE_LABEL: &str = "Не указано";
 const AMOUNT_PLACEHOLDER: &str = "например: 100 + 20 - 5 * 2 / 4";
-const CARD_FIELD_LABEL: &str = "Зачислить на карту";
+const INCOME_CARD_FIELD_LABEL: &str = "Зачислить на карту";
+const EXPENSE_CARD_FIELD_LABEL: &str = "Списать с карты";
+
+fn card_field_label(kind: TransactionKind) -> &'static str {
+    match kind {
+        TransactionKind::Income => INCOME_CARD_FIELD_LABEL,
+        TransactionKind::Expense => EXPENSE_CARD_FIELD_LABEL,
+    }
+}
 
 fn choice(
     items: Vec<String>,
@@ -493,7 +501,7 @@ impl Render for QuickTransactionForm {
                     .into_any_element(),
             ))
             .child(field(
-                CARD_FIELD_LABEL,
+                card_field_label(self.kind),
                 Select::new(&self.card_select)
                     .small()
                     .w_full()
@@ -545,14 +553,21 @@ impl Render for QuickTransactionForm {
 #[cfg(test)]
 mod tests {
     use super::{
-        can_save, optional_id_by_label, selected_kind, CARD_FIELD_LABEL, NO_CARD_LABEL,
+        can_save, card_field_label, optional_id_by_label, selected_kind, NO_CARD_LABEL,
         NO_PLACE_LABEL,
     };
     use finance_core::{parse_amount_expression, Currency, TransactionKind};
 
     #[test]
-    fn card_field_label_is_shared_for_both_operations() {
-        assert_eq!(CARD_FIELD_LABEL, "Зачислить на карту");
+    fn card_field_label_depends_on_operation() {
+        assert_eq!(
+            card_field_label(TransactionKind::Income),
+            "Зачислить на карту"
+        );
+        assert_eq!(
+            card_field_label(TransactionKind::Expense),
+            "Списать с карты"
+        );
     }
 
     #[test]
