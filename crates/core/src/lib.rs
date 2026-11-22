@@ -749,6 +749,7 @@ pub struct PaymentDocument {
     pub currency: Option<Currency>,
     pub due_date: Option<NaiveDate>,
     pub grace_period_days: Option<i64>,
+    pub next_payment_amount: Option<Decimal>,
     pub affects_deposit_rate: bool,
     pub min_monthly_spend: Option<Decimal>,
     pub linked_savings: Vec<LinkedSavingsAccount>,
@@ -764,6 +765,7 @@ pub struct PaymentDocumentDetails {
     pub currency: Option<Currency>,
     pub due_date: Option<NaiveDate>,
     pub grace_period_days: Option<i64>,
+    pub next_payment_amount: Option<Decimal>,
     pub affects_deposit_rate: bool,
     pub min_monthly_spend: Option<Decimal>,
     pub savings_ids: Vec<i64>,
@@ -783,6 +785,7 @@ impl PaymentDocumentDetails {
             self.card_type,
             self.due_date,
             self.grace_period_days,
+            self.next_payment_amount,
             self.affects_deposit_rate,
             self.min_monthly_spend,
             &self.savings_ids,
@@ -842,6 +845,8 @@ pub enum DomainError {
     InvalidPaymentCardTerms,
     #[error("Условие повышенной ставки требует положительного минимума трат и хотя бы одного связанного накопления")]
     InvalidPaymentRateCondition,
+    #[error("Размер следующего платежа не может быть отрицательным")]
+    InvalidNextPaymentAmount,
     #[error("Связанные накопления не должны повторяться")]
     DuplicatePaymentDocumentSavings,
     #[error("Неизвестный тип операции перевода: {0}")]
@@ -864,17 +869,27 @@ pub enum DomainError {
     InvalidTransferComment,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Extends the established payment document validation signature"
+)]
 pub fn validate_payment_document(
     amount: Decimal,
     card_type: PaymentCardType,
     due_date: Option<NaiveDate>,
     grace_period_days: Option<i64>,
+    next_payment_amount: Option<Decimal>,
     affects_deposit_rate: bool,
     min_monthly_spend: Option<Decimal>,
     savings_ids: &[i64],
 ) -> Result<(), DomainError> {
     if amount < Decimal::ZERO || (card_type == PaymentCardType::Credit && amount == Decimal::ZERO) {
         return Err(DomainError::InvalidPaymentDocumentAmount);
+    }
+    if let Some(next_payment) = next_payment_amount {
+        if next_payment < Decimal::ZERO {
+            return Err(DomainError::InvalidNextPaymentAmount);
+        }
     }
 
     match (card_type, due_date, grace_period_days) {
@@ -1630,6 +1645,7 @@ mod tests {
             currency: None,
             due_date: None,
             grace_period_days: None,
+            next_payment_amount: None,
             affects_deposit_rate: false,
             min_monthly_spend: None,
             savings_ids: Vec::new(),
@@ -1649,6 +1665,7 @@ mod tests {
                 PaymentCardType::Debit,
                 None,
                 None,
+                None,
                 false,
                 None,
                 &[],
@@ -1665,6 +1682,7 @@ mod tests {
                 PaymentCardType::Credit,
                 NaiveDate::from_ymd_opt(2026, 12, 1),
                 Some(0),
+                Some(Decimal::ONE),
                 true,
                 Some(Decimal::ONE),
                 &[4],
@@ -1681,6 +1699,7 @@ mod tests {
                 PaymentCardType::Debit,
                 NaiveDate::from_ymd_opt(2026, 12, 1),
                 Some(0),
+                None,
                 false,
                 None,
                 &[],
@@ -1697,6 +1716,7 @@ mod tests {
                 PaymentCardType::Debit,
                 None,
                 None,
+                None,
                 true,
                 Some(Decimal::ONE),
                 &[],
@@ -1711,6 +1731,7 @@ mod tests {
             validate_payment_document(
                 Decimal::ONE,
                 PaymentCardType::Debit,
+                None,
                 None,
                 None,
                 true,

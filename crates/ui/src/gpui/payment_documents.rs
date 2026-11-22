@@ -33,8 +33,8 @@ const ALL_BANKS_LABEL: &str = "Все банки";
 const NO_CURRENCY_LABEL: &str = "валюта не указана";
 const RATE_WARNING: &str =
     "Условие сохраняется как возможность; приложение не подтверждает выполнение порога трат.";
-const DEFAULT_COLUMN_WIDTHS: [f32; 12] = [
-    140.0, 120.0, 90.0, 110.0, 100.0, 120.0, 110.0, 100.0, 140.0, 110.0, 220.0, 160.0,
+const DEFAULT_COLUMN_WIDTHS: [f32; 13] = [
+    140.0, 120.0, 90.0, 110.0, 100.0, 120.0, 110.0, 100.0, 130.0, 140.0, 110.0, 220.0, 160.0,
 ];
 const ACTIONS_COLUMN_WIDTH: f32 = 160.0;
 const MIN_COLUMN_WIDTH: f32 = 60.0;
@@ -44,9 +44,10 @@ const COL_NAME: usize = 0;
 const COL_BANK: usize = 1;
 const COL_SYSTEM: usize = 2;
 const COL_AMOUNT: usize = 4;
-const COL_SAVINGS: usize = 10;
-const COL_ACTIONS: usize = 11;
-const HEADERS: [&str; 12] = [
+const COL_NEXT_PAYMENT: usize = 8;
+const COL_SAVINGS: usize = 11;
+const COL_ACTIONS: usize = 12;
+const HEADERS: [&str; 13] = [
     "Название",
     "Банк",
     "Система",
@@ -55,6 +56,7 @@ const HEADERS: [&str; 12] = [
     "Валюта",
     "Дата следующего платежа",
     "Льгота, дни",
+    "Размер след. платежа",
     "Условие ставки",
     "Минимум трат",
     "Связанные накопления",
@@ -141,6 +143,7 @@ struct CardInput {
     currency: Option<Currency>,
     due_date: String,
     grace_period_days: String,
+    next_payment_amount: String,
     affects_deposit_rate: bool,
     min_monthly_spend: String,
     savings_ids: Vec<i64>,
@@ -160,8 +163,8 @@ fn build_details(input: &CardInput) -> Result<PaymentDocumentDetails, String> {
         PaymentCardType::Credit => parse_amount(&input.amount),
     }
     .map_err(|error| error.to_string())?;
-    let (due_date, grace_period_days) = match card_type {
-        PaymentCardType::Debit => (None, None),
+    let (due_date, grace_period_days, next_payment_amount) = match card_type {
+        PaymentCardType::Debit => (None, None, None),
         PaymentCardType::Credit => {
             let date = NaiveDate::parse_from_str(input.due_date.trim(), DATE_FORMAT)
                 .map_err(|_| "Введите дату платежа в формате ГГГГ-ММ-ДД".to_owned())?;
@@ -173,7 +176,16 @@ fn build_details(input: &CardInput) -> Result<PaymentDocumentDetails, String> {
             if days < 0 {
                 return Err("Льготный период не может быть отрицательным".to_owned());
             }
-            (Some(date), Some(days))
+            let next_payment = if input.next_payment_amount.trim().is_empty() {
+                None
+            } else {
+                Some(
+                    parse_non_negative_decimal(&input.next_payment_amount).map_err(|_| {
+                        "Размер следующего платежа должен быть неотрицательным числом".to_owned()
+                    })?,
+                )
+            };
+            (Some(date), Some(days), next_payment)
         }
     };
     let (min_monthly_spend, savings_ids) = if input.affects_deposit_rate {
@@ -194,6 +206,7 @@ fn build_details(input: &CardInput) -> Result<PaymentDocumentDetails, String> {
         currency: input.currency,
         due_date,
         grace_period_days,
+        next_payment_amount,
         affects_deposit_rate: input.affects_deposit_rate,
         min_monthly_spend,
         savings_ids,
@@ -213,6 +226,7 @@ struct CardForm {
     amount: Entity<InputState>,
     due_date: Entity<DatePickerState>,
     grace_period_days: Entity<InputState>,
+    next_payment_amount: Entity<InputState>,
     min_monthly_spend: Entity<InputState>,
     bank_select: Choice,
     system_select: Choice,
@@ -237,6 +251,7 @@ impl CardForm {
                 _ => String::new(),
             },
             grace_period_days: self.grace_period_days.read(cx).value().to_string(),
+            next_payment_amount: self.next_payment_amount.read(cx).value().to_string(),
             affects_deposit_rate: self.affects_deposit_rate,
             min_monthly_spend: self.min_monthly_spend.read(cx).value().to_string(),
             savings_ids: self.savings_ids.clone(),
@@ -627,6 +642,14 @@ impl PaymentDocumentsPage {
                 window,
                 cx,
             ),
+            next_payment_amount: text_input(
+                "Например, 5000",
+                &existing
+                    .and_then(|d| d.next_payment_amount)
+                    .map_or_else(String::new, canonical_amount),
+                window,
+                cx,
+            ),
             min_monthly_spend: text_input(
                 "Например, 10000",
                 &existing
@@ -649,6 +672,7 @@ impl PaymentDocumentsPage {
                 currency,
                 due_date: String::new(),
                 grace_period_days: String::new(),
+                next_payment_amount: String::new(),
                 affects_deposit_rate: false,
                 min_monthly_spend: String::new(),
                 savings_ids: Vec::new(),
@@ -981,6 +1005,10 @@ impl PaymentDocumentsPage {
                 .child(field(
                     "Льготный период, дней",
                     Input::new(&form.grace_period_days).into_any_element(),
+                ))
+                .child(field(
+                    "Размер следующего платежа",
+                    Input::new(&form.next_payment_amount).into_any_element(),
                 ));
         }
         fields = fields.child(amounts).child(
@@ -1324,7 +1352,12 @@ impl TableDelegate for CardsTable {
                     .grace_period_days
                     .map_or_else(String::new, |d| d.to_string()),
             ),
-            8 => text(
+            COL_NEXT_PAYMENT => text(
+                document
+                    .next_payment_amount
+                    .map_or_else(String::new, canonical_amount),
+            ),
+            9 => text(
                 if document.affects_deposit_rate {
                     "Условно повышает"
                 } else {
@@ -1332,7 +1365,7 @@ impl TableDelegate for CardsTable {
                 }
                 .to_owned(),
             ),
-            9 => text(
+            10 => text(
                 document
                     .min_monthly_spend
                     .map_or_else(String::new, canonical_amount),
@@ -1489,6 +1522,7 @@ mod tests {
             include_str!("../../../db/migrations/V9__savings_currency.sql"),
             include_str!("../../../db/migrations/V10__expense_card_balances.sql"),
             include_str!("../../../db/migrations/V11__expense_places_and_card_names.sql"),
+            include_str!("../../../db/migrations/V13__payment_document_next_payment.sql"),
         ] {
             database.execute_batch(sql).unwrap();
         }
@@ -1508,6 +1542,7 @@ mod tests {
             currency: None,
             due_date: String::new(),
             grace_period_days: String::new(),
+            next_payment_amount: String::new(),
             affects_deposit_rate: false,
             min_monthly_spend: String::new(),
             savings_ids: Vec::new(),
@@ -1662,6 +1697,7 @@ mod tests {
             currency: None,
             due_date: None,
             grace_period_days: None,
+            next_payment_amount: None,
             affects_deposit_rate: false,
             min_monthly_spend: None,
             linked_savings: Vec::new(),

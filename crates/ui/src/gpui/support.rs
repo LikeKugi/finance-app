@@ -285,6 +285,7 @@ mod tests {
             currency,
             due_date: None,
             grace_period_days: None,
+            next_payment_amount: None,
             affects_deposit_rate: false,
             min_monthly_spend: None,
             linked_savings: Vec::new(),

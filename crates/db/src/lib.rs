@@ -69,6 +69,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 12,
         sql: include_str!("../migrations/V12__transfers.sql"),
     },
+    Migration {
+        version: 13,
+        sql: include_str!("../migrations/V13__payment_document_next_payment.sql"),
+    },
 ];
 
 struct Migration {
@@ -1829,7 +1833,8 @@ pub fn list_payment_documents_filtered(
     let mut statement = connection.prepare(
         "SELECT document.id, document.bank_id, bank.name, document.payment_system,
                 document.card_type, document.amount, document.due_date,
-                document.grace_period_days, document.affects_deposit_rate,
+                document.grace_period_days, document.next_payment_amount,
+                document.affects_deposit_rate,
                 document.min_monthly_spend, document.currency, document.name
          FROM payment_documents AS document
          JOIN banks AS bank ON bank.id = document.bank_id
@@ -1872,18 +1877,18 @@ pub fn list_payment_documents_filtered(
 
                 Ok(PaymentDocument {
                     id: row.get(0)?,
-                    name: row.get(11)?,
+                    name: row.get(12)?,
                     bank_id: row.get(1)?,
                     bank_name: row.get(2)?,
                     payment_system,
                     card_type,
                     amount: parse_decimal_text(row.get(5)?, 5)?,
                     currency: row
-                        .get::<_, Option<String>>(10)?
+                        .get::<_, Option<String>>(11)?
                         .map(|value| {
                             value.parse().map_err(|error| {
                                 rusqlite::Error::FromSqlConversionFailure(
-                                    10,
+                                    11,
                                     Type::Text,
                                     Box::new(error),
                                 )
@@ -1892,10 +1897,14 @@ pub fn list_payment_documents_filtered(
                         .transpose()?,
                     due_date,
                     grace_period_days: row.get(7)?,
-                    affects_deposit_rate: row.get(8)?,
+                    next_payment_amount: row
+                        .get::<_, Option<String>>(8)?
+                        .map(|value| parse_decimal_text(value, 8))
+                        .transpose()?,
+                    affects_deposit_rate: row.get(9)?,
                     min_monthly_spend: row
-                        .get::<_, Option<String>>(9)?
-                        .map(|value| parse_decimal_text(value, 9))
+                        .get::<_, Option<String>>(10)?
+                        .map(|value| parse_decimal_text(value, 10))
                         .transpose()?,
                     linked_savings: Vec::new(),
                 })
@@ -2011,6 +2020,7 @@ pub fn save_payment_document(
     let due_date = details
         .due_date
         .map(|date| date.format("%Y-%m-%d").to_string());
+    let next_payment_amount = details.next_payment_amount.map(canonical_amount);
     let min_monthly_spend = details.min_monthly_spend.map(canonical_amount);
     let document_id = if let Some(id) = id {
         transaction.execute(
@@ -2020,9 +2030,10 @@ pub fn save_payment_document(
         let changed = transaction.execute(
             "UPDATE payment_documents
              SET bank_id = ?1, payment_system = ?2, card_type = ?3, amount = ?4,
-                 due_date = ?5, grace_period_days = ?6, affects_deposit_rate = ?7,
-                 min_monthly_spend = ?8, currency = ?9, name = ?10
-             WHERE id = ?11",
+                 due_date = ?5, grace_period_days = ?6, next_payment_amount = ?7,
+                 affects_deposit_rate = ?8,
+                 min_monthly_spend = ?9, currency = ?10, name = ?11
+             WHERE id = ?12",
             params![
                 details.bank_id,
                 details.payment_system.code(),
@@ -2030,6 +2041,7 @@ pub fn save_payment_document(
                 amount,
                 due_date,
                 details.grace_period_days,
+                next_payment_amount,
                 details.affects_deposit_rate,
                 min_monthly_spend,
                 details.currency.map(Currency::code),
@@ -2045,8 +2057,9 @@ pub fn save_payment_document(
         transaction.execute(
             "INSERT INTO payment_documents (
                 bank_id, payment_system, card_type, amount, due_date,
-                grace_period_days, affects_deposit_rate, min_monthly_spend, currency, name
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                grace_period_days, next_payment_amount, affects_deposit_rate,
+                min_monthly_spend, currency, name
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 details.bank_id,
                 details.payment_system.code(),
@@ -2054,6 +2067,7 @@ pub fn save_payment_document(
                 amount,
                 due_date,
                 details.grace_period_days,
+                next_payment_amount,
                 details.affects_deposit_rate,
                 min_monthly_spend,
                 details.currency.map(Currency::code),
@@ -3046,6 +3060,7 @@ mod tests {
             currency: None,
             due_date: None,
             grace_period_days: None,
+            next_payment_amount: None,
             affects_deposit_rate: false,
             min_monthly_spend: None,
             savings_ids: Vec::new(),
@@ -3172,7 +3187,7 @@ mod tests {
                         )
                         .unwrap();
                 }
-                4..=11 => {}
+                4..=13 => {}
                 _ => unreachable!(),
             }
         }
@@ -3189,7 +3204,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v12-")
+                    .starts_with("data.before-migration-v13-")
             })
             .count()
     }
@@ -3280,7 +3295,7 @@ mod tests {
 
     #[test]
     fn initialize_migrates_supported_versions_and_preserves_backup_and_data() {
-        for version in 1..=10 {
+        for version in 1..=12 {
             let directory = tempfile::tempdir().unwrap();
             let database_path = directory.path().join("data.db");
             drop(create_legacy_database(&database_path, version));
@@ -3436,7 +3451,7 @@ mod tests {
                     entry
                         .file_name()
                         .to_string_lossy()
-                        .starts_with("data.before-migration-v12-")
+                        .starts_with("data.before-migration-v13-")
                 })
                 .expect("upgrade should create a backup")
                 .path();
@@ -3796,7 +3811,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v12-")
+                    .starts_with("data.before-migration-v13-")
             })
             .map(|entry| Connection::open(entry.path()).unwrap())
             .map(|backup| {
@@ -5736,7 +5751,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .contains("before-migration-v12")
+                    .contains("before-migration-v13")
             })
             .count();
 
@@ -5989,7 +6004,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v12-")
+                    .starts_with("data.before-migration-v13-")
             })
             .expect("upgrade from V4 should create a backup")
             .path();
@@ -7217,7 +7232,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         let transfer_table: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'transfers'",
