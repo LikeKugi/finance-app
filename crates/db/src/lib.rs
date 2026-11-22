@@ -73,6 +73,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 13,
         sql: include_str!("../migrations/V13__payment_document_next_payment.sql"),
     },
+    Migration {
+        version: 14,
+        sql: include_str!("../migrations/V14__prices.sql"),
+    },
 ];
 
 struct Migration {
@@ -115,6 +119,8 @@ pub enum DbError {
     CategoryUnavailable,
     #[error("Место траты не найдено")]
     ExpensePlaceUnavailable,
+    #[error("Место покупки не найдено")]
+    PriceExpensePlaceUnavailable,
     #[error("Запись используется и не может быть удалена")]
     EntityInUse,
     #[error("Перемещение категории создаёт цикл")]
@@ -2475,6 +2481,122 @@ pub fn delete_expense_place(connection: &Connection, id: i64) -> Result<(), DbEr
     Ok(())
 }
 
+/// Lists prices matching the optional inclusive date, currency, and expense-place filters.
+pub fn list_prices(
+    connection: &Connection,
+    filter: finance_core::PriceFilter,
+) -> Result<Vec<finance_core::PriceRecord>, DbError> {
+    filter.validate()?;
+    let mut statement = connection.prepare(
+        "SELECT p.id, p.name, p.date, p.amount, p.currency, p.expense_place_id, ep.name
+         FROM prices AS p
+         JOIN expense_places AS ep ON ep.id = p.expense_place_id
+         WHERE (?1 IS NULL OR p.currency = ?1)
+           AND (?2 IS NULL OR p.expense_place_id = ?2)
+           AND (?3 IS NULL OR p.date >= ?3)
+           AND (?4 IS NULL OR p.date <= ?4)",
+    )?;
+    let rows = statement.query_map(
+        params![
+            filter.currency.map(Currency::code),
+            filter.expense_place_id,
+            filter
+                .date_from
+                .map(|date| date.format("%Y-%m-%d").to_string()),
+            filter
+                .date_to
+                .map(|date| date.format("%Y-%m-%d").to_string()),
+        ],
+        |row| {
+            let date_text = row.get::<_, String>(2)?;
+            let date = NaiveDate::parse_from_str(&date_text, "%Y-%m-%d").map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+            })?;
+            let currency_text = row.get::<_, String>(4)?;
+            let currency = Currency::from_str(&currency_text).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error))
+            })?;
+            Ok(finance_core::PriceRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                date,
+                amount: parse_decimal_text(row.get(3)?, 3)?,
+                currency,
+                expense_place_id: row.get(5)?,
+                expense_place_name: row.get(6)?,
+            })
+        },
+    )?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+}
+
+/// Creates or updates a positive, exact-decimal price.
+pub fn save_price(
+    connection: &Connection,
+    id: Option<i64>,
+    name: &str,
+    date: NaiveDate,
+    amount: Decimal,
+    currency: Currency,
+    expense_place_id: i64,
+) -> Result<i64, DbError> {
+    finance_core::validate_price(name, amount)?;
+    let name = name.trim();
+    let amount = canonical_amount(amount);
+    if let Some(id) = id {
+        let changed = connection.execute(
+            "UPDATE prices SET name = ?1, date = ?2, amount = ?3, currency = ?4,
+                               expense_place_id = ?5 WHERE id = ?6",
+            params![
+                name,
+                date.format("%Y-%m-%d").to_string(),
+                amount,
+                currency.code(),
+                expense_place_id,
+                id
+            ],
+        );
+        match changed {
+            Ok(0) => return Err(rusqlite::Error::QueryReturnedNoRows.into()),
+            Ok(_) => return Ok(id),
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                return Err(DbError::PriceExpensePlaceUnavailable);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    match connection.execute(
+        "INSERT INTO prices (name, date, amount, currency, expense_place_id)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            name,
+            date.format("%Y-%m-%d").to_string(),
+            amount,
+            currency.code(),
+            expense_place_id
+        ],
+    ) {
+        Ok(_) => Ok(connection.last_insert_rowid()),
+        Err(rusqlite::Error::SqliteFailure(error, _))
+            if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            Err(DbError::PriceExpensePlaceUnavailable)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Deletes a price by identifier.
+pub fn delete_price(connection: &Connection, id: i64) -> Result<(), DbError> {
+    let deleted = connection.execute("DELETE FROM prices WHERE id = ?1", [id])?;
+    if deleted == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows.into());
+    }
+    Ok(())
+}
+
 fn category_table(kind: TransactionKind) -> &'static str {
     match kind {
         TransactionKind::Income => "income_categories",
@@ -2998,7 +3120,7 @@ mod tests {
     use chrono::NaiveDate;
     use finance_core::{
         summarize_analysis, Currency, CurrencyDefinition, DomainError, ExpensePlace,
-        InterestDestination, PaymentCardType, PaymentDocumentDetails, PaymentSystem,
+        InterestDestination, PaymentCardType, PaymentDocumentDetails, PaymentSystem, PriceFilter,
         SavingsDetails, SavingsTerm, TransactionKind, TransferDetails, TransferEndpoint,
         TransferOperationType,
     };
@@ -3008,18 +3130,18 @@ mod tests {
 
     use super::{
         add_currency, delete_bank, delete_category, delete_currency, delete_expense_place,
-        delete_payment_document, delete_savings, delete_transfer, export_database_backup_from_path,
-        get_app_setting, has_pending_database_import, initialize, list_currencies,
-        list_expense_places, list_payment_documents, list_payment_documents_filtered, list_savings,
-        list_savings_filtered, list_transaction_amounts, list_transaction_comments,
-        list_transactions, list_transactions_filtered, list_transactions_filtered_by_place,
-        list_transfers_filtered, load_analysis_transactions,
-        load_analysis_transactions_by_category, restore_pending_database_import, save_bank,
-        save_category, save_expense_place, save_next_payment, save_payment_document, save_savings,
-        save_transaction, save_transaction_with_card,
-        save_transaction_with_card_and_rate_effect_and_place, save_transfer, set_app_setting,
-        set_currency_exchange_rate, set_primary_currency, stage_database_import, DbError,
-        NextPaymentExpense, MIGRATIONS,
+        delete_payment_document, delete_price, delete_savings, delete_transfer,
+        export_database_backup_from_path, get_app_setting, has_pending_database_import, initialize,
+        list_currencies, list_expense_places, list_payment_documents,
+        list_payment_documents_filtered, list_prices, list_savings, list_savings_filtered,
+        list_transaction_amounts, list_transaction_comments, list_transactions,
+        list_transactions_filtered, list_transactions_filtered_by_place, list_transfers_filtered,
+        load_analysis_transactions, load_analysis_transactions_by_category,
+        restore_pending_database_import, save_bank, save_category, save_expense_place,
+        save_next_payment, save_payment_document, save_price, save_savings, save_transaction,
+        save_transaction_with_card, save_transaction_with_card_and_rate_effect_and_place,
+        save_transfer, set_app_setting, set_currency_exchange_rate, set_primary_currency,
+        stage_database_import, DbError, NextPaymentExpense, MIGRATIONS,
     };
 
     fn transfer_fixture() -> (tempfile::TempDir, Connection, i64, i64, i64) {
@@ -3500,7 +3622,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v13-")
+                    .starts_with("data.before-migration-v14-")
             })
             .count()
     }
@@ -3551,6 +3673,89 @@ mod tests {
     }
 
     #[test]
+    fn price_crud_filters_inclusively_and_restricts_place_deletion() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let place_id = save_expense_place(&connection, None, "Магазин", None).unwrap();
+        let other_place_id = save_expense_place(&connection, None, "Рынок", None).unwrap();
+        let first_date = NaiveDate::from_ymd_opt(2026, 1, 10).unwrap();
+        let middle_date = NaiveDate::from_ymd_opt(2026, 1, 11).unwrap();
+        let last_date = NaiveDate::from_ymd_opt(2026, 1, 12).unwrap();
+        let id = save_price(
+            &connection,
+            None,
+            "  Молоко  ",
+            middle_date,
+            Decimal::from_str("123456789012345.123456789012").unwrap(),
+            Currency::Rub,
+            place_id,
+        )
+        .unwrap();
+        save_price(
+            &connection,
+            None,
+            "Хлеб",
+            first_date,
+            Decimal::from(20),
+            Currency::Usd,
+            other_place_id,
+        )
+        .unwrap();
+
+        let rows = list_prices(
+            &connection,
+            PriceFilter {
+                currency: Some(Currency::Rub),
+                expense_place_id: Some(place_id),
+                date_from: Some(first_date),
+                date_to: Some(last_date),
+            },
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].name, "Молоко");
+        assert_eq!(rows[0].amount.to_string(), "123456789012345.123456789012");
+        assert_eq!(rows[0].expense_place_name, "Магазин");
+        assert!(matches!(
+            delete_expense_place(&connection, place_id),
+            Err(DbError::EntityInUse)
+        ));
+
+        save_price(
+            &connection,
+            Some(id),
+            "Кефир",
+            last_date,
+            Decimal::new(755, 2),
+            Currency::Usd,
+            other_place_id,
+        )
+        .unwrap();
+        let updated = list_prices(&connection, PriceFilter::default()).unwrap();
+        assert!(updated
+            .iter()
+            .any(|row| row.id == id && row.name == "Кефир"));
+        assert!(matches!(
+            save_price(
+                &connection,
+                None,
+                "Некорректная ссылка",
+                middle_date,
+                Decimal::ONE,
+                Currency::Rub,
+                i64::MAX,
+            ),
+            Err(DbError::PriceExpensePlaceUnavailable)
+        ));
+        assert!(matches!(delete_price(&connection, id), Ok(())));
+        assert!(list_prices(&connection, PriceFilter::default())
+            .unwrap()
+            .iter()
+            .all(|row| row.id != id));
+    }
+
+    #[test]
     fn expense_place_delete_is_rejected_when_an_expense_references_it() {
         let directory = tempfile::tempdir().unwrap();
         let connection = initialize(&directory.path().join("data.db")).unwrap();
@@ -3591,7 +3796,7 @@ mod tests {
 
     #[test]
     fn initialize_migrates_supported_versions_and_preserves_backup_and_data() {
-        for version in 1..=12 {
+        for version in 1..=13 {
             let directory = tempfile::tempdir().unwrap();
             let database_path = directory.path().join("data.db");
             drop(create_legacy_database(&database_path, version));
@@ -3747,7 +3952,7 @@ mod tests {
                     entry
                         .file_name()
                         .to_string_lossy()
-                        .starts_with("data.before-migration-v13-")
+                        .starts_with("data.before-migration-v14-")
                 })
                 .expect("upgrade should create a backup")
                 .path();
@@ -4107,7 +4312,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v13-")
+                    .starts_with("data.before-migration-v14-")
             })
             .map(|entry| Connection::open(entry.path()).unwrap())
             .map(|backup| {
@@ -6047,7 +6252,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .contains("before-migration-v13")
+                    .contains("before-migration-v14")
             })
             .count();
 
@@ -6300,7 +6505,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v13-")
+                    .starts_with("data.before-migration-v14-")
             })
             .expect("upgrade from V4 should create a backup")
             .path();
@@ -7528,7 +7733,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         let transfer_table: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'transfers'",

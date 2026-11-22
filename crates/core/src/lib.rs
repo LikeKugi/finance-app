@@ -197,6 +197,47 @@ pub struct ExpensePlace {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PriceRecord {
+    pub id: i64,
+    pub name: String,
+    pub date: NaiveDate,
+    pub amount: Decimal,
+    pub currency: Currency,
+    pub expense_place_id: i64,
+    pub expense_place_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PriceFilter {
+    pub currency: Option<Currency>,
+    pub expense_place_id: Option<i64>,
+    pub date_from: Option<NaiveDate>,
+    pub date_to: Option<NaiveDate>,
+}
+
+impl PriceFilter {
+    pub fn validate(self) -> Result<(), DomainError> {
+        if matches!((self.date_from, self.date_to), (Some(from), Some(to)) if from > to) {
+            return Err(DomainError::InvalidPriceDateRange);
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_price(name: &str, amount: Decimal) -> Result<(), DomainError> {
+    if name.trim().is_empty() {
+        return Err(DomainError::InvalidPriceName);
+    }
+    if amount <= Decimal::ZERO {
+        return Err(DomainError::InvalidAmount);
+    }
+    if amount.scale() > 12 {
+        return Err(DomainError::InvalidPricePrecision);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinancialTransaction {
     pub id: i64,
     pub date: NaiveDate,
@@ -847,6 +888,12 @@ pub enum DomainError {
     InvalidPaymentRateCondition,
     #[error("Размер следующего платежа не может быть отрицательным")]
     InvalidNextPaymentAmount,
+    #[error("Название товара или услуги не может быть пустым")]
+    InvalidPriceName,
+    #[error("Цена должна содержать не более 12 знаков после запятой")]
+    InvalidPricePrecision,
+    #[error("Начало периода не может быть позже его окончания")]
+    InvalidPriceDateRange,
     #[error("Связанные накопления не должны повторяться")]
     DuplicatePaymentDocumentSavings,
     #[error("Неизвестный тип операции перевода: {0}")]
@@ -1353,11 +1400,40 @@ mod tests {
     use super::{
         canonical_amount, parse_amount, parse_amount_expression, parse_non_negative_decimal,
         rebase_exchange_rate, validate_currency_code, validate_exchange_rate,
-        validate_payment_document, validate_savings, validate_transfer_account_currency,
-        validate_transfer_card_type, validate_transfer_savings_active, Currency, DomainError,
-        InterestDestination, PaymentCardType, PaymentDocumentDetails, PaymentSystem, SavingsTerm,
+        validate_payment_document, validate_price, validate_savings,
+        validate_transfer_account_currency, validate_transfer_card_type,
+        validate_transfer_savings_active, Currency, DomainError, InterestDestination,
+        PaymentCardType, PaymentDocumentDetails, PaymentSystem, PriceFilter, SavingsTerm,
         TransferDetails, TransferEndpoint, TransferOperationType, MAX_TRANSFER_COMMENT_LENGTH,
     };
+
+    #[test]
+    fn price_validation_requires_name_positive_amount_and_supported_precision() {
+        assert!(validate_price("  Молоко  ", Decimal::new(125, 2)).is_ok());
+        assert_eq!(
+            validate_price(" ", Decimal::ONE),
+            Err(DomainError::InvalidPriceName)
+        );
+        assert_eq!(
+            validate_price("Товар", Decimal::ZERO),
+            Err(DomainError::InvalidAmount)
+        );
+        assert_eq!(
+            validate_price("Товар", Decimal::new(1, 13)),
+            Err(DomainError::InvalidPricePrecision)
+        );
+    }
+
+    #[test]
+    fn price_filter_rejects_reversed_date_range() {
+        let filter = PriceFilter {
+            date_from: NaiveDate::from_ymd_opt(2026, 2, 1),
+            date_to: NaiveDate::from_ymd_opt(2026, 1, 31),
+            ..PriceFilter::default()
+        };
+
+        assert_eq!(filter.validate(), Err(DomainError::InvalidPriceDateRange));
+    }
 
     #[test]
     fn parse_amount_preserves_decimal_precision() {

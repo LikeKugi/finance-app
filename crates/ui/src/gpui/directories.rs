@@ -22,6 +22,7 @@ use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
+use super::prices::PricesSection;
 use super::support::category_tree_labels;
 use super::support::category_tree_rows;
 use super::support::collect_category_descendants;
@@ -133,6 +134,7 @@ pub(crate) struct DirectoriesPage {
     bank_form: Option<BankForm>,
     expense_place_form: Option<ExpensePlaceForm>,
     currency_form: Option<CurrencyForm>,
+    prices: Entity<PricesSection>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -184,9 +186,11 @@ fn parent_category_options(
 }
 
 impl DirectoriesPage {
-    pub(crate) fn new(database: Rc<Database>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(database: Rc<Database>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let prices = cx.new(|cx| PricesSection::new(database.clone(), window, cx));
         let mut page = Self {
             database,
+            prices,
             kind: TransactionKind::Income,
             right_tab: RightTab::Banks,
             categories: Vec::new(),
@@ -201,7 +205,7 @@ impl DirectoriesPage {
             currency_form: None,
             _subscriptions: Vec::new(),
         };
-        page.reload(cx);
+        page.reload(window, cx);
         page
     }
 
@@ -211,7 +215,7 @@ impl DirectoriesPage {
     }
 
     /// Перечитывает все справочники; ошибки показываются, данные не подменяются пустыми.
-    pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let db = &self.database;
         let categories = finance_db::list_categories(db, self.kind, true);
         let banks = finance_db::list_banks(db);
@@ -249,13 +253,15 @@ impl DirectoriesPage {
                 cx.notify();
             }
         }
+        self.prices
+            .update(cx, |prices, cx| prices.reload_places(window, cx));
     }
 
-    fn set_kind(&mut self, kind: TransactionKind, cx: &mut Context<Self>) {
+    fn set_kind(&mut self, kind: TransactionKind, window: &mut Window, cx: &mut Context<Self>) {
         if self.kind != kind {
             self.kind = kind;
             self.category_form = None;
-            self.reload(cx);
+            self.reload(window, cx);
         }
     }
 
@@ -344,7 +350,7 @@ impl DirectoriesPage {
             Ok(_) => {
                 self.category_form = None;
                 window.close_dialog(cx);
-                self.reload(cx);
+                self.reload(window, cx);
             }
             Err(error) => self.error(error.to_string(), cx),
         }
@@ -388,7 +394,7 @@ impl DirectoriesPage {
             Ok(_) => {
                 self.bank_form = None;
                 window.close_dialog(cx);
-                self.reload(cx);
+                self.reload(window, cx);
             }
             Err(error) => self.error(error.to_string(), cx),
         }
@@ -435,7 +441,7 @@ impl DirectoriesPage {
             Ok(_) => {
                 self.expense_place_form = None;
                 window.close_dialog(cx);
-                self.reload(cx);
+                self.reload(window, cx);
             }
             Err(error) => self.error(error.to_string(), cx),
         }
@@ -503,15 +509,15 @@ impl DirectoriesPage {
             Ok(()) => {
                 self.currency_form = None;
                 window.close_dialog(cx);
-                self.reload(cx);
+                self.reload(window, cx);
             }
             Err(error) => self.error(error.to_string(), cx),
         }
     }
 
-    fn make_primary(&mut self, code: &str, cx: &mut Context<Self>) {
+    fn make_primary(&mut self, code: &str, window: &mut Window, cx: &mut Context<Self>) {
         match finance_db::set_primary_currency(&self.database, code) {
-            Ok(()) => self.reload(cx),
+            Ok(()) => self.reload(window, cx),
             Err(error) => self.error(error.to_string(), cx),
         }
     }
@@ -541,7 +547,7 @@ impl DirectoriesPage {
                 .ok_text("Удалить")
                 .cancel_text("Отмена")
                 .show_cancel(true)
-                .on_ok(move |_, _, cx| {
+                .on_ok(move |_, window, cx| {
                     this.update(cx, |page, cx| {
                         let result = match &target {
                             Delete::Category(id) => {
@@ -556,7 +562,7 @@ impl DirectoriesPage {
                             }
                         };
                         match result {
-                            Ok(()) => page.reload(cx),
+                            Ok(()) => page.reload(window, cx),
                             Err(error) => page.error(error.to_string(), cx),
                         }
                     });
@@ -1038,8 +1044,8 @@ impl DirectoriesPage {
                                         .label("Сделать основной")
                                         .tooltip("Сначала задайте курс этой валюты")
                                         .disabled(currency.rate_to_primary.is_none())
-                                        .on_click(cx.listener(move |page, _, _, cx| {
-                                            page.make_primary(&c1, cx)
+                                        .on_click(cx.listener(move |page, _, window, cx| {
+                                            page.make_primary(&c1, window, cx)
                                         })),
                                 )
                             }),
@@ -1149,7 +1155,7 @@ impl Render for DirectoriesPage {
                             .large()
                             .label("Обновить")
                             .icon(IconName::Replace)
-                            .on_click(cx.listener(|page, _, _, cx| page.reload(cx))),
+                            .on_click(cx.listener(|page, _, window, cx| page.reload(window, cx))),
                     ),
             )
             .when_some(self.message.clone(), |root, (message, _)| {
@@ -1177,8 +1183,8 @@ impl Render for DirectoriesPage {
                                             kind == TransactionKind::Income,
                                         )
                                         .on_click(
-                                            cx.listener(|page, _, _, cx| {
-                                                page.set_kind(TransactionKind::Income, cx)
+                                            cx.listener(|page, _, window, cx| {
+                                                page.set_kind(TransactionKind::Income, window, cx)
                                             }),
                                         ),
                                     )
@@ -1189,8 +1195,8 @@ impl Render for DirectoriesPage {
                                             kind == TransactionKind::Expense,
                                         )
                                         .on_click(
-                                            cx.listener(|page, _, _, cx| {
-                                                page.set_kind(TransactionKind::Expense, cx)
+                                            cx.listener(|page, _, window, cx| {
+                                                page.set_kind(TransactionKind::Expense, window, cx)
                                             }),
                                         ),
                                     ),
@@ -1256,6 +1262,7 @@ impl Render for DirectoriesPage {
                             .child(right),
                     ),
             )
+            .child(self.prices.clone().into_any_element())
     }
 }
 

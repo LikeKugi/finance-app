@@ -83,7 +83,9 @@ impl AppShell {
             }
             PageTab::Income => self.income.update(cx, |page, cx| page.reload(window, cx)),
             PageTab::Expenses => self.expenses.update(cx, |page, cx| page.reload(window, cx)),
-            PageTab::Directories => self.directories.update(cx, |page, cx| page.reload(cx)),
+            PageTab::Directories => self
+                .directories
+                .update(cx, |page, cx| page.reload(window, cx)),
             PageTab::Savings => self.savings.update(cx, |page, cx| page.reload(window, cx)),
             PageTab::Transfers => self
                 .transfers
@@ -280,7 +282,7 @@ pub fn run(database: Database, database_path: PathBuf, app_version: &'static str
                 let expenses = cx.new(|cx| {
                     TransactionsPage::new(database.clone(), TransactionKind::Expense, window, cx)
                 });
-                let directories = cx.new(|cx| DirectoriesPage::new(database.clone(), cx));
+                let directories = cx.new(|cx| DirectoriesPage::new(database.clone(), window, cx));
                 let savings = cx.new(|cx| SavingsPage::new(database.clone(), window, cx));
                 let transfers = cx.new(|cx| TransfersPage::new(database.clone(), window, cx));
                 let payment_documents =

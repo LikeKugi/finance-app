@@ -4,6 +4,7 @@ mod analysis;
 mod directories;
 mod home;
 mod payment_documents;
+mod prices;
 mod quick_forms;
 mod savings;
 mod settings;
