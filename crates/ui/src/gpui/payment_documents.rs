@@ -53,7 +53,7 @@ const HEADERS: [&str; 12] = [
     "Тип",
     "Сумма",
     "Валюта",
-    "Дата платежа",
+    "Дата следующего платежа",
     "Льгота, дни",
     "Условие ставки",
     "Минимум трат",
@@ -970,7 +970,7 @@ impl PaymentDocumentsPage {
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .child(div().text_size(px(12.0)).child("Дата платежа"))
+                        .child(div().text_size(px(12.0)).child("Дата следующего платежа"))
                         .child(
                             DatePicker::new(&form.due_date)
                                 .placeholder("Выбрать дату")
