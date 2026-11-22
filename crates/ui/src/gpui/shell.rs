@@ -122,7 +122,51 @@ impl AppShell {
             .child(div().flex().flex_wrap().gap_3().children(links.map(|link| {
                 let action = link.action;
                 div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_4()
+                    .border_1()
+                    .border_color(border)
+                    .rounded_md()
+                    .child(
+                        Button::new(format!("home-link-{}", link.title))
+                            .link()
+                            .label(link.title)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.run_home_action(action, window, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(description_color)
+                            .child(link.description),
+                    )
+            })))
+            .into_any_element()
+    }
+
+    fn render_all_pages_section(&self, links: [HomeLink; 8], cx: &mut Context<Self>) -> AnyElement {
+        let description_color = cx.theme().muted_foreground;
+        let border = cx.theme().border;
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .text_size(px(18.0))
+                    .font_weight(FontWeight::BOLD)
+                    .child("Все страницы"),
+            )
+            .child(div().flex().flex_wrap().gap_3().children(links.map(|link| {
+                let action = link.action;
+                div()
                     .w(px(360.0))
+                    .flex_none()
                     .flex()
                     .flex_col()
                     .gap_2()
@@ -171,7 +215,7 @@ impl AppShell {
                 .child(self.quick_form.clone().into_any_element()),
         )
         .child(self.render_home_section("Разделы", described_sections(), cx))
-        .child(self.render_home_section("Все страницы", all_page_links(), cx))
+        .child(self.render_all_pages_section(all_page_links(), cx))
         .into_any_element()
     }
 }
