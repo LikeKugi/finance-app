@@ -160,7 +160,7 @@ impl AppShell {
                 div()
                     .text_size(px(18.0))
                     .font_weight(FontWeight::BOLD)
-                    .child("Все страницы"),
+                    .child("Функционал"),
             )
             .child(div().flex().flex_wrap().gap_3().children(links.map(|link| {
                 let action = link.action;
@@ -214,7 +214,7 @@ impl AppShell {
                 .justify_center()
                 .child(self.quick_form.clone().into_any_element()),
         )
-        .child(self.render_home_section("Разделы", described_sections(), cx))
+        .child(self.render_home_section("Основное", described_sections(), cx))
         .child(self.render_all_pages_section(all_page_links(), cx))
         .into_any_element()
     }
