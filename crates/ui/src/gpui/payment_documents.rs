@@ -698,7 +698,7 @@ impl PaymentDocumentsPage {
             dialog
                 .title(title)
                 .centered()
-                .w(px(820.0))
+                .w(px(1100.0))
                 .close_button(false)
                 .overlay_closable(false)
                 .keyboard(false)
