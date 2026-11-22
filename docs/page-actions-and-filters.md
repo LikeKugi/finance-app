@@ -108,6 +108,15 @@ Shared compact DatePicker controls retain previous/next-month arrow navigation a
 - The add/edit form is an 800 pt modal dialog with `Дата`, `Тип операции`, `Откуда`, `Куда`, `Сумма`, `Валюта`, and `Комментарий`; dependent endpoint fields change with operation type and currency. Only Сохранить and Отмена are used, validation errors stay next to the form, and cancelling with unsaved changes asks for confirmation. Warnings explain that a top-up creates no income, that withdrawal removes money from tracked balances, and that early withdrawal from a limited-term savings account may have bank-specific conditions.
 - Deletion asks for confirmation showing date, amount, and both endpoints. Table actions require a row and the journal is never reloaded on every render frame.
 
+### Directories — Prices
+
+- The prices filters use the same compact presentation as Income: labels above Small controls, a wrapping row with a small consistent gap, and `Применить` / `Сбросить фильтры` aligned to the right on a separate bottom row.
+- Filter order is `Поиск`, `Период`, `Дата от`, `Дата до`, `Валюта`, `Место покупки`. Search has a Search icon suffix and inline clear control.
+- Search is case-insensitive and matches the product name or the expense-place name. Search and date edits remain pending until `Применить` is clicked or Enter is pressed in search.
+- The `Период` selector defaults to `Весь период` and uses the same calendar ranges as Income; selecting a preset fills both date controls and reloads immediately. Date boundaries are inclusive, and an inverted range is reported without replacing the displayed rows with an empty list.
+- Currency and place selections reload immediately, as on Income. Empty search and `Все валюты` / `Все места` mean that the condition is not applied.
+- `Сбросить фильтры` clears every filter, returns the period selector to `Весь период`, and reloads the full list. It is disabled when no filter is active.
+
 ## Shared Header Pattern for Pages and Sections
 
 Use the same header layout on every page and section:

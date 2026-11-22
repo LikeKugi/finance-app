@@ -207,16 +207,18 @@ pub struct PriceRecord {
     pub expense_place_name: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PriceFilter {
     pub currency: Option<Currency>,
     pub expense_place_id: Option<i64>,
     pub date_from: Option<NaiveDate>,
     pub date_to: Option<NaiveDate>,
+    /// Необязательный поиск по названию товара или месту покупки.
+    pub search: String,
 }
 
 impl PriceFilter {
-    pub fn validate(self) -> Result<(), DomainError> {
+    pub fn validate(&self) -> Result<(), DomainError> {
         if matches!((self.date_from, self.date_to), (Some(from), Some(to)) if from > to) {
             return Err(DomainError::InvalidPriceDateRange);
         }

@@ -8,16 +8,22 @@ use chrono::{Local, NaiveDate};
 use finance_core::{Currency, ExpensePlace, PriceFilter, PriceRecord};
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::calendar::Date;
+use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::dialog::{AlertDialog, Dialog};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{
     Column, ColumnFixed, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
 };
-use gpui_kit::component::{ActiveTheme as _, IconName, IndexPath, Sizable as _, WindowExt as _};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _, WindowExt as _,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rust_decimal::Decimal;
+
+use super::support::{date_period_range, DatePeriod, DatePeriodRange};
 
 const DATE_FORMAT: &str = "%Y-%m-%d";
 const WIDTHS_KEY: &str = "table_columns.prices.v1";
@@ -51,10 +57,12 @@ pub(crate) struct PricesSection {
     places: Vec<ExpensePlace>,
     entries: Vec<PriceRecord>,
     table: Entity<TableState<PricesTable>>,
+    search: Entity<InputState>,
+    from: Entity<DatePickerState>,
+    to: Entity<DatePickerState>,
+    period_select: Choice,
     currency_filter: Choice,
     place_filter: Choice,
-    date_from: Entity<InputState>,
-    date_to: Entity<InputState>,
     filter_currency: Option<Currency>,
     filter_place: Option<i64>,
     form: Option<PriceForm>,
@@ -90,6 +98,23 @@ fn selected_row(state: &Choice, cx: &App) -> Option<usize> {
     state.read(cx).selected_index(cx).map(|index| index.row)
 }
 
+fn selected_date(state: &DatePickerState) -> Option<NaiveDate> {
+    match state.date() {
+        Date::Single(date) => date,
+        Date::Range(_, _) => None,
+    }
+}
+
+fn period_dates(
+    period: DatePeriod,
+    today: NaiveDate,
+) -> Option<(Option<NaiveDate>, Option<NaiveDate>)> {
+    date_period_range(period, today).map(|range| match range {
+        DatePeriodRange::Unbounded => (None, None),
+        DatePeriodRange::Bounded(from, to) => (Some(from), Some(to)),
+    })
+}
+
 fn sort_prices(rows: &mut [PriceRecord], sort: Option<(usize, ColumnSort)>) {
     let Some((column, direction)) = sort else {
         rows.sort_by(|a, b| {
@@ -123,6 +148,18 @@ fn sort_prices(rows: &mut [PriceRecord], sort: Option<(usize, ColumnSort)>) {
 
 impl PricesSection {
     pub(crate) fn new(database: Rc<Database>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Поиск"));
+        let from = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
+        let to = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
+        let period_select = choice(
+            DatePeriod::ALL
+                .iter()
+                .map(|(_, label)| (*label).to_owned())
+                .collect(),
+            0,
+            window,
+            cx,
+        );
         let currency_filter = choice(
             vec!["Все валюты".to_owned(), "RUB".to_owned(), "USD".to_owned()],
             0,
@@ -130,8 +167,6 @@ impl PricesSection {
             cx,
         );
         let place_filter = choice(vec!["Все места".to_owned()], 0, window, cx);
-        let date_from = input("ГГГГ-ММ-ДД", "", window, cx);
-        let date_to = input("ГГГГ-ММ-ДД", "", window, cx);
         let widths = load_widths(&database);
         let page = cx.entity().downgrade();
         let table = cx.new(|cx| {
@@ -147,31 +182,61 @@ impl PricesSection {
             )
             .col_movable(false)
         });
-        let mut subscriptions = vec![
-            cx.subscribe_in(
-                &currency_filter,
-                window,
-                |page: &mut Self, state, _: &SelectEvent<Vec<SharedString>>, _, cx| {
-                    page.filter_currency = selected_row(state, cx).and_then(|row| match row {
-                        1 => Some(Currency::Rub),
-                        2 => Some(Currency::Usd),
-                        _ => None,
-                    });
+        let mut subscriptions = Vec::new();
+        subscriptions.push(cx.subscribe_in(
+            &search,
+            window,
+            |page: &mut Self, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
                     page.reload(cx);
-                },
-            ),
-            cx.subscribe_in(
-                &place_filter,
+                }
+            },
+        ));
+        for date_picker in [&from, &to] {
+            subscriptions.push(cx.subscribe_in(
+                date_picker,
                 window,
-                |page: &mut Self, state, _: &SelectEvent<Vec<SharedString>>, _, cx| {
-                    page.filter_place = selected_row(state, cx)
-                        .and_then(|row| row.checked_sub(1))
-                        .and_then(|row| page.places.get(row))
-                        .map(|place| place.id);
-                    page.reload(cx);
-                },
-            ),
-        ];
+                |_, _, _: &DatePickerEvent, _, cx| cx.notify(),
+            ));
+        }
+        subscriptions.push(cx.subscribe_in(
+            &currency_filter,
+            window,
+            |page: &mut Self, state, _: &SelectEvent<Vec<SharedString>>, _, cx| {
+                page.filter_currency = selected_row(state, cx).and_then(|row| match row {
+                    1 => Some(Currency::Rub),
+                    2 => Some(Currency::Usd),
+                    _ => None,
+                });
+                page.reload(cx);
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
+            &place_filter,
+            window,
+            |page: &mut Self, state, _: &SelectEvent<Vec<SharedString>>, _, cx| {
+                page.filter_place = selected_row(state, cx)
+                    .and_then(|row| row.checked_sub(1))
+                    .and_then(|row| page.places.get(row))
+                    .map(|place| place.id);
+                page.reload(cx);
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
+            &period_select,
+            window,
+            |page: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, window, cx| {
+                let SelectEvent::Confirm(Some(label)) = event else {
+                    return;
+                };
+                if let Some((period, _)) = DatePeriod::ALL
+                    .into_iter()
+                    .find(|(_, name)| *name == label.as_ref())
+                {
+                    page.apply_period(period, window, cx);
+                }
+            },
+        ));
         subscriptions.push(
             cx.subscribe(&table, |page: &mut Self, _, event: &TableEvent, cx| {
                 if let TableEvent::ColumnWidthsChanged(widths) = event {
@@ -184,10 +249,12 @@ impl PricesSection {
             places: Vec::new(),
             entries: Vec::new(),
             table,
+            search,
+            from,
+            to,
+            period_select,
             currency_filter,
             place_filter,
-            date_from,
-            date_to,
             filter_currency: None,
             filter_place: None,
             form: None,
@@ -228,29 +295,19 @@ impl PricesSection {
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) {
-        let date_from_text = self.date_from.read(cx).value().to_string();
-        let date_to_text = self.date_to.read(cx).value().to_string();
-        let parse_date = |value: &str| -> Result<Option<NaiveDate>, String> {
-            if value.trim().is_empty() {
-                Ok(None)
-            } else {
-                NaiveDate::parse_from_str(value.trim(), DATE_FORMAT)
-                    .map(Some)
-                    .map_err(|_| "Введите дату в формате ГГГГ-ММ-ДД".to_owned())
-            }
-        };
-        let (date_from, date_to) = match (parse_date(&date_from_text), parse_date(&date_to_text)) {
-            (Ok(from), Ok(to)) => (from, to),
-            (Err(error), _) | (_, Err(error)) => {
-                self.error(error, cx);
-                return;
-            }
-        };
+        let from = selected_date(self.from.read(cx));
+        let to = selected_date(self.to.read(cx));
+        let search = self.search.read(cx).value().to_string();
+        if matches!((from, to), (Some(start), Some(end)) if start > end) {
+            self.error("Начало периода не может быть позже окончания", cx);
+            return;
+        }
         let filter = PriceFilter {
             currency: self.filter_currency,
             expense_place_id: self.filter_place,
-            date_from,
-            date_to,
+            date_from: from,
+            date_to: to,
+            search,
         };
         match finance_db::list_prices(&self.database, filter) {
             Ok(rows) => {
@@ -266,7 +323,50 @@ impl PricesSection {
         }
     }
 
-    fn apply_dates(&mut self, cx: &mut Context<Self>) {
+    fn apply_period(&mut self, period: DatePeriod, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((from, to)) = period_dates(period, Local::now().date_naive()) else {
+            return;
+        };
+        self.from.update(cx, |state, cx| {
+            state.set_date(Date::Single(from), window, cx)
+        });
+        self.to
+            .update(cx, |state, cx| state.set_date(Date::Single(to), window, cx));
+        self.reload(cx);
+    }
+
+    fn has_active_filters(&self, cx: &App) -> bool {
+        !self.search.read(cx).value().is_empty()
+            || selected_date(self.from.read(cx)).is_some()
+            || selected_date(self.to.read(cx)).is_some()
+            || self.filter_currency.is_some()
+            || self.filter_place.is_some()
+            || self
+                .period_select
+                .read(cx)
+                .selected_index(cx)
+                .is_some_and(|index| index.row != 0)
+    }
+
+    fn reset_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        for date_picker in [&self.from, &self.to] {
+            date_picker.update(cx, |state, cx| {
+                state.set_date(Date::Single(None), window, cx)
+            });
+        }
+        self.filter_currency = None;
+        self.filter_place = None;
+        for select in [
+            &self.period_select,
+            &self.currency_filter,
+            &self.place_filter,
+        ] {
+            select.update(cx, |state, cx| {
+                state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
+            });
+        }
         self.reload(cx);
     }
 
@@ -622,6 +722,105 @@ impl TableDelegate for PricesTable {
     }
 }
 
+impl PricesSection {
+    /// Фильтры секции повторяют компактную компоновку фильтров страницы «Доходы».
+    fn render_filters(&mut self, cx: &mut Context<Self>) -> Div {
+        let active = self.has_active_filters(cx);
+        let filter = |label: &'static str, width: f32, control: AnyElement| {
+            div()
+                .w(px(width))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_size(px(12.0)).child(label))
+                .child(control)
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_start()
+                    .gap_2()
+                    .child(filter(
+                        "Поиск",
+                        200.0,
+                        Input::new(&self.search)
+                            .cleanable(true)
+                            .small()
+                            .suffix(Icon::new(IconName::Search).small())
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Период",
+                        140.0,
+                        Select::new(&self.period_select)
+                            .placeholder("Период")
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Дата от",
+                        150.0,
+                        DatePicker::new(&self.from)
+                            .placeholder("Выбрать дату")
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Дата до",
+                        150.0,
+                        DatePicker::new(&self.to)
+                            .placeholder("Выбрать дату")
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Валюта",
+                        110.0,
+                        Select::new(&self.currency_filter)
+                            .placeholder("Валюта")
+                            .small()
+                            .into_any_element(),
+                    ))
+                    .child(filter(
+                        "Место покупки",
+                        220.0,
+                        Select::new(&self.place_filter)
+                            .placeholder("Место покупки")
+                            .small()
+                            .into_any_element(),
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("prices-apply-filters")
+                            .primary()
+                            .small()
+                            .label("Применить")
+                            .on_click(cx.listener(|page, _, _, cx| page.reload(cx))),
+                    )
+                    .child(
+                        Button::new("prices-reset-filters")
+                            .small()
+                            .label("Сбросить фильтры")
+                            .disabled(!active)
+                            .on_click(
+                                cx.listener(|page, _, window, cx| page.reset_filters(window, cx)),
+                            ),
+                    ),
+            )
+    }
+}
+
 impl Render for PricesSection {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let message = self.message.clone();
@@ -651,37 +850,7 @@ impl Render for PricesSection {
                             ),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .child(Select::new(&self.currency_filter).w(px(150.0)))
-                    .child(Select::new(&self.place_filter).w(px(210.0)))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child("Дата от")
-                            .child(div().w(px(150.0)).child(Input::new(&self.date_from))),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child("Дата до")
-                            .child(div().w(px(150.0)).child(Input::new(&self.date_to))),
-                    )
-                    .child(
-                        Button::new("prices-apply-filters")
-                            .secondary()
-                            .label("Применить")
-                            .on_click(cx.listener(|page, _, _, cx| page.apply_dates(cx))),
-                    ),
-            )
+            .child(self.render_filters(cx))
             .when_some(message, |body, message| {
                 body.child(div().text_color(cx.theme().danger).child(message))
             })

@@ -2481,7 +2481,8 @@ pub fn delete_expense_place(connection: &Connection, id: i64) -> Result<(), DbEr
     Ok(())
 }
 
-/// Lists prices matching the optional inclusive date, currency, and expense-place filters.
+/// Lists prices matching the optional inclusive date, currency, place, and search filters.
+/// Search is case-insensitive and matches the price name or the expense-place name.
 pub fn list_prices(
     connection: &Connection,
     filter: finance_core::PriceFilter,
@@ -2527,7 +2528,19 @@ pub fn list_prices(
             })
         },
     )?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+    let rows = rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)?;
+    let search = filter.search.trim().to_lowercase();
+    if search.is_empty() {
+        Ok(rows)
+    } else {
+        Ok(rows
+            .into_iter()
+            .filter(|price| {
+                price.name.to_lowercase().contains(&search)
+                    || price.expense_place_name.to_lowercase().contains(&search)
+            })
+            .collect())
+    }
 }
 
 /// Creates or updates a positive, exact-decimal price.
@@ -3709,6 +3722,7 @@ mod tests {
                 expense_place_id: Some(place_id),
                 date_from: Some(first_date),
                 date_to: Some(last_date),
+                search: String::new(),
             },
         )
         .unwrap();
@@ -3717,6 +3731,39 @@ mod tests {
         assert_eq!(rows[0].name, "Молоко");
         assert_eq!(rows[0].amount.to_string(), "123456789012345.123456789012");
         assert_eq!(rows[0].expense_place_name, "Магазин");
+
+        let by_name = list_prices(
+            &connection,
+            PriceFilter {
+                search: "мол".to_owned(),
+                ..PriceFilter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0].name, "Молоко");
+
+        let by_place = list_prices(
+            &connection,
+            PriceFilter {
+                search: "РЫН".to_owned(),
+                ..PriceFilter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(by_place.len(), 1);
+        assert_eq!(by_place[0].name, "Хлеб");
+
+        let no_match = list_prices(
+            &connection,
+            PriceFilter {
+                currency: Some(Currency::Rub),
+                search: "Хлеб".to_owned(),
+                ..PriceFilter::default()
+            },
+        )
+        .unwrap();
+        assert!(no_match.is_empty());
         assert!(matches!(
             delete_expense_place(&connection, place_id),
             Err(DbError::EntityInUse)
