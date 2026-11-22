@@ -17,7 +17,7 @@ use gpui_kit::component::calendar::Date;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::dialog::Dialog;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::table::{Column, ColumnSort, DataTable, TableDelegate, TableState};
 use gpui_kit::component::tooltip::Tooltip as ComponentTooltip;
 use gpui_kit::component::{
@@ -46,6 +46,38 @@ const PIE_CHART_COLORS: [u32; 8] = [
 ];
 
 type Choice = Entity<SelectState<Vec<SharedString>>>;
+type CategoryChoice = Entity<SelectState<Vec<CategoryFilterItem>>>;
+
+const INCOME_CATEGORY_FILTER_ITEM_ID: &str = "analysis-income-category-filter-item";
+const EXPENSE_CATEGORY_FILTER_ITEM_ID: &str = "analysis-expense-category-filter-item";
+
+#[derive(Clone)]
+struct CategoryFilterItem {
+    id: usize,
+    label: String,
+    item_id: &'static str,
+}
+
+impl SelectItem for CategoryFilterItem {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone().into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.label
+    }
+
+    fn render(&self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let tooltip = self.label.clone();
+        div()
+            .id((self.item_id, self.id))
+            .w_full()
+            .tooltip(move |window, cx| ComponentTooltip::new(tooltip.clone()).build(window, cx))
+            .child(self.label.clone())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AnalysisFilters {
@@ -408,7 +440,7 @@ struct CategoryPicker {
     ids: Vec<i64>,
     labels: Vec<String>,
     selected: Option<i64>,
-    select: Choice,
+    select: CategoryChoice,
 }
 
 impl CategoryPicker {
@@ -421,10 +453,10 @@ impl CategoryPicker {
         (ids, labels)
     }
 
-    fn handle_confirm(&mut self, value: &Option<SharedString>) {
+    fn handle_confirm(&mut self, value: &Option<String>) {
         self.selected = value
             .as_ref()
-            .and_then(|label| self.labels.iter().position(|l| l == label.as_ref()))
+            .and_then(|label| self.labels.iter().position(|item| item == label))
             .and_then(|position| position.checked_sub(1))
             .and_then(|position| self.ids.get(position).copied());
     }
@@ -449,6 +481,20 @@ fn choice(items: Vec<String>, window: &mut Window, cx: &mut Context<AnalysisPage
     cx.new(|cx| SelectState::new(items, Some(IndexPath::default().row(0)), window, cx))
 }
 
+fn category_choice(
+    items: Vec<String>,
+    item_id: &'static str,
+    window: &mut Window,
+    cx: &mut Context<AnalysisPage>,
+) -> CategoryChoice {
+    let items: Vec<CategoryFilterItem> = items
+        .into_iter()
+        .enumerate()
+        .map(|(id, label)| CategoryFilterItem { id, label, item_id })
+        .collect();
+    cx.new(|cx| SelectState::new(items, Some(IndexPath::default().row(0)), window, cx))
+}
+
 impl AnalysisPage {
     pub(crate) fn new(database: Rc<Database>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let database_path = match database.path() {
@@ -462,8 +508,18 @@ impl AnalysisPage {
             .map(|(_, name)| name.to_owned())
             .collect();
         let period_select = choice(period_labels, window, cx);
-        let income_select = choice(vec![NONE_LABEL.to_owned()], window, cx);
-        let expense_select = choice(vec![NONE_LABEL.to_owned()], window, cx);
+        let income_select = category_choice(
+            vec![NONE_LABEL.to_owned()],
+            INCOME_CATEGORY_FILTER_ITEM_ID,
+            window,
+            cx,
+        );
+        let expense_select = category_choice(
+            vec![NONE_LABEL.to_owned()],
+            EXPENSE_CATEGORY_FILTER_ITEM_ID,
+            window,
+            cx,
+        );
 
         let mut subscriptions = Vec::new();
         for date_picker in [&from, &to] {
@@ -491,7 +547,7 @@ impl AnalysisPage {
         subscriptions.push(cx.subscribe_in(
             &income_select,
             window,
-            |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+            |this: &mut Self, _, event: &SelectEvent<Vec<CategoryFilterItem>>, _, cx| {
                 let SelectEvent::Confirm(value) = event;
                 this.income.handle_confirm(value);
                 cx.notify();
@@ -500,14 +556,14 @@ impl AnalysisPage {
         subscriptions.push(cx.subscribe_in(
             &expense_select,
             window,
-            |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+            |this: &mut Self, _, event: &SelectEvent<Vec<CategoryFilterItem>>, _, cx| {
                 let SelectEvent::Confirm(value) = event;
                 this.expense.handle_confirm(value);
                 cx.notify();
             },
         ));
 
-        let picker = |select: Choice| CategoryPicker {
+        let picker = |select: CategoryChoice| CategoryPicker {
             categories: Vec::new(),
             ids: Vec::new(),
             labels: vec![NONE_LABEL.to_owned()],
@@ -548,6 +604,10 @@ impl AnalysisPage {
         for kind in [TransactionKind::Income, TransactionKind::Expense] {
             match finance_db::list_categories(&self.database, kind, true) {
                 Ok(categories) => {
+                    let item_id = match kind {
+                        TransactionKind::Income => INCOME_CATEGORY_FILTER_ITEM_ID,
+                        TransactionKind::Expense => EXPENSE_CATEGORY_FILTER_ITEM_ID,
+                    };
                     let picker = match kind {
                         TransactionKind::Income => &mut self.income,
                         TransactionKind::Expense => &mut self.expense,
@@ -564,8 +624,11 @@ impl AnalysisPage {
                     picker.categories = categories;
                     picker.ids = ids;
                     picker.labels = labels.clone();
-                    let items: Vec<SharedString> =
-                        labels.into_iter().map(SharedString::from).collect();
+                    let items: Vec<CategoryFilterItem> = labels
+                        .into_iter()
+                        .enumerate()
+                        .map(|(id, label)| CategoryFilterItem { id, label, item_id })
+                        .collect();
                     picker.select.update(cx, |state, cx| {
                         state.set_items(items, window, cx);
                         state.set_selected_index(Some(IndexPath::default().row(row)), window, cx);
@@ -1352,14 +1415,16 @@ mod tests {
     // Глоб-импорт `gpui_kit::*` затеняет атрибут `#[test]`, поэтому имена импортируются явно.
     use super::{
         analysis_balance_lines, parse_filters, pie_chart_slices, pie_slice_points,
-        sort_analysis_categories, AnalysisFilters, AnalysisTable, CategoryPicker, RequestTracker,
-        COL_AMOUNT, COL_CATEGORY, COL_SHARE, COL_TRANSACTION_COUNT,
+        sort_analysis_categories, AnalysisFilters, AnalysisTable, CategoryFilterItem,
+        CategoryPicker, RequestTracker, COL_AMOUNT, COL_CATEGORY, COL_SHARE, COL_TRANSACTION_COUNT,
+        EXPENSE_CATEGORY_FILTER_ITEM_ID, INCOME_CATEGORY_FILTER_ITEM_ID,
     };
     use chrono::NaiveDate;
     use finance_core::{
         summarize_analysis, AnalysisCategoryTotal, AnalysisSummary, AnalysisTotal,
         AnalysisTransaction, Category, Currency, TransactionBalanceError, TransactionKind,
     };
+    use gpui_kit::component::select::SelectItem as _;
     use rust_decimal::Decimal;
 
     fn summary_with_both_kinds_and_currencies() -> AnalysisSummary {
@@ -1820,5 +1885,25 @@ mod tests {
         let (ids, labels) = CategoryPicker::labels_for(&categories);
         assert_eq!(ids, [7, 9]);
         assert_eq!(labels, ["Все", "Зарплата", "Зарплата > Премия"]);
+    }
+
+    #[test]
+    fn analysis_category_filter_items_keep_full_labels_for_tooltips() {
+        let income = CategoryFilterItem {
+            id: 1,
+            label: "Зарплата > Премия".to_owned(),
+            item_id: INCOME_CATEGORY_FILTER_ITEM_ID,
+        };
+        let expense = CategoryFilterItem {
+            id: 2,
+            label: "Транспорт > Разное > История".to_owned(),
+            item_id: EXPENSE_CATEGORY_FILTER_ITEM_ID,
+        };
+
+        assert_eq!(income.title().to_string(), "Зарплата > Премия");
+        assert_eq!(income.value(), "Зарплата > Премия");
+        assert_eq!(expense.title().to_string(), "Транспорт > Разное > История");
+        assert_eq!(expense.value(), "Транспорт > Разное > История");
+        assert_ne!(income.item_id, expense.item_id);
     }
 }

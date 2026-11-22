@@ -18,14 +18,16 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::table::{
     Column, ColumnFixed, ColumnGroup, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
 };
+use gpui_kit::component::tooltip::Tooltip as ComponentTooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _, WindowExt as _,
 };
 use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
@@ -36,6 +38,7 @@ use super::support::{
 const DATE_FORMAT: &str = "%Y-%m-%d";
 const ALL_LABEL: &str = "Все";
 const ALL_BANKS_LABEL: &str = "Все банки";
+const BANK_FILTER_ITEM_ID: &str = "payment-documents-bank-filter-item";
 const NO_CURRENCY_LABEL: &str = "валюта не указана";
 const RATE_WARNING: &str =
     "Условие сохраняется как возможность; приложение не подтверждает выполнение порога трат.";
@@ -78,6 +81,52 @@ const NEXT_PAYMENT_GROUP_LABEL: &str = "Следующий платёж";
 const NEXT_PAYMENT_GROUP_SPAN: usize = 3;
 
 type Choice = Entity<SelectState<Vec<SharedString>>>;
+type BankChoice = Entity<SelectState<Vec<BankFilterItem>>>;
+
+#[derive(Clone)]
+struct BankFilterItem {
+    id: usize,
+    label: String,
+}
+
+impl SelectItem for BankFilterItem {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone().into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.label
+    }
+
+    fn render(&self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let tooltip = self.label.clone();
+        div()
+            .id((BANK_FILTER_ITEM_ID, self.id))
+            .w_full()
+            .tooltip(move |window, cx| ComponentTooltip::new(tooltip.clone()).build(window, cx))
+            .child(self.label.clone())
+    }
+}
+
+fn bank_filter_items(labels: Vec<String>) -> Vec<BankFilterItem> {
+    labels
+        .into_iter()
+        .enumerate()
+        .map(|(id, label)| BankFilterItem { id, label })
+        .collect()
+}
+
+fn bank_choice(
+    labels: Vec<String>,
+    selected: usize,
+    window: &mut Window,
+    cx: &mut Context<PaymentDocumentsPage>,
+) -> BankChoice {
+    let items = bank_filter_items(labels);
+    cx.new(|cx| SelectState::new(items, Some(IndexPath::default().row(selected)), window, cx))
+}
 
 /// Группа «Следующий платёж» объединяет дату, размер и кнопку редактирования.
 /// Пустые группы нужны, чтобы сохранить позиции всех остальных колонок,
@@ -414,7 +463,7 @@ pub(crate) struct PaymentDocumentsPage {
     currency_filter: Option<Currency>,
     card_type_filter: Option<PaymentCardType>,
     payment_system_filter: Option<PaymentSystem>,
-    bank_filter_select: Choice,
+    bank_filter_select: BankChoice,
     system_filter_select: Choice,
     type_filter_select: Choice,
     currency_filter_select: Choice,
@@ -425,13 +474,13 @@ pub(crate) struct PaymentDocumentsPage {
     _subscriptions: Vec<Subscription>,
 }
 
-fn selected_row(state: &Choice, cx: &App) -> Option<usize> {
+fn selected_row<T: SelectItem>(state: &Entity<SelectState<Vec<T>>>, cx: &App) -> Option<usize> {
     state.read(cx).selected_index(cx).map(|ix| ix.row)
 }
 
 impl PaymentDocumentsPage {
     pub(crate) fn new(database: Rc<Database>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let bank_filter_select = choice(vec![ALL_BANKS_LABEL.to_owned()], 0, window, cx);
+        let bank_filter_select = bank_choice(vec![ALL_BANKS_LABEL.to_owned()], 0, window, cx);
         let system_filter_select = choice(
             std::iter::once(ALL_LABEL.to_owned())
                 .chain(system_labels())
@@ -454,7 +503,7 @@ impl PaymentDocumentsPage {
         subscriptions.push(cx.subscribe_in(
             &bank_filter_select,
             window,
-            |this: &mut Self, state, _: &SelectEvent<Vec<SharedString>>, _, cx| {
+            |this: &mut Self, state, _: &SelectEvent<Vec<BankFilterItem>>, _, cx| {
                 let row = selected_row(state, cx);
                 this.bank_filter = row
                     .and_then(|r| r.checked_sub(1))
@@ -540,10 +589,10 @@ impl PaymentDocumentsPage {
                 self.bank_filter = None;
             }
         }
-        let items: Vec<SharedString> = std::iter::once(ALL_BANKS_LABEL.to_owned())
+        let labels = std::iter::once(ALL_BANKS_LABEL.to_owned())
             .chain(self.banks.iter().map(|bank| bank.name.clone()))
-            .map(SharedString::from)
             .collect();
+        let items = bank_filter_items(labels);
         let selected = self
             .bank_filter
             .and_then(|id| self.banks.iter().position(|bank| bank.id == id))
@@ -610,8 +659,10 @@ impl PaymentDocumentsPage {
         self.currency_filter = None;
         self.card_type_filter = None;
         self.payment_system_filter = None;
+        self.bank_filter_select.update(cx, |state, cx| {
+            state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
+        });
         for select in [
-            &self.bank_filter_select,
             &self.system_filter_select,
             &self.type_filter_select,
             &self.currency_filter_select,
@@ -2276,13 +2327,14 @@ impl Render for PaymentDocumentsPage {
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
+    use gpui_kit::component::select::SelectItem as _;
     use gpui_kit::component::table::ColumnSort;
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
     use super::{
-        build_details, build_next_payment_update, currency_from_row, currency_row,
-        format_column_widths, has_next_payment_data, load_column_widths,
+        bank_filter_items, build_details, build_next_payment_update, currency_from_row,
+        currency_row, format_column_widths, has_next_payment_data, load_column_widths,
         next_payment_group_headers, parse_column_widths, parse_saved_column_widths, sort_cards,
         CardInput, Currency, Database, NextPaymentInput, PaymentCardType, PaymentDocument,
         PaymentSystem, ACTIONS_COLUMN_WIDTH, COL_ACTIONS, COL_AMOUNT, COL_BANK, COL_GRACE_PERIOD,
@@ -2719,5 +2771,23 @@ mod tests {
             );
         }
         assert_eq!(currency_row(None), 0);
+    }
+
+    #[test]
+    fn bank_filter_items_keep_labels_and_have_unique_ids() {
+        let labels = vec![
+            "Все банки".to_owned(),
+            "Альфа-Банк".to_owned(),
+            "Очень длинное название банка".to_owned(),
+        ];
+
+        let items = bank_filter_items(labels.clone());
+
+        assert_eq!(items.len(), labels.len());
+        for (index, item) in items.iter().enumerate() {
+            assert_eq!(item.id, index);
+            assert_eq!(item.title().to_string(), labels[index]);
+            assert_eq!(item.value(), &labels[index]);
+        }
     }
 }

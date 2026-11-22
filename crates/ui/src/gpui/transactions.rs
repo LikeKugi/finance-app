@@ -40,6 +40,8 @@ use super::support::{date_period_range, DatePeriod, DatePeriodRange};
 const DATE_FORMAT: &str = "%Y-%m-%d";
 const NONE_LABEL: &str = "Все";
 const NO_CARD_LABEL: &str = "Не по карте";
+const EXPENSE_PLACE_LABEL: &str = "Место покупки";
+const EXPENSE_PLACE_FILTER_ITEM_ID: &str = "expense-place-filter-item";
 const INCOME_PAYMENT_FILTER_LABEL: &str = "Способ получения";
 const PAYMENT_FILTER_LABEL: &str = "Способ оплаты";
 
@@ -47,6 +49,7 @@ type Choice = Entity<SelectState<Vec<SharedString>>>;
 type CategoryChoice = Entity<SelectState<Vec<CategoryFilterItem>>>;
 type BankChoice = Entity<SelectState<Vec<BankFilterItem>>>;
 type CardChoice = Entity<SelectState<Vec<CardFilterItem>>>;
+type PlaceChoice = Entity<SelectState<Vec<PlaceFilterItem>>>;
 
 #[derive(Clone)]
 struct CategoryFilterItem {
@@ -129,6 +132,33 @@ impl SelectItem for CardFilterItem {
     }
 }
 
+#[derive(Clone)]
+struct PlaceFilterItem {
+    id: usize,
+    label: String,
+}
+
+impl SelectItem for PlaceFilterItem {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone().into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.label
+    }
+
+    fn render(&self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let tooltip = self.label.clone();
+        div()
+            .id((EXPENSE_PLACE_FILTER_ITEM_ID, self.id))
+            .w_full()
+            .tooltip(move |window, cx| ComponentTooltip::new(tooltip.clone()).build(window, cx))
+            .child(self.label.clone())
+    }
+}
+
 fn choice(
     items: Vec<String>,
     selected: usize,
@@ -177,6 +207,20 @@ fn card_choice(
         .into_iter()
         .enumerate()
         .map(|(id, label)| CardFilterItem { id, label })
+        .collect();
+    cx.new(|cx| SelectState::new(items, Some(IndexPath::default().row(selected)), window, cx))
+}
+
+fn place_choice(
+    labels: Vec<String>,
+    selected: usize,
+    window: &mut Window,
+    cx: &mut Context<TransactionsPage>,
+) -> PlaceChoice {
+    let items: Vec<PlaceFilterItem> = labels
+        .into_iter()
+        .enumerate()
+        .map(|(id, label)| PlaceFilterItem { id, label })
         .collect();
     cx.new(|cx| SelectState::new(items, Some(IndexPath::default().row(selected)), window, cx))
 }
@@ -324,7 +368,7 @@ pub(crate) struct TransactionsPage {
     category_filter_select: CategoryChoice,
     expense_place_filter: Option<i64>,
     expense_place_filter_ids: Vec<i64>,
-    expense_place_filter_select: Choice,
+    expense_place_filter_select: PlaceChoice,
     bank_filter: Option<i64>,
     bank_filter_ids: Vec<i64>,
     bank_filter_select: BankChoice,
@@ -350,7 +394,7 @@ impl TransactionsPage {
         let from = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
         let to = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
         let category_filter_select = category_choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
-        let expense_place_filter_select = choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
+        let expense_place_filter_select = place_choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
         let bank_filter_select = bank_choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
         let card_filter_select = card_choice(
             vec![NONE_LABEL.to_owned(), NO_CARD_LABEL.to_owned()],
@@ -398,14 +442,14 @@ impl TransactionsPage {
         subscriptions.push(cx.subscribe_in(
             &expense_place_filter_select,
             window,
-            |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+            |this: &mut Self, _, event: &SelectEvent<Vec<PlaceFilterItem>>, _, cx| {
                 let SelectEvent::Confirm(value) = event;
                 this.expense_place_filter = value
                     .as_ref()
                     .and_then(|label| {
                         this.expense_place_filter_labels()
                             .iter()
-                            .position(|item| item == label.as_ref())
+                            .position(|item| item == label)
                     })
                     .and_then(|position| position.checked_sub(1))
                     .and_then(|position| this.expense_place_filter_ids.get(position).copied());
@@ -680,10 +724,11 @@ impl TransactionsPage {
                     .position(|candidate| *candidate == place_id)
             })
             .map_or(0, |position| position + 1);
-        let expense_place_items: Vec<SharedString> = self
+        let expense_place_items: Vec<PlaceFilterItem> = self
             .expense_place_filter_labels()
             .into_iter()
-            .map(SharedString::from)
+            .enumerate()
+            .map(|(id, label)| PlaceFilterItem { id, label })
             .collect();
         self.expense_place_filter_select.update(cx, |state, cx| {
             state.set_items(expense_place_items, window, cx);
@@ -845,11 +890,10 @@ impl TransactionsPage {
         self.category_filter_select.update(cx, |state, cx| {
             state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
         });
-        for select in [
-            &self.expense_place_filter_select,
-            &self.currency_filter_select,
-            &self.period_select,
-        ] {
+        self.expense_place_filter_select.update(cx, |state, cx| {
+            state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
+        });
+        for select in [&self.currency_filter_select, &self.period_select] {
             select.update(cx, |state, cx| {
                 state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
             });
@@ -1381,6 +1425,14 @@ impl TransactionsPage {
             .and_then(|row| self.card_filter_labels().get(row).cloned())
             .filter(|label| label != NONE_LABEL && label != NO_CARD_LABEL);
 
+        let place_tooltip = self
+            .expense_place_filter_select
+            .read(cx)
+            .selected_index(cx)
+            .map(|ix| ix.row)
+            .and_then(|row| self.expense_place_filter_labels().get(row).cloned())
+            .filter(|label| label != NONE_LABEL);
+
         div()
             .flex()
             .flex_col()
@@ -1485,11 +1537,20 @@ impl TransactionsPage {
                     ))
                     .when(self.kind == TransactionKind::Expense, |filters| {
                         filters.child(filter(
-                            "Место траты",
+                            EXPENSE_PLACE_LABEL,
                             220.0,
-                            Select::new(&self.expense_place_filter_select)
-                                .placeholder("Место траты")
-                                .small()
+                            div()
+                                .id("expense-place-filter-select")
+                                .child(
+                                    Select::new(&self.expense_place_filter_select)
+                                        .placeholder(EXPENSE_PLACE_LABEL)
+                                        .small(),
+                                )
+                                .when_some(place_tooltip.clone(), |el, tooltip| {
+                                    el.tooltip(move |window, cx| {
+                                        ComponentTooltip::new(tooltip.clone()).build(window, cx)
+                                    })
+                                })
                                 .into_any_element(),
                         ))
                     }),
@@ -1574,7 +1635,7 @@ impl TransactionsPage {
             }));
         }
         let expense_place_field = field(
-            "Место траты",
+            EXPENSE_PLACE_LABEL,
             Select::new(&form.expense_place_select)
                 .placeholder("Не указано")
                 .into_any_element(),
@@ -1821,7 +1882,7 @@ const EXPENSE_COLUMN_TITLES: [&str; 7] = [
     "Категория",
     "Сумма",
     "Валюта",
-    "Место траты",
+    EXPENSE_PLACE_LABEL,
     "Комментарии",
     "Действия",
 ];
@@ -2306,9 +2367,9 @@ mod tests {
         card_filter_from_index, card_filter_index, cards_for_bank,
         column_widths_with_fixed_actions, comment_preview, format_column_widths,
         parse_column_widths, payment_filter_label, payment_filter_labels, sort_transactions,
-        update_bank_filter_selection, BankFilterItem, FormValues, ACTIONS_COLUMN_WIDTH,
-        COL_INCOME_ACTIONS, INCOME_PAYMENT_FILTER_LABEL, NONE_LABEL, NO_CARD_LABEL,
-        PAYMENT_FILTER_LABEL,
+        update_bank_filter_selection, BankFilterItem, FormValues, PlaceFilterItem,
+        ACTIONS_COLUMN_WIDTH, COL_INCOME_ACTIONS, EXPENSE_COLUMN_TITLES, EXPENSE_PLACE_LABEL,
+        INCOME_PAYMENT_FILTER_LABEL, NONE_LABEL, NO_CARD_LABEL, PAYMENT_FILTER_LABEL,
     };
     use crate::gpui::support::card_label;
     use chrono::NaiveDate;
@@ -2317,6 +2378,7 @@ mod tests {
         Currency, PaymentCardType, PaymentDocument, PaymentDocumentFilter, PaymentSystem,
         TransactionKind,
     };
+    use gpui_kit::component::select::SelectItem as _;
     use gpui_kit::component::table::ColumnSort;
     use rust_decimal::Decimal;
 
@@ -2462,6 +2524,20 @@ mod tests {
 
         assert_eq!(item.label, "Альфа-Банк");
         assert_eq!(item.id, 3);
+    }
+
+    #[test]
+    fn expense_place_filter_item_keeps_full_label_for_tooltip() {
+        let item = PlaceFilterItem {
+            id: 2,
+            label: "Супермаркет у дома".to_owned(),
+        };
+
+        assert_eq!(item.title().to_string(), "Супермаркет у дома");
+        assert_eq!(item.value(), "Супермаркет у дома");
+        assert_eq!(item.id, 2);
+        assert_eq!(EXPENSE_PLACE_LABEL, "Место покупки");
+        assert_eq!(EXPENSE_COLUMN_TITLES[4], EXPENSE_PLACE_LABEL);
     }
 
     #[test]
