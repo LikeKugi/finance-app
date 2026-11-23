@@ -12,20 +12,22 @@ use gpui_kit::component::calendar::Date;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::table::{
     Column, ColumnFixed, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
 };
+use gpui_kit::component::tooltip::Tooltip as ComponentTooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _, WindowExt as _,
 };
-use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::prelude::{FluentBuilder as _, StatefulInteractiveElement};
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
-use super::support::{date_period_range, DatePeriod, DatePeriodRange};
+use super::support::{date_period_range, text_suggestions, DatePeriod, DatePeriodRange};
 
 const DATE_FORMAT: &str = "%Y-%m-%d";
+const PLACE_OPTION_ITEM_ID: &str = "price-place-option";
 const WIDTHS_KEY: &str = "table_columns.prices.v1";
 const HEADERS: [&str; 6] = [
     "Название",
@@ -45,15 +47,45 @@ const TABLE_ROW_HEIGHT: f32 = 32.0;
 const TABLE_HEIGHT: f32 = TABLE_ROW_HEIGHT * (VISIBLE_TABLE_ROWS as f32 + 1.0);
 
 type Choice = Entity<SelectState<Vec<SharedString>>>;
+type PlaceChoice = Entity<SelectState<Vec<PricePlaceItem>>>;
+
+#[derive(Clone)]
+struct PricePlaceItem {
+    id: usize,
+    label: String,
+    tooltip: String,
+}
+
+impl SelectItem for PricePlaceItem {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone().into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.label
+    }
+
+    fn render(&self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let tooltip = self.tooltip.clone();
+        div()
+            .id((PLACE_OPTION_ITEM_ID, self.id))
+            .w_full()
+            .tooltip(move |window, cx| ComponentTooltip::new(tooltip.clone()).build(window, cx))
+            .child(self.label.clone())
+    }
+}
 
 struct PriceForm {
     id: Option<i64>,
     name: Entity<InputState>,
-    date: Entity<InputState>,
+    date: Entity<DatePickerState>,
     amount: Entity<InputState>,
     currency: Choice,
-    place: Choice,
+    place: PlaceChoice,
     place_ids: Vec<i64>,
+    suggestions: Vec<String>,
 }
 
 pub(crate) struct PricesSection {
@@ -69,6 +101,7 @@ pub(crate) struct PricesSection {
     place_filter: Choice,
     filter_currency: Option<Currency>,
     filter_place: Option<i64>,
+    name_history: Vec<String>,
     form: Option<PriceForm>,
     message: Option<String>,
     _subscriptions: Vec<Subscription>,
@@ -98,8 +131,44 @@ fn choice(items: Vec<String>, selected: usize, window: &mut Window, cx: &mut App
     cx.new(|cx| SelectState::new(items, Some(IndexPath::default().row(selected)), window, cx))
 }
 
+fn place_choice(
+    places: &[ExpensePlace],
+    selected: usize,
+    window: &mut Window,
+    cx: &mut App,
+) -> PlaceChoice {
+    let items = places
+        .iter()
+        .enumerate()
+        .map(|(id, place)| PricePlaceItem {
+            id,
+            label: place.name.clone(),
+            tooltip: price_place_tooltip(place),
+        })
+        .collect();
+    cx.new(|cx| SelectState::new(items, Some(IndexPath::default().row(selected)), window, cx))
+}
+
 fn selected_row(state: &Choice, cx: &App) -> Option<usize> {
     state.read(cx).selected_index(cx).map(|index| index.row)
+}
+
+fn selected_place_row(state: &PlaceChoice, cx: &App) -> Option<usize> {
+    state.read(cx).selected_index(cx).map(|index| index.row)
+}
+
+fn price_place_tooltip(place: &ExpensePlace) -> String {
+    let mut tooltip = format!("{} · #{}", place.name, place.id);
+    if let Some(comment) = place
+        .comment
+        .as_deref()
+        .map(str::trim)
+        .filter(|comment| !comment.is_empty())
+    {
+        tooltip.push_str("\nКомментарий: ");
+        tooltip.push_str(comment);
+    }
+    tooltip
 }
 
 fn selected_date(state: &DatePickerState) -> Option<NaiveDate> {
@@ -261,6 +330,7 @@ impl PricesSection {
             place_filter,
             filter_currency: None,
             filter_place: None,
+            name_history: Vec::new(),
             form: None,
             message: None,
             _subscriptions: subscriptions,
@@ -384,6 +454,14 @@ impl PricesSection {
             self.error("Сначала добавьте место покупки в справочнике", cx);
             return;
         }
+        match finance_db::list_price_names(&self.database) {
+            Ok(names) => self.name_history = names,
+            Err(error) => {
+                self.error(error.to_string(), cx);
+                return;
+            }
+        }
+        self.message = None;
         let date = record.map_or_else(|| Local::now().date_naive(), |entry| entry.date);
         let currency = record.map_or(0, |entry| {
             if entry.currency == Currency::Rub {
@@ -399,40 +477,57 @@ impl PricesSection {
                     .position(|place| place.id == entry.expense_place_id)
             })
             .unwrap_or(0);
-        let place_ids = self.places.iter().map(|place| place.id).collect();
+        let name_input = input(
+            "Название товара или услуги",
+            record.map_or("", |entry| entry.name.as_str()),
+            window,
+            cx,
+        );
+        let form_date = cx.new(|cx| DatePickerState::new(window, cx).date_format(DATE_FORMAT));
+        form_date.update(cx, |state, cx| {
+            state.set_date(Date::Single(Some(date)), window, cx)
+        });
+        let amount_input = input(
+            "Цена за 1 шт. / 1 кг",
+            &record.map_or_else(String::new, |entry| entry.amount.to_string()),
+            window,
+            cx,
+        );
+        let currency_select = choice(
+            vec!["RUB".to_owned(), "USD".to_owned()],
+            currency,
+            window,
+            cx,
+        );
+        let place_select = place_choice(&self.places, place_index, window, cx);
+        self._subscriptions.push(cx.subscribe_in(
+            &name_input,
+            window,
+            |this: &mut Self, state, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let text = state.read(cx).value().to_string();
+                    let suggestions = text_suggestions(&this.name_history, &text);
+                    if let Some(form) = this.form.as_mut() {
+                        form.suggestions = suggestions;
+                    }
+                    cx.notify();
+                }
+            },
+        ));
+        self._subscriptions.push(cx.subscribe_in(
+            &form_date,
+            window,
+            |_, _, _: &DatePickerEvent, _, cx| cx.notify(),
+        ));
         self.form = Some(PriceForm {
             id: record.map(|entry| entry.id),
-            name: input(
-                "Название товара или услуги",
-                record.map_or("", |entry| entry.name.as_str()),
-                window,
-                cx,
-            ),
-            date: input(
-                "ГГГГ-ММ-ДД",
-                &date.format(DATE_FORMAT).to_string(),
-                window,
-                cx,
-            ),
-            amount: input(
-                "Цена за 1 шт. / 1 кг",
-                &record.map_or_else(String::new, |entry| entry.amount.to_string()),
-                window,
-                cx,
-            ),
-            currency: choice(
-                vec!["RUB".to_owned(), "USD".to_owned()],
-                currency,
-                window,
-                cx,
-            ),
-            place: choice(
-                self.places.iter().map(|place| place.name.clone()).collect(),
-                place_index,
-                window,
-                cx,
-            ),
-            place_ids,
+            name: name_input,
+            date: form_date,
+            amount: amount_input,
+            currency: currency_select,
+            place: place_select,
+            place_ids: self.places.iter().map(|place| place.id).collect(),
+            suggestions: Vec::new(),
         });
         let this = cx.entity();
         window.open_dialog(cx, move |dialog: Dialog, _, cx| {
@@ -451,12 +546,11 @@ impl PricesSection {
             return false;
         };
         let name = form.name.read(cx).value().trim().to_owned();
-        let date_text = form.date.read(cx).value().to_string();
-        let amount_text = form.amount.read(cx).value().trim().replace(',', ".");
-        let Ok(date) = NaiveDate::parse_from_str(date_text.trim(), DATE_FORMAT) else {
-            self.error("Введите дату в формате ГГГГ-ММ-ДД", cx);
+        let Some(date) = selected_date(form.date.read(cx)) else {
+            self.error("Выберите дату", cx);
             return false;
         };
+        let amount_text = form.amount.read(cx).value().trim().replace(',', ".");
         let Ok(amount) = Decimal::from_str(&amount_text) else {
             self.error("Введите корректную цену", cx);
             return false;
@@ -466,7 +560,7 @@ impl PricesSection {
         } else {
             Currency::Rub
         };
-        let Some(place_id) = selected_row(&form.place, cx)
+        let Some(place_id) = selected_place_row(&form.place, cx)
             .and_then(|row| form.place_ids.get(row))
             .copied()
         else {
@@ -505,21 +599,63 @@ impl PricesSection {
         }
         .to_owned();
         let this = cx.entity();
-        let body = div()
+        let place_tooltip = selected_place_row(&form.place, cx)
+            .and_then(|row| self.places.get(row))
+            .map(price_place_tooltip);
+        let mut body = div()
             .flex()
             .flex_col()
             .gap_3()
             .p_4()
             .child("Название товара или услуги")
-            .child(Input::new(&form.name))
-            .child("Дата (ГГГГ-ММ-ДД)")
-            .child(Input::new(&form.date))
+            .child(Input::new(&form.name));
+        if !form.suggestions.is_empty() {
+            let buttons = form.suggestions.iter().enumerate().map(|(index, text)| {
+                let text = text.clone();
+                Button::new(("price-name-suggestion", index))
+                    .compact()
+                    .label(text.clone())
+                    .on_click(cx.listener(move |page, _, window, cx| {
+                        if let Some(form) = page.form.as_mut() {
+                            form.suggestions.clear();
+                            let name = form.name.clone();
+                            name.update(cx, |state, cx| state.set_value(text.clone(), window, cx));
+                        }
+                        cx.notify();
+                    }))
+            });
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child("Ранее использованные названия:")
+                    .children(buttons),
+            );
+        }
+        body = body
+            .child("Дата")
+            .child(
+                DatePicker::new(&form.date)
+                    .placeholder("Выбрать дату")
+                    .into_any_element(),
+            )
             .child("Цена за 1 шт. / 1 кг")
             .child(Input::new(&form.amount))
             .child("Валюта")
             .child(Select::new(&form.currency))
             .child("Место покупки")
-            .child(Select::new(&form.place))
+            .child(
+                div()
+                    .id("price-place-select")
+                    .child(Select::new(&form.place))
+                    .when_some(place_tooltip, |element, tooltip| {
+                        element.tooltip(move |window, cx| {
+                            ComponentTooltip::new(tooltip.clone()).build(window, cx)
+                        })
+                    }),
+            )
             .when_some(self.message.clone(), |body, message| {
                 body.child(div().text_color(cx.theme().danger).child(message))
             })
@@ -908,14 +1044,15 @@ fn load_widths(database: &Database) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
-    use finance_core::{Currency, PriceRecord};
+    use finance_core::{Currency, ExpensePlace, PriceRecord};
+    use gpui_kit::component::select::SelectItem;
+    use gpui_kit::component::table::ColumnSort;
     use rust_decimal::Decimal;
 
     use super::{
-        sort_prices, widths_with_fixed_actions, ACTIONS_WIDTH, TABLE_HEIGHT, TABLE_ROW_HEIGHT,
-        VISIBLE_TABLE_ROWS,
+        price_place_tooltip, sort_prices, widths_with_fixed_actions, PricePlaceItem, ACTIONS_WIDTH,
+        TABLE_HEIGHT, TABLE_ROW_HEIGHT, VISIBLE_TABLE_ROWS,
     };
-    use gpui_kit::component::table::ColumnSort;
 
     fn record(
         id: i64,
@@ -964,6 +1101,32 @@ mod tests {
         assert_eq!(widths[4], 250.0);
         assert_eq!(widths[5], ACTIONS_WIDTH);
         assert!(widths_with_fixed_actions(&[100.0]).is_none());
+    }
+
+    #[test]
+    fn price_place_option_keeps_label_and_exposes_full_tooltip() {
+        let place = ExpensePlace {
+            id: 7,
+            name: "Магазин".to_owned(),
+            comment: Some("  возле дома  \n".to_owned()),
+        };
+        let item = PricePlaceItem {
+            id: 0,
+            label: place.name.clone(),
+            tooltip: price_place_tooltip(&place),
+        };
+
+        assert_eq!(item.title().to_string(), "Магазин");
+        assert_eq!(item.value(), "Магазин");
+        assert_eq!(item.tooltip, "Магазин · #7\nКомментарий: возле дома");
+        assert_eq!(
+            price_place_tooltip(&ExpensePlace {
+                id: 8,
+                name: "Рынок".to_owned(),
+                comment: None,
+            }),
+            "Рынок · #8"
+        );
     }
 
     #[test]

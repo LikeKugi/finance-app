@@ -89,7 +89,7 @@ pub(crate) fn set_period_dates(
     true
 }
 
-pub(crate) fn comment_suggestions(history: &[String], query: &str) -> Vec<String> {
+pub(crate) fn text_suggestions(history: &[String], query: &str) -> Vec<String> {
     let query = query.trim().to_lowercase();
     if query.is_empty() {
         return Vec::new();
@@ -535,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn comment_suggestions_match_case_insensitive_substrings_and_limit_unique_results() {
+    fn text_suggestions_match_case_insensitive_substrings_and_limit_unique_results() {
         let history = [
             "Покупки в магазине",
             "Покупки в МАГАЗИНЕ",
@@ -548,7 +548,7 @@ mod tests {
         .map(str::to_owned);
 
         assert_eq!(
-            comment_suggestions(&history, "МАГАЗИН"),
+            text_suggestions(&history, "МАГАЗИН"),
             [
                 "Покупки в магазине",
                 "магазин у дома",
@@ -557,8 +557,8 @@ mod tests {
                 "Ещё один магазин",
             ]
         );
-        assert!(comment_suggestions(&history, "  ").is_empty());
-        assert!(comment_suggestions(&history, "покупки в магазине").is_empty());
+        assert!(text_suggestions(&history, "  ").is_empty());
+        assert!(text_suggestions(&history, "покупки в магазине").is_empty());
     }
 
     #[test]

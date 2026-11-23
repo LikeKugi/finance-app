@@ -32,8 +32,8 @@ use gpui_kit::*;
 use rust_decimal::Decimal;
 
 use super::support::{
-    card_label, category_tree_labels, collect_category_descendants, comment_suggestions,
-    eligible_cards, expense_place_label, DIVISION_ROUNDING_WARNING,
+    card_label, category_tree_labels, collect_category_descendants, eligible_cards,
+    expense_place_label, text_suggestions, DIVISION_ROUNDING_WARNING,
 };
 use super::support::{date_period_range, DatePeriod, DatePeriodRange};
 
@@ -1033,7 +1033,7 @@ impl TransactionsPage {
                 |this: &mut Self, state, event: &InputEvent, _, cx| {
                     if matches!(event, InputEvent::Change) {
                         let text = state.read(cx).value().to_string();
-                        let suggestions = comment_suggestions(&this.comment_history, &text);
+                        let suggestions = text_suggestions(&this.comment_history, &text);
                         if let Some(form) = this.form.as_mut() {
                             form.suggestions = suggestions;
                         }

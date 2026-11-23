@@ -2555,6 +2555,17 @@ pub fn list_prices(
     }
 }
 
+/// Returns unique non-empty price names, ordered for suggestion lists.
+pub fn list_price_names(connection: &Connection) -> Result<Vec<String>, DbError> {
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT name FROM prices WHERE trim(name) <> '' ORDER BY name COLLATE NOCASE",
+    )?;
+    let names = statement
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(names)
+}
+
 /// Creates or updates a positive, exact-decimal price.
 pub fn save_price(
     connection: &Connection,
@@ -3158,15 +3169,16 @@ mod tests {
         delete_payment_document, delete_price, delete_savings, delete_transfer,
         export_database_backup_from_path, get_app_setting, has_pending_database_import, initialize,
         list_currencies, list_expense_places, list_payment_documents,
-        list_payment_documents_filtered, list_prices, list_savings, list_savings_filtered,
-        list_transaction_amounts, list_transaction_comments, list_transactions,
-        list_transactions_filtered, list_transactions_filtered_by_place, list_transfers_filtered,
-        load_analysis_transactions, load_analysis_transactions_by_category,
-        restore_pending_database_import, save_bank, save_category, save_expense_place,
-        save_next_payment, save_payment_document, save_price, save_savings, save_transaction,
-        save_transaction_with_card, save_transaction_with_card_and_rate_effect_and_place,
-        save_transfer, set_app_setting, set_currency_exchange_rate, set_primary_currency,
-        stage_database_import, DbError, NextPaymentExpense, MIGRATIONS,
+        list_payment_documents_filtered, list_price_names, list_prices, list_savings,
+        list_savings_filtered, list_transaction_amounts, list_transaction_comments,
+        list_transactions, list_transactions_filtered, list_transactions_filtered_by_place,
+        list_transfers_filtered, load_analysis_transactions,
+        load_analysis_transactions_by_category, restore_pending_database_import, save_bank,
+        save_category, save_expense_place, save_next_payment, save_payment_document, save_price,
+        save_savings, save_transaction, save_transaction_with_card,
+        save_transaction_with_card_and_rate_effect_and_place, save_transfer, set_app_setting,
+        set_currency_exchange_rate, set_primary_currency, stage_database_import, DbError,
+        NextPaymentExpense, MIGRATIONS,
     };
 
     fn transfer_fixture() -> (tempfile::TempDir, Connection, i64, i64, i64) {
@@ -3812,6 +3824,46 @@ mod tests {
             .unwrap()
             .iter()
             .all(|row| row.id != id));
+    }
+
+    #[test]
+    fn list_price_names_returns_sorted_unique_non_empty_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let place_id = save_expense_place(&connection, None, "Магазин", None).unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 1, 10).unwrap();
+        assert!(list_price_names(&connection).unwrap().is_empty());
+
+        for name in ["Молоко", "Хлеб", "Молоко"] {
+            save_price(
+                &connection,
+                None,
+                name,
+                date,
+                Decimal::ONE,
+                Currency::Rub,
+                place_id,
+            )
+            .unwrap();
+        }
+        assert_eq!(list_price_names(&connection).unwrap(), ["Молоко", "Хлеб"]);
+
+        let bread = list_prices(&connection, PriceFilter::default())
+            .unwrap()
+            .into_iter()
+            .find(|price| price.name == "Хлеб")
+            .unwrap();
+        save_price(
+            &connection,
+            Some(bread.id),
+            "Кефир",
+            date,
+            Decimal::ONE,
+            Currency::Rub,
+            place_id,
+        )
+        .unwrap();
+        assert_eq!(list_price_names(&connection).unwrap(), ["Кефир", "Молоко"]);
     }
 
     #[test]

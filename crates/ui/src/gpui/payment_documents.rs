@@ -32,7 +32,7 @@ use gpui_kit::*;
 use rust_decimal::Decimal;
 
 use super::support::{
-    card_label, category_tree_labels, comment_suggestions, eligible_cards, expense_place_label,
+    card_label, category_tree_labels, eligible_cards, expense_place_label, text_suggestions,
 };
 
 const DATE_FORMAT: &str = "%Y-%m-%d";
@@ -1172,7 +1172,7 @@ impl PaymentDocumentsPage {
                     if matches!(event, InputEvent::Change) {
                         if let Some(form) = this.next_payment_form.as_mut() {
                             form.suggestions =
-                                comment_suggestions(&form.comment_history, &state.read(cx).value());
+                                text_suggestions(&form.comment_history, &state.read(cx).value());
                         }
                         cx.notify();
                     }
