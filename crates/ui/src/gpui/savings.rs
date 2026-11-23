@@ -67,6 +67,7 @@ const COL_RATE_AFTER_THRESHOLD: usize = 5;
 const COL_THRESHOLD: usize = 6;
 const COL_OPENED_DATE: usize = 7;
 const COL_TERM: usize = 8;
+const COL_INTEREST_DATE: usize = 9;
 const COL_ACTIONS: usize = 12;
 const FOOTER_NOTE: &str = "Даты открытия и начисления процентов сохраняются как справочные значения; процентный доход здесь не рассчитывается без истории остатка и правил начисления банка. Повышенная ставка показана как условие, а не как подтверждённая доходность.";
 const FOOTER_WARNING: &str =
@@ -1379,6 +1380,7 @@ fn sort_savings(rows: &mut [SavingsAccount], sort: Option<(usize, ColumnSort)>) 
             COL_THRESHOLD => a.threshold_amount.cmp(&b.threshold_amount),
             COL_OPENED_DATE => a.opened_date.cmp(&b.opened_date),
             COL_TERM => compare_terms(a, b),
+            COL_INTEREST_DATE => a.interest_accrual_date.cmp(&b.interest_accrual_date),
             _ => Ordering::Equal,
         };
         let ordering = if direction == ColumnSort::Descending {
@@ -1475,7 +1477,8 @@ impl TableDelegate for SavingsTable {
             | COL_RATE_AFTER_THRESHOLD
             | COL_THRESHOLD
             | COL_OPENED_DATE
-            | COL_TERM => column.sort(direction),
+            | COL_TERM
+            | COL_INTEREST_DATE => column.sort(direction),
             _ => column,
         }
     }
@@ -1554,7 +1557,7 @@ impl TableDelegate for SavingsTable {
             COL_OPENED_DATE => div()
                 .child(account.opened_date.map_or_else(dash, format_date))
                 .into_any_element(),
-            9 => div()
+            COL_INTEREST_DATE => div()
                 .child(account.interest_accrual_date.map_or_else(dash, format_date))
                 .into_any_element(),
             10 => div()
