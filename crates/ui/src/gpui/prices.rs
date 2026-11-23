@@ -24,6 +24,7 @@ use gpui_kit::prelude::{FluentBuilder as _, StatefulInteractiveElement};
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
+use super::helpers::format_date;
 use super::support::{
     date_period_range, expense_place_tooltip, text_suggestions, DatePeriod, DatePeriodRange,
 };
@@ -854,9 +855,7 @@ impl TableDelegate for PricesTable {
         let record = self.rows[row_ix].clone();
         let content = match col_ix {
             0 => div().child(record.name.clone()).into_any_element(),
-            1 => div()
-                .child(record.date.format(DATE_FORMAT).to_string())
-                .into_any_element(),
+            1 => div().child(format_date(record.date)).into_any_element(),
             2 => div()
                 .w_full()
                 .text_right()

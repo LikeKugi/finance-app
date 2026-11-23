@@ -31,6 +31,7 @@ use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
+use super::helpers::format_date;
 use super::support::{
     card_label, category_tree_labels, eligible_cards, expense_place_label, text_suggestions,
 };
@@ -2149,11 +2150,7 @@ impl TableDelegate for CardsTable {
                     .grace_period_days
                     .map_or_else(String::new, |d| d.to_string()),
             ),
-            COL_NEXT_PAYMENT_DATE => text(
-                document
-                    .due_date
-                    .map_or_else(String::new, |d| d.format(DATE_FORMAT).to_string()),
-            ),
+            COL_NEXT_PAYMENT_DATE => text(document.due_date.map_or_else(String::new, format_date)),
             COL_NEXT_PAYMENT => text(
                 document
                     .next_payment_amount
