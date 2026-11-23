@@ -1557,13 +1557,13 @@ impl TransfersPage {
                 .map(|((cards, savings), currency)| {
                     let total = cards
                         .checked_add(savings)
-                        .map(|value| value.to_string())
+                        .map(|value| format_currency(&value, 2))
                         .unwrap_or_else(|| "ошибка расчёта".to_owned());
                     format!(
                         "{}: карты — {}, накопления — {}, вместе — {}",
                         currency.code(),
-                        cards,
-                        savings,
+                        format_currency(&cards, 2),
+                        format_currency(&savings, 2),
                         total
                     )
                 })
