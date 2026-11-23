@@ -1812,7 +1812,16 @@ impl TransactionsPage {
             .flex_1()
             .min_h_0()
             .w_full()
-            .child(DataTable::new(&self.table).stripe(true).bordered(true))
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(format!("Всего записей: {}", self.transactions.len()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(DataTable::new(&self.table).stripe(true).bordered(true)),
+            )
     }
 
     fn render_footer(&self, cx: &App) -> impl IntoElement {
