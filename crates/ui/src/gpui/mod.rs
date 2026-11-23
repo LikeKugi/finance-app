@@ -2,6 +2,7 @@
 
 mod analysis;
 mod directories;
+mod helpers;
 mod home;
 mod payment_documents;
 mod prices;

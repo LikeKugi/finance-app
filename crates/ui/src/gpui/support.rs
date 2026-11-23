@@ -3,6 +3,8 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{Datelike, Days, Months, NaiveDate};
+
+use super::helpers::format_date;
 use finance_core::{
     Category, Currency, CurrencyDefinition, ExpensePlace, PaymentCardType, PaymentDocument,
 };
@@ -134,7 +136,7 @@ pub(crate) fn currency_rate_label(currency: &CurrencyDefinition, primary_code: &
                 currency.code,
                 rate_text,
                 primary_code,
-                date.format("%d.%m.%Y")
+                format_date(date)
             )
         }
         _ => "Курс не задан".to_owned(),
@@ -276,7 +278,7 @@ pub(crate) fn expense_place_tooltip(place: &ExpensePlace) -> String {
 
 /// Пояснение к полю суммы компактной формы: дата записи без поля выбора даты.
 pub(crate) fn quick_form_date_caption(date: NaiveDate) -> String {
-    format!("Дата: сегодня ({})", date.format("%d.%m.%Y"))
+    format!("Дата: сегодня ({})", format_date(date))
 }
 
 #[cfg(test)]

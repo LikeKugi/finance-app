@@ -29,6 +29,8 @@ use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
+use super::helpers::format_date;
+
 const DATE_FORMAT: &str = "%Y-%m-%d";
 const ALL_LABEL: &str = "Все";
 const EXTERNAL_LABEL: &str = "Внешние средства";
@@ -129,10 +131,6 @@ fn choice(
             cx,
         )
     })
-}
-
-fn format_date(date: NaiveDate) -> String {
-    date.format("%d.%m.%Y").to_string()
 }
 
 fn selected_date(state: &DatePickerState) -> Option<NaiveDate> {

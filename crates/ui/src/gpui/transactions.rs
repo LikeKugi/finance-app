@@ -31,6 +31,7 @@ use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
+use super::helpers::format_date;
 use super::support::{
     card_label, category_tree_labels, collect_category_descendants, eligible_cards,
     expense_place_label, expense_place_tooltip, text_suggestions, DIVISION_ROUNDING_WARNING,
@@ -1371,7 +1372,7 @@ impl TransactionsPage {
         let kind = self.kind;
         let description = format!(
             "Удалить операцию от {} на сумму {} {}?",
-            transaction.date.format("%d.%m.%Y"),
+            format_date(transaction.date),
             transaction.amount,
             transaction.currency.code()
         );
@@ -2188,7 +2189,7 @@ impl TableDelegate for TransactionsTable {
         let id = transaction.id;
         let content = match col_ix {
             COL_DATE => div()
-                .child(transaction.date.format("%d.%m.%Y").to_string())
+                .child(format_date(transaction.date))
                 .into_any_element(),
             COL_CATEGORY => div()
                 .overflow_hidden()
@@ -2307,13 +2308,11 @@ pub(crate) fn comment_preview(text: &str) -> String {
 pub(crate) fn period_label(from: Option<NaiveDate>, to: Option<NaiveDate>) -> String {
     match (from, to) {
         (None, None) => "За весь период".to_owned(),
-        (Some(from), Some(to)) => format!(
-            "За период с {} по {}",
-            from.format("%d.%m.%Y"),
-            to.format("%d.%m.%Y")
-        ),
-        (Some(from), None) => format!("За период с {}", from.format("%d.%m.%Y")),
-        (None, Some(to)) => format!("За период по {}", to.format("%d.%m.%Y")),
+        (Some(from), Some(to)) => {
+            format!("За период с {} по {}", format_date(from), format_date(to))
+        }
+        (Some(from), None) => format!("За период с {}", format_date(from)),
+        (None, Some(to)) => format!("За период по {}", format_date(to)),
     }
 }
 

@@ -29,6 +29,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 
+use super::helpers::format_date;
+
 const DATE_FORMAT: &str = "%Y-%m-%d";
 const ALL_LABEL: &str = "Все";
 const ALL_BANKS_LABEL: &str = "Все банки";
@@ -195,10 +197,6 @@ fn filter_savings(
                 && destination.is_none_or(|destination| entry.interest_destination == destination)
         })
         .collect()
-}
-
-fn format_date(date: NaiveDate) -> String {
-    date.format("%d.%m.%Y").to_string()
 }
 
 /// Значения полей формы в виде текста и выбранных вариантов; не зависит от GUI.
