@@ -1575,6 +1575,7 @@ impl TransfersPage {
             .flex()
             .flex_col()
             .gap_1()
+            .font_weight(FontWeight::BOLD)
             .child("Остатки:")
             .child(text)
     }
@@ -1935,7 +1936,6 @@ impl Render for TransfersPage {
                 ),
         );
         root = root.child(self.render_filters(cx));
-        root = root.child(self.render_summary(cx));
         if !has_accounts {
             root = root.child(div().text_color(warning).child(
                 "Сначала добавьте дебетовую карту или накопление с указанной валютой в разделе «Справочники» и «Платёжные карты».",
@@ -1949,7 +1949,8 @@ impl Render for TransfersPage {
             );
         }
         root = root.child(self.render_table(cx));
-        root.child(div().text_color(muted).child(FOOTER_NOTE))
+        root.child(self.render_summary(cx))
+            .child(div().text_color(muted).child(FOOTER_NOTE))
             .child(div().text_color(warning).child(FOOTER_WARNING))
     }
 }
