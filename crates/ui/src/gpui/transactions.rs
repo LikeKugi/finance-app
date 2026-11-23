@@ -31,7 +31,7 @@ use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
-use super::helpers::format_date;
+use super::helpers::{format_currency, format_date};
 use super::helpers::DATE_FORMAT;
 use super::support::{
     card_label, category_tree_labels, collect_category_descendants, eligible_cards,
@@ -1839,9 +1839,9 @@ impl TransactionsPage {
                                 .child(div().font_weight(FontWeight::BOLD).child(format!(
                                     "{}: Доходы: {} {code} − Расходы: {} {code} = Сальдо: {} {code}",
                                     period_label(from, to),
-                                    b.income,
-                                    b.expenses,
-                                    b.balance,
+                                    format_currency(&b.income, 2),
+                                    format_currency(&b.expenses, 2),
+                                    format_currency(&b.balance, 2),
                                 )))
                                 .child(div().text_color(muted).child(
                                     "Сальдо операций не включает начальные остатки и переводы и не подтверждает сумму денег на руках.",
@@ -1878,7 +1878,7 @@ impl TransactionsPage {
             .filter(|t| t.currency == currency)
             .try_fold(Decimal::ZERO, |sum, t| sum.checked_add(t.amount));
         match total {
-            Some(total) => div().child(format!("Записей: {count}   Итого: {total} {primary}")),
+            Some(total) => div().child(format!("Записей: {count}   Итого: {} {primary}", format_currency(&total, 2))),
             None => div()
                 .text_color(danger)
                 .child("Не удалось рассчитать итог: сумма слишком велика"),
@@ -2200,7 +2200,7 @@ impl TableDelegate for TransactionsTable {
             COL_AMOUNT => div()
                 .w_full()
                 .text_right()
-                .child(transaction.amount.to_string())
+                .child(format_currency(&transaction.amount, 2))
                 .into_any_element(),
             COL_CURRENCY => div()
                 .child(transaction.currency.code().to_owned())
