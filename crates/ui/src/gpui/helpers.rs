@@ -3,8 +3,11 @@
 use chrono::NaiveDate;
 
 /// Единый формат отображения дат: `DD.MM.YYYY`.
+pub(crate) const DATE_FORMAT: &str = "%d.%m.%Y";
+
+/// Форматирует дату в едином формате `DD.MM.YYYY`.
 pub(crate) fn format_date(date: NaiveDate) -> String {
-    date.format("%d.%m.%Y").to_string()
+    date.format(DATE_FORMAT).to_string()
 }
 
 #[cfg(test)]

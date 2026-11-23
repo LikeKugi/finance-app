@@ -30,8 +30,8 @@ use gpui_kit::*;
 use rust_decimal::Decimal;
 
 use super::helpers::format_date;
+use super::helpers::DATE_FORMAT;
 
-const DATE_FORMAT: &str = "%Y-%m-%d";
 const ALL_LABEL: &str = "Все";
 const EXTERNAL_LABEL: &str = "Внешние средства";
 const CASH_LABEL: &str = "Наличные";
@@ -2115,7 +2115,7 @@ mod tests {
         let editing = TransferFormValues::from_record(&record);
         assert_ne!(fresh, editing);
         assert_eq!(editing.id, Some(42));
-        assert_eq!(editing.date, "2026-11-21");
+        assert_eq!(editing.date, "21.11.2026");
         assert_eq!(editing.operation_type, Some(TransferOperationType::TopUp));
         assert_eq!(editing.source, Some(TransferEndpoint::External));
         assert_eq!(editing.destination, Some(TransferEndpoint::Card(1)));
@@ -2138,7 +2138,7 @@ mod tests {
     #[::core::prelude::v1::test]
     fn form_details_parse_amount_and_reject_invalid_values() {
         let mut values = TransferFormValues {
-            date: "2026-11-21".to_owned(),
+            date: "21.11.2026".to_owned(),
             operation_type: Some(TransferOperationType::Transfer),
             source: Some(TransferEndpoint::Card(1)),
             destination: Some(TransferEndpoint::Savings(10)),

@@ -28,9 +28,9 @@ use super::support::category_tree_labels;
 use super::support::category_tree_rows;
 use super::support::collect_category_descendants;
 use super::support::currency_rate_label;
+use super::helpers::DATE_FORMAT;
 use super::transactions::comment_preview;
 
-const DATE_FORMAT: &str = "%Y-%m-%d";
 const NO_PARENT_LABEL: &str = "Нет";
 const NO_PARENT_TOOLTIP: &str = "Без родительской категории";
 const VISIBLE_TABLE_ROWS: usize = 10;

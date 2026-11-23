@@ -25,11 +25,11 @@ use gpui_kit::*;
 use rust_decimal::Decimal;
 
 use super::helpers::format_date;
+use super::helpers::DATE_FORMAT;
 use super::support::{
     date_period_range, expense_place_tooltip, text_suggestions, DatePeriod, DatePeriodRange,
 };
 
-const DATE_FORMAT: &str = "%Y-%m-%d";
 const ALL_PLACES_LABEL: &str = "Все места";
 const PLACE_OPTION_ITEM_ID: &str = "price-place-option";
 const PLACE_FILTER_ITEM_ID: &str = "price-place-filter-option";

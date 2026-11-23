@@ -28,7 +28,8 @@ use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::prelude::ToPrimitive;
 
-const DATE_FORMAT: &str = "%Y-%m-%d";
+use super::helpers::DATE_FORMAT;
+
 const NONE_LABEL: &str = "Все";
 const ROW_HEIGHT: f32 = 30.0;
 const PIE_CHART_DIAMETER: f32 = 120.0;
@@ -1812,7 +1813,7 @@ mod tests {
         let mut tracker = RequestTracker::default();
         let previous = filters("", "", None, None);
         let previous_generation = tracker.start(previous.clone());
-        let current = filters("2027-01-01", "", Some(2), Some(1));
+        let current = filters("01.01.2027", "", Some(2), Some(1));
         tracker.start(current);
 
         let accepted = tracker.accept(previous_generation, previous, Ok(empty_summary()));
@@ -1843,7 +1844,7 @@ mod tests {
         let generation = tracker.start(first.clone());
         tracker.accept(generation, first, Ok(empty_summary()));
 
-        tracker.start(filters("2027-01-01", "", None, None));
+        tracker.start(filters("01.01.2027", "", None, None));
 
         assert!(tracker.current_report().is_none());
     }
@@ -1851,14 +1852,14 @@ mod tests {
     #[test]
     fn analysis_filter_rejects_reversed_period_boundaries() {
         assert_eq!(
-            parse_filters(&filters("2027-02-01", "2027-01-31", None, None)),
+            parse_filters(&filters("01.02.2027", "31.01.2027", None, None)),
             Err("Начало периода не может быть позже его окончания".to_owned())
         );
     }
 
     #[test]
     fn analysis_filter_parses_dates_and_categories() {
-        let parsed = parse_filters(&filters("2027-01-01", "", Some(3), None))
+        let parsed = parse_filters(&filters("01.01.2027", "", Some(3), None))
             .expect("valid filters should parse");
         assert_eq!(parsed.from, NaiveDate::from_ymd_opt(2027, 1, 1));
         assert_eq!(parsed.to, None);

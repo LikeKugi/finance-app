@@ -84,8 +84,8 @@ pub(crate) fn set_period_dates(
             to_date.clear();
         }
         DatePeriodRange::Bounded(from, to) => {
-            *from_date = from.format("%Y-%m-%d").to_string();
-            *to_date = to.format("%Y-%m-%d").to_string();
+            *from_date = from.format(super::helpers::DATE_FORMAT).to_string();
+            *to_date = to.format(super::helpers::DATE_FORMAT).to_string();
         }
     }
     true
@@ -435,7 +435,7 @@ mod tests {
     fn selecting_all_period_clears_both_date_inputs() {
         let today = date(2024, 2, 29);
         let mut from = "не дата".to_owned();
-        let mut to = "2024-03-01".to_owned();
+        let mut to = "01.03.2024".to_owned();
 
         assert!(set_period_dates(DatePeriod::All, today, &mut from, &mut to));
 
@@ -455,17 +455,17 @@ mod tests {
             &mut from,
             &mut to
         ));
-        assert_eq!(from, "2024-01-01");
-        assert_eq!(to, "2024-12-31");
+        assert_eq!(from, "01.01.2024");
+        assert_eq!(to, "31.12.2024");
 
         assert!(set_period_dates(DatePeriod::Day, today, &mut from, &mut to));
-        assert_eq!(from, "2024-02-29");
-        assert_eq!(to, "2024-02-29");
+        assert_eq!(from, "29.02.2024");
+        assert_eq!(to, "29.02.2024");
 
-        from = "2024-02-28".to_owned();
-        to = "2024-03-01".to_owned();
-        assert_eq!(from, "2024-02-28");
-        assert_eq!(to, "2024-03-01");
+        from = "28.02.2024".to_owned();
+        to = "01.03.2024".to_owned();
+        assert_eq!(from, "28.02.2024");
+        assert_eq!(to, "01.03.2024");
     }
 
     #[test]

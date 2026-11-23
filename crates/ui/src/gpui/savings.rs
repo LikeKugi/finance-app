@@ -30,8 +30,8 @@ use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 
 use super::helpers::format_date;
+use super::helpers::DATE_FORMAT;
 
-const DATE_FORMAT: &str = "%Y-%m-%d";
 const ALL_LABEL: &str = "Все";
 const ALL_BANKS_LABEL: &str = "Все банки";
 const NO_CURRENCY_LABEL: &str = "Не указана";
@@ -1708,8 +1708,8 @@ mod tests {
     #[test]
     fn savings_form_parses_optional_dates_and_allows_them_to_be_empty() {
         let mut form = valid_savings_form();
-        form.opened_date = "2026-03-01".to_owned();
-        form.interest_accrual_date = "2026-03-31".to_owned();
+        form.opened_date = "01.03.2026".to_owned();
+        form.interest_accrual_date = "31.03.2026".to_owned();
 
         let details = form.details().unwrap();
 
@@ -1729,7 +1729,7 @@ mod tests {
     #[test]
     fn savings_form_rejects_invalid_opening_and_accrual_dates() {
         let mut form = valid_savings_form();
-        form.opened_date = "2026-02-30".to_owned();
+        form.opened_date = "30.02.2026".to_owned();
         assert!(form.details().unwrap_err().contains("дату открытия"));
 
         form.opened_date.clear();
@@ -1756,7 +1756,7 @@ mod tests {
         let mut form = valid_savings_form();
         form.term_type = Some(SavingsTerm::Limited);
         assert!(form.details().is_err());
-        form.term_end_date = "2027-03-01".to_owned();
+        form.term_end_date = "01.03.2027".to_owned();
         assert_eq!(
             form.details().unwrap().term_end_date,
             NaiveDate::from_ymd_opt(2027, 3, 1)
@@ -2101,14 +2101,14 @@ mod tests {
         assert_eq!(form.bank_id, Some(1));
         assert_eq!(form.amount, "100");
         assert_eq!(form.currency, Some(Currency::Usd));
-        assert_eq!(form.opened_date, "2026-03-01");
-        assert_eq!(form.interest_accrual_date, "2026-03-31");
+        assert_eq!(form.opened_date, "01.03.2026");
+        assert_eq!(form.interest_accrual_date, "31.03.2026");
 
         form.title = "Изменённый вклад".to_owned();
         form.amount = "1250.50".to_owned();
         form.currency = Some(Currency::Rub);
         form.term_type = Some(SavingsTerm::Limited);
-        form.term_end_date = "2027-03-01".to_owned();
+        form.term_end_date = "01.03.2027".to_owned();
         let details = form.details().expect("form should be valid");
         finance_db::save_savings(&database, form.id, &details).expect("save should succeed");
 

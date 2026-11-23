@@ -32,11 +32,11 @@ use gpui_kit::*;
 use rust_decimal::Decimal;
 
 use super::helpers::format_date;
+use super::helpers::DATE_FORMAT;
 use super::support::{
     card_label, category_tree_labels, eligible_cards, expense_place_label, text_suggestions,
 };
 
-const DATE_FORMAT: &str = "%Y-%m-%d";
 const ALL_LABEL: &str = "Все";
 const ALL_BANKS_LABEL: &str = "Все банки";
 const BANK_FILTER_ITEM_ID: &str = "payment-documents-bank-filter-item";
@@ -798,7 +798,7 @@ impl PaymentDocumentsPage {
         let due_date = {
             let date = existing
                 .and_then(|d| d.due_date)
-                .or_else(|| NaiveDate::parse_from_str("2026-12-01", DATE_FORMAT).ok());
+                .or_else(|| NaiveDate::parse_from_str("01.12.2026", DATE_FORMAT).ok());
             cx.new(|cx| {
                 let mut state = DatePickerState::new(window, cx).date_format(DATE_FORMAT);
                 state.set_date(Date::Single(date), window, cx);
@@ -2475,7 +2475,7 @@ mod tests {
 
         input.card_type = Some(PaymentCardType::Credit);
         input.amount = "0".to_owned();
-        input.due_date = "2026-12-01".to_owned();
+        input.due_date = "01.12.2026".to_owned();
         input.grace_period_days = "55".to_owned();
         assert!(save(&database, None, &input).is_err());
         assert!(list(&database, None).is_empty());
@@ -2489,7 +2489,7 @@ mod tests {
         input.due_date = "не дата".to_owned();
         input.grace_period_days = "55".to_owned();
         assert!(build_details(&input).is_err());
-        input.due_date = "2026-12-01".to_owned();
+        input.due_date = "01.12.2026".to_owned();
         input.grace_period_days = "-1".to_owned();
         assert!(build_details(&input).is_err());
         input.grace_period_days = "abc".to_owned();

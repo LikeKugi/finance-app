@@ -32,13 +32,13 @@ use gpui_kit::*;
 use rust_decimal::Decimal;
 
 use super::helpers::format_date;
+use super::helpers::DATE_FORMAT;
 use super::support::{
     card_label, category_tree_labels, collect_category_descendants, eligible_cards,
     expense_place_label, expense_place_tooltip, text_suggestions, DIVISION_ROUNDING_WARNING,
 };
 use super::support::{date_period_range, DatePeriod, DatePeriodRange};
 
-const DATE_FORMAT: &str = "%Y-%m-%d";
 const NONE_LABEL: &str = "Все";
 const NO_CARD_LABEL: &str = "Не по карте";
 const EXPENSE_PLACE_LABEL: &str = "Место покупки";
