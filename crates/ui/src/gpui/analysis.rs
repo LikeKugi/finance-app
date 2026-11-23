@@ -28,7 +28,7 @@ use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::prelude::ToPrimitive;
 
-use super::helpers::DATE_FORMAT;
+use super::helpers::{format_currency, DATE_FORMAT};
 
 const NONE_LABEL: &str = "Все";
 const ROW_HEIGHT: f32 = 30.0;
@@ -334,7 +334,7 @@ impl TableDelegate for AnalysisTable {
             COL_AMOUNT => div()
                 .w_full()
                 .text_right()
-                .child(category.amount.to_string())
+                .child(format_currency(&category.amount, 2))
                 .into_any_element(),
             COL_SHARE => div()
                 .w_full()
@@ -1025,7 +1025,7 @@ impl AnalysisPage {
                 [
                     "Итого".to_owned(),
                     total.transaction_count.to_string(),
-                    total.amount.to_string(),
+                    format_currency(&total.amount, 2),
                     "100%".to_owned(),
                 ],
                 true,
@@ -1388,11 +1388,14 @@ fn analysis_balance_lines(
         })
         .map(|balance| {
             format!(
-                "{} — Доходы: {}; Расходы: {}; Сальдо: {}",
+                "{} — Доходы: {} {}; Расходы: {} {}; Сальдо: {} {}",
                 balance.currency.code(),
-                balance.income,
-                balance.expenses,
-                balance.balance
+                format_currency(&balance.income, 2),
+                balance.currency.code(),
+                format_currency(&balance.expenses, 2),
+                balance.currency.code(),
+                format_currency(&balance.balance, 2),
+                balance.currency.code()
             )
         })
         .collect())
@@ -1570,8 +1573,8 @@ mod tests {
         assert_eq!(
             analysis_balance_lines(&summary),
             Ok(vec![
-                "RUB — Доходы: 100.50; Расходы: 125; Сальдо: -24.50".to_owned(),
-                "USD — Доходы: 35; Расходы: 12.25; Сальдо: 22.75".to_owned(),
+                "RUB — Доходы: 100.50 RUB; Расходы: 125.00 RUB; Сальдо: -24.50 RUB".to_owned(),
+                "USD — Доходы: 35.00 USD; Расходы: 12.25 USD; Сальдо: 22.75 USD".to_owned(),
             ])
         );
     }
@@ -1599,8 +1602,8 @@ mod tests {
         assert_eq!(
             analysis_balance_lines(&summary),
             Ok(vec![
-                "RUB — Доходы: 17; Расходы: 0; Сальдо: 17".to_owned(),
-                "USD — Доходы: 0; Расходы: 5; Сальдо: -5".to_owned(),
+                "RUB — Доходы: 17.00 RUB; Расходы: 0.00 RUB; Сальдо: 17.00 RUB".to_owned(),
+                "USD — Доходы: 0.00 USD; Расходы: 5.00 USD; Сальдо: -5.00 USD".to_owned(),
             ])
         );
     }
