@@ -36,7 +36,7 @@ const ALL_LABEL: &str = "Все";
 const ALL_BANKS_LABEL: &str = "Все банки";
 const NO_CURRENCY_LABEL: &str = "Не указана";
 const TERMS: [SavingsTerm; 2] = [SavingsTerm::Limited, SavingsTerm::Unlimited];
-const COLUMN_HEADINGS: [&str; 13] = [
+const COLUMN_HEADINGS: [&str; 12] = [
     "Банк",
     "Название",
     "Сумма",
@@ -48,11 +48,10 @@ const COLUMN_HEADINGS: [&str; 13] = [
     "Срок",
     "Дата начисления процентов",
     "Назначение процентов",
-    "Статус",
     "Действия",
 ];
-const DEFAULT_COLUMN_WIDTHS: [f32; 13] = [
-    85.0, 120.0, 90.0, 70.0, 80.0, 170.0, 90.0, 95.0, 115.0, 105.0, 120.0, 85.0, 160.0,
+const DEFAULT_COLUMN_WIDTHS: [f32; 12] = [
+    85.0, 120.0, 90.0, 70.0, 80.0, 170.0, 90.0, 95.0, 115.0, 105.0, 120.0, 160.0,
 ];
 const ACTIONS_COLUMN_WIDTH: f32 = 160.0;
 const MIN_COLUMN_WIDTH: f32 = 60.0;
@@ -68,7 +67,7 @@ const COL_THRESHOLD: usize = 6;
 const COL_OPENED_DATE: usize = 7;
 const COL_TERM: usize = 8;
 const COL_INTEREST_DATE: usize = 9;
-const COL_ACTIONS: usize = 12;
+const COL_ACTIONS: usize = 11;
 const FOOTER_NOTE: &str = "Даты открытия и начисления процентов сохраняются как справочные значения; процентный доход здесь не рассчитывается без истории остатка и правил начисления банка. Повышенная ставка показана как условие, а не как подтверждённая доходность.";
 const FOOTER_WARNING: &str =
     "Валюта накопления указывается отдельно; фактические начисления процентов здесь не рассчитываются.";
@@ -1562,13 +1561,6 @@ impl TableDelegate for SavingsTable {
                 .into_any_element(),
             10 => div()
                 .child(account.interest_destination.title().to_owned())
-                .into_any_element(),
-            11 => div()
-                .child(if account.is_active {
-                    "Активно"
-                } else {
-                    "Неактивно"
-                })
                 .into_any_element(),
             COL_ACTIONS => {
                 let id = account.id;
