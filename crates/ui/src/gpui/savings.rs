@@ -29,7 +29,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 
-use super::helpers::format_date;
+use super::helpers::{format_currency, format_date};
 use super::helpers::DATE_FORMAT;
 
 const ALL_LABEL: &str = "Все";
@@ -1524,7 +1524,7 @@ impl TableDelegate for SavingsTable {
             COL_AMOUNT => div()
                 .w_full()
                 .text_right()
-                .child(account.amount.to_string())
+                .child(format_currency(&account.amount, 2))
                 .into_any_element(),
             3 => div()
                 .child(
@@ -1547,7 +1547,7 @@ impl TableDelegate for SavingsTable {
                 .child(
                     account
                         .threshold_amount
-                        .map_or_else(dash, |amount| amount.to_string()),
+                        .map_or_else(dash, |amount| format_currency(&amount, 2)),
                 )
                 .into_any_element(),
             COL_TERM => div().child(term).into_any_element(),

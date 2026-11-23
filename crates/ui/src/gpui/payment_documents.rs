@@ -31,7 +31,7 @@ use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
-use super::helpers::format_date;
+use super::helpers::{format_currency, format_date};
 use super::helpers::DATE_FORMAT;
 use super::support::{
     card_label, category_tree_labels, eligible_cards, expense_place_label, text_suggestions,
@@ -2137,7 +2137,7 @@ impl TableDelegate for CardsTable {
             COL_AMOUNT => div()
                 .w_full()
                 .text_right()
-                .child(canonical_amount(document.amount))
+                .child(format_currency(&document.amount, 2))
                 .into_any_element(),
             5 => text(
                 document
@@ -2154,7 +2154,7 @@ impl TableDelegate for CardsTable {
             COL_NEXT_PAYMENT => text(
                 document
                     .next_payment_amount
-                    .map_or_else(String::new, canonical_amount),
+                    .map_or_else(String::new, |a| format_currency(&a, 2)),
             ),
             COL_NEXT_PAYMENT_ACTION => {
                 if has_next_payment_data(document) {
@@ -2192,7 +2192,7 @@ impl TableDelegate for CardsTable {
             11 => text(
                 document
                     .min_monthly_spend
-                    .map_or_else(String::new, canonical_amount),
+                    .map_or_else(String::new, |a| format_currency(&a, 2)),
             ),
             COL_SAVINGS => text(
                 document

@@ -29,7 +29,7 @@ use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
-use super::helpers::format_date;
+use super::helpers::{format_currency, format_date};
 use super::helpers::DATE_FORMAT;
 
 const ALL_LABEL: &str = "Все";
@@ -1830,7 +1830,7 @@ impl TableDelegate for TransfersTable {
             4 => div()
                 .w_full()
                 .text_right()
-                .child(row.record.amount.to_string())
+                .child(format_currency(&row.record.amount, 2))
                 .into_any_element(),
             5 => div()
                 .child(row.record.currency.code().to_owned())
