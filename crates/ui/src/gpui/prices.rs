@@ -24,10 +24,14 @@ use gpui_kit::prelude::{FluentBuilder as _, StatefulInteractiveElement};
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
-use super::support::{date_period_range, text_suggestions, DatePeriod, DatePeriodRange};
+use super::support::{
+    date_period_range, expense_place_tooltip, text_suggestions, DatePeriod, DatePeriodRange,
+};
 
 const DATE_FORMAT: &str = "%Y-%m-%d";
+const ALL_PLACES_LABEL: &str = "Все места";
 const PLACE_OPTION_ITEM_ID: &str = "price-place-option";
+const PLACE_FILTER_ITEM_ID: &str = "price-place-filter-option";
 const WIDTHS_KEY: &str = "table_columns.prices.v1";
 const HEADERS: [&str; 6] = [
     "Название",
@@ -48,6 +52,7 @@ const TABLE_HEIGHT: f32 = TABLE_ROW_HEIGHT * (VISIBLE_TABLE_ROWS as f32 + 1.0);
 
 type Choice = Entity<SelectState<Vec<SharedString>>>;
 type PlaceChoice = Entity<SelectState<Vec<PricePlaceItem>>>;
+type PlaceFilterChoice = Entity<SelectState<Vec<PricePlaceFilterItem>>>;
 
 #[derive(Clone)]
 struct PricePlaceItem {
@@ -77,6 +82,37 @@ impl SelectItem for PricePlaceItem {
     }
 }
 
+#[derive(Clone)]
+struct PricePlaceFilterItem {
+    id: usize,
+    label: String,
+    tooltip: Option<String>,
+}
+
+impl SelectItem for PricePlaceFilterItem {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        self.label.clone().into()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.label
+    }
+
+    fn render(&self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        div()
+            .id((PLACE_FILTER_ITEM_ID, self.id))
+            .w_full()
+            .when_some(self.tooltip.clone(), |element, tooltip| {
+                element.tooltip(move |window, cx| {
+                    ComponentTooltip::new(tooltip.clone()).build(window, cx)
+                })
+            })
+            .child(self.label.clone())
+    }
+}
+
 struct PriceForm {
     id: Option<i64>,
     name: Entity<InputState>,
@@ -98,7 +134,7 @@ pub(crate) struct PricesSection {
     to: Entity<DatePickerState>,
     period_select: Choice,
     currency_filter: Choice,
-    place_filter: Choice,
+    place_filter: PlaceFilterChoice,
     filter_currency: Option<Currency>,
     filter_place: Option<i64>,
     name_history: Vec<String>,
@@ -143,9 +179,38 @@ fn place_choice(
         .map(|(id, place)| PricePlaceItem {
             id,
             label: place.name.clone(),
-            tooltip: price_place_tooltip(place),
+            tooltip: expense_place_tooltip(place),
         })
         .collect();
+    cx.new(|cx| SelectState::new(items, Some(IndexPath::default().row(selected)), window, cx))
+}
+
+fn place_filter_items(places: &[ExpensePlace]) -> Vec<PricePlaceFilterItem> {
+    std::iter::once(PricePlaceFilterItem {
+        id: 0,
+        label: ALL_PLACES_LABEL.to_owned(),
+        tooltip: None,
+    })
+    .chain(
+        places
+            .iter()
+            .enumerate()
+            .map(|(index, place)| PricePlaceFilterItem {
+                id: index + 1,
+                label: place.name.clone(),
+                tooltip: Some(expense_place_tooltip(place)),
+            }),
+    )
+    .collect()
+}
+
+fn place_filter_choice(
+    places: &[ExpensePlace],
+    selected: usize,
+    window: &mut Window,
+    cx: &mut App,
+) -> PlaceFilterChoice {
+    let items = place_filter_items(places);
     cx.new(|cx| SelectState::new(items, Some(IndexPath::default().row(selected)), window, cx))
 }
 
@@ -157,18 +222,8 @@ fn selected_place_row(state: &PlaceChoice, cx: &App) -> Option<usize> {
     state.read(cx).selected_index(cx).map(|index| index.row)
 }
 
-fn price_place_tooltip(place: &ExpensePlace) -> String {
-    let mut tooltip = format!("{} · #{}", place.name, place.id);
-    if let Some(comment) = place
-        .comment
-        .as_deref()
-        .map(str::trim)
-        .filter(|comment| !comment.is_empty())
-    {
-        tooltip.push_str("\nКомментарий: ");
-        tooltip.push_str(comment);
-    }
-    tooltip
+fn selected_filter_place_row(state: &PlaceFilterChoice, cx: &App) -> Option<usize> {
+    state.read(cx).selected_index(cx).map(|index| index.row)
 }
 
 fn selected_date(state: &DatePickerState) -> Option<NaiveDate> {
@@ -239,7 +294,7 @@ impl PricesSection {
             window,
             cx,
         );
-        let place_filter = choice(vec!["Все места".to_owned()], 0, window, cx);
+        let place_filter = place_filter_choice(&[], 0, window, cx);
         let widths = load_widths(&database);
         let page = cx.entity().downgrade();
         let table = cx.new(|cx| {
@@ -287,8 +342,8 @@ impl PricesSection {
         subscriptions.push(cx.subscribe_in(
             &place_filter,
             window,
-            |page: &mut Self, state, _: &SelectEvent<Vec<SharedString>>, _, cx| {
-                page.filter_place = selected_row(state, cx)
+            |page: &mut Self, state, _: &SelectEvent<Vec<PricePlaceFilterItem>>, _, cx| {
+                page.filter_place = selected_filter_place_row(state, cx)
                     .and_then(|row| row.checked_sub(1))
                     .and_then(|row| page.places.get(row))
                     .map(|place| place.id);
@@ -348,14 +403,8 @@ impl PricesSection {
         match finance_db::list_expense_places(&self.database) {
             Ok(places) => {
                 self.places = places;
-                let mut labels = vec![SharedString::from("Все места")];
-                labels.extend(
-                    self.places
-                        .iter()
-                        .map(|place| SharedString::from(place.name.clone())),
-                );
                 self.place_filter.update(cx, |state, cx| {
-                    state.set_items(labels, window, cx);
+                    state.set_items(place_filter_items(&self.places), window, cx);
                     let selected = self
                         .filter_place
                         .and_then(|id| self.places.iter().position(|place| place.id == id))
@@ -432,15 +481,14 @@ impl PricesSection {
         }
         self.filter_currency = None;
         self.filter_place = None;
-        for select in [
-            &self.period_select,
-            &self.currency_filter,
-            &self.place_filter,
-        ] {
+        for select in [&self.period_select, &self.currency_filter] {
             select.update(cx, |state, cx| {
                 state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
             });
         }
+        self.place_filter.update(cx, |state, cx| {
+            state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
+        });
         self.reload(cx);
     }
 
@@ -601,7 +649,7 @@ impl PricesSection {
         let this = cx.entity();
         let place_tooltip = selected_place_row(&form.place, cx)
             .and_then(|row| self.places.get(row))
-            .map(price_place_tooltip);
+            .map(expense_place_tooltip);
         let mut body = div()
             .flex()
             .flex_col()
@@ -866,6 +914,10 @@ impl PricesSection {
     /// Фильтры секции повторяют компактную компоновку фильтров страницы «Доходы».
     fn render_filters(&mut self, cx: &mut Context<Self>) -> Div {
         let active = self.has_active_filters(cx);
+        let filter_place_tooltip = selected_filter_place_row(&self.place_filter, cx)
+            .and_then(|row| row.checked_sub(1))
+            .and_then(|row| self.places.get(row))
+            .map(expense_place_tooltip);
         let filter = |label: &'static str, width: f32, control: AnyElement| {
             div()
                 .w(px(width))
@@ -930,9 +982,18 @@ impl PricesSection {
                     .child(filter(
                         "Место покупки",
                         220.0,
-                        Select::new(&self.place_filter)
-                            .placeholder("Место покупки")
-                            .small()
+                        div()
+                            .id("price-place-filter-select")
+                            .child(
+                                Select::new(&self.place_filter)
+                                    .placeholder("Место покупки")
+                                    .small(),
+                            )
+                            .when_some(filter_place_tooltip.clone(), |element, tooltip| {
+                                element.tooltip(move |window, cx| {
+                                    ComponentTooltip::new(tooltip.clone()).build(window, cx)
+                                })
+                            })
                             .into_any_element(),
                     )),
             )
@@ -1050,9 +1111,10 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::{
-        price_place_tooltip, sort_prices, widths_with_fixed_actions, PricePlaceItem, ACTIONS_WIDTH,
-        TABLE_HEIGHT, TABLE_ROW_HEIGHT, VISIBLE_TABLE_ROWS,
+        place_filter_items, sort_prices, widths_with_fixed_actions, PricePlaceItem, ACTIONS_WIDTH,
+        ALL_PLACES_LABEL, TABLE_HEIGHT, TABLE_ROW_HEIGHT, VISIBLE_TABLE_ROWS,
     };
+    use crate::gpui::support::expense_place_tooltip;
 
     fn record(
         id: i64,
@@ -1113,19 +1175,40 @@ mod tests {
         let item = PricePlaceItem {
             id: 0,
             label: place.name.clone(),
-            tooltip: price_place_tooltip(&place),
+            tooltip: expense_place_tooltip(&place),
         };
 
         assert_eq!(item.title().to_string(), "Магазин");
         assert_eq!(item.value(), "Магазин");
         assert_eq!(item.tooltip, "Магазин · #7\nКомментарий: возле дома");
         assert_eq!(
-            price_place_tooltip(&ExpensePlace {
+            expense_place_tooltip(&ExpensePlace {
                 id: 8,
                 name: "Рынок".to_owned(),
                 comment: None,
             }),
             "Рынок · #8"
+        );
+    }
+
+    #[test]
+    fn price_place_filter_options_carry_full_tooltip() {
+        let places = vec![ExpensePlace {
+            id: 7,
+            name: "Магазин".to_owned(),
+            comment: Some("возле дома".to_owned()),
+        }];
+
+        let items = place_filter_items(&places);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].label, ALL_PLACES_LABEL);
+        assert_eq!(items[0].tooltip, None);
+        assert_eq!(items[1].title().to_string(), "Магазин");
+        assert_eq!(items[1].value(), "Магазин");
+        assert_eq!(
+            items[1].tooltip.as_deref(),
+            Some("Магазин · #7\nКомментарий: возле дома")
         );
     }
 

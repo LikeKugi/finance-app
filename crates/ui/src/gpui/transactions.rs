@@ -33,7 +33,7 @@ use rust_decimal::Decimal;
 
 use super::support::{
     card_label, category_tree_labels, collect_category_descendants, eligible_cards,
-    expense_place_label, text_suggestions, DIVISION_ROUNDING_WARNING,
+    expense_place_label, expense_place_tooltip, text_suggestions, DIVISION_ROUNDING_WARNING,
 };
 use super::support::{date_period_range, DatePeriod, DatePeriodRange};
 
@@ -136,6 +136,7 @@ impl SelectItem for CardFilterItem {
 struct PlaceFilterItem {
     id: usize,
     label: String,
+    tooltip: Option<String>,
 }
 
 impl SelectItem for PlaceFilterItem {
@@ -150,11 +151,14 @@ impl SelectItem for PlaceFilterItem {
     }
 
     fn render(&self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let tooltip = self.label.clone();
         div()
             .id((EXPENSE_PLACE_FILTER_ITEM_ID, self.id))
             .w_full()
-            .tooltip(move |window, cx| ComponentTooltip::new(tooltip.clone()).build(window, cx))
+            .when_some(self.tooltip.clone(), |element, tooltip| {
+                element.tooltip(move |window, cx| {
+                    ComponentTooltip::new(tooltip.clone()).build(window, cx)
+                })
+            })
             .child(self.label.clone())
     }
 }
@@ -220,7 +224,11 @@ fn place_choice(
     let items: Vec<PlaceFilterItem> = labels
         .into_iter()
         .enumerate()
-        .map(|(id, label)| PlaceFilterItem { id, label })
+        .map(|(id, label)| PlaceFilterItem {
+            id,
+            label,
+            tooltip: None,
+        })
         .collect();
     cx.new(|cx| SelectState::new(items, Some(IndexPath::default().row(selected)), window, cx))
 }
@@ -728,7 +736,14 @@ impl TransactionsPage {
             .expense_place_filter_labels()
             .into_iter()
             .enumerate()
-            .map(|(id, label)| PlaceFilterItem { id, label })
+            .map(|(id, label)| PlaceFilterItem {
+                id,
+                tooltip: id
+                    .checked_sub(1)
+                    .and_then(|row| self.expense_places.get(row))
+                    .map(expense_place_tooltip),
+                label,
+            })
             .collect();
         self.expense_place_filter_select.update(cx, |state, cx| {
             state.set_items(expense_place_items, window, cx);
@@ -1430,8 +1445,9 @@ impl TransactionsPage {
             .read(cx)
             .selected_index(cx)
             .map(|ix| ix.row)
-            .and_then(|row| self.expense_place_filter_labels().get(row).cloned())
-            .filter(|label| label != NONE_LABEL);
+            .and_then(|row| row.checked_sub(1))
+            .and_then(|row| self.expense_places.get(row))
+            .map(expense_place_tooltip);
 
         div()
             .flex()
@@ -2531,11 +2547,16 @@ mod tests {
         let item = PlaceFilterItem {
             id: 2,
             label: "Супермаркет у дома".to_owned(),
+            tooltip: Some("Супермаркет у дома · #5\nКомментарий: удобный подъезд".to_owned()),
         };
 
         assert_eq!(item.title().to_string(), "Супермаркет у дома");
         assert_eq!(item.value(), "Супермаркет у дома");
         assert_eq!(item.id, 2);
+        assert_eq!(
+            item.tooltip.as_deref(),
+            Some("Супермаркет у дома · #5\nКомментарий: удобный подъезд")
+        );
         assert_eq!(EXPENSE_PLACE_LABEL, "Место покупки");
         assert_eq!(EXPENSE_COLUMN_TITLES[4], EXPENSE_PLACE_LABEL);
     }
