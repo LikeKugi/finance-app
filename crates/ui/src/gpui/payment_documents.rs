@@ -31,12 +31,9 @@ use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
-use super::helpers::DATE_FORMAT;
-use super::helpers::{format_currency, format_date};
+use super::helpers::{card_label, format_currency, format_date, DATE_FORMAT};
 use super::selectable::{selectable_message, selectable_text};
-use super::support::{
-    card_label, category_tree_labels, eligible_cards, expense_place_label, text_suggestions,
-};
+use super::support::{category_tree_labels, eligible_cards, expense_place_label, text_suggestions};
 
 const ALL_LABEL: &str = "Все";
 const ALL_BANKS_LABEL: &str = "Все банки";

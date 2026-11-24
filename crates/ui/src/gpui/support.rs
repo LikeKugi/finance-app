@@ -5,9 +5,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{Datelike, Days, Months, NaiveDate};
 
 use super::helpers::format_date;
-use finance_core::{
-    Category, Currency, CurrencyDefinition, ExpensePlace, PaymentCardType, PaymentDocument,
-};
+use finance_core::{Category, Currency, CurrencyDefinition, ExpensePlace, PaymentDocument};
 use rust_decimal::RoundingStrategy;
 
 pub(crate) const DIVISION_ROUNDING_WARNING: &str = "Деление округляется до 2 знаков после запятой; погрешность может накапливаться при нескольких делениях.";
@@ -222,30 +220,6 @@ pub(crate) fn collect_category_descendants(categories: &[Category], root_id: i64
     result
 }
 
-/// Подпись карты с банком, системой, номером, типом и валютой.
-pub(crate) fn card_label(card: &PaymentDocument) -> String {
-    let card_type = match card.card_type {
-        PaymentCardType::Debit => "дебетовая",
-        PaymentCardType::Credit => "кредитная",
-    };
-    let details = format!(
-        "{} — {} #{} ({card_type}, {})",
-        card.bank_name,
-        card.payment_system.code(),
-        card.id,
-        card.currency.map_or("валюта не указана", Currency::code)
-    );
-    match card
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-    {
-        Some(name) => format!("{name} — {details}"),
-        None => details,
-    }
-}
-
 /// Карты, доступные для выбора при данной валюте операции.
 pub(crate) fn eligible_cards(
     cards: &[PaymentDocument],
@@ -284,6 +258,7 @@ pub(crate) fn quick_form_date_caption(date: NaiveDate) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use finance_core::PaymentCardType;
     use rust_decimal::Decimal;
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
@@ -333,17 +308,13 @@ mod tests {
     }
 
     #[test]
-    fn expense_place_label_includes_id_and_card_label_includes_currency() {
+    fn expense_place_label_includes_id() {
         let place = ExpensePlace {
             id: 4,
             name: "Магазин".to_owned(),
             comment: None,
         };
         assert_eq!(expense_place_label(&place), "Магазин · #4");
-        assert_eq!(
-            card_label(&payment_document(5, Some(Currency::Usd))),
-            "Альфа-Банк — MIR #5 (дебетовая, USD)"
-        );
     }
 
     #[test]

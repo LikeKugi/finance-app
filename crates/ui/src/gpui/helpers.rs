@@ -1,6 +1,7 @@
 //! Чистые функции-хелперы для универсальной логики отображения.
 
 use chrono::NaiveDate;
+use finance_core::{Currency, PaymentCardType, PaymentDocument};
 use rust_decimal::Decimal;
 
 /// Единый формат отображения дат: `DD.MM.YYYY`.
@@ -18,8 +19,9 @@ pub(crate) fn format_date(date: NaiveDate) -> String {
 ///
 /// # Примеры
 ///
-/// ```
+/// ```ignore
 /// # use rust_decimal::Decimal;
+/// # use std::str::FromStr;
 /// # use crate::gpui::helpers::format_currency;
 /// let amount = Decimal::from(1234567u32);
 /// assert_eq!(format_currency(&amount, 2), "1 234 567.00");
@@ -75,10 +77,63 @@ pub(crate) fn format_currency(amount: &Decimal, fraction_digits: u32) -> String 
     result
 }
 
+const UNKNOWN_CARD_CURRENCY_LABEL: &str = "валюта не указана";
+
+/// Единая подпись карты для опций выбора: `Название - Банк - Система (Тип; Валюта)`.
+///
+/// Карта без названия подписывается как `Банк - Система (Тип; Валюта)`.
+pub(crate) fn card_label(card: &PaymentDocument) -> String {
+    let card_type = match card.card_type {
+        PaymentCardType::Debit => "дебетовая",
+        PaymentCardType::Credit => "кредитная",
+    };
+    let details = format!(
+        "{} - {} ({card_type}; {})",
+        card.bank_name,
+        card.payment_system.code(),
+        card.currency
+            .map_or(UNKNOWN_CARD_CURRENCY_LABEL, Currency::code)
+    );
+    match card
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        Some(name) => format!("{name} - {details}"),
+        None => details,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use finance_core::PaymentSystem;
     use std::str::FromStr;
+
+    fn payment_document(
+        id: i64,
+        name: Option<&str>,
+        card_type: PaymentCardType,
+        currency: Option<Currency>,
+    ) -> PaymentDocument {
+        PaymentDocument {
+            id,
+            name: name.map(str::to_owned),
+            bank_id: 1,
+            bank_name: "Альфа-Банк".to_owned(),
+            payment_system: PaymentSystem::Mir,
+            card_type,
+            amount: Decimal::ONE,
+            currency,
+            due_date: None,
+            grace_period_days: None,
+            next_payment_amount: None,
+            affects_deposit_rate: false,
+            min_monthly_spend: None,
+            linked_savings: Vec::new(),
+        }
+    }
 
     #[test]
     fn format_date_returns_dd_mm_yyyy() {
@@ -162,5 +217,44 @@ mod tests {
     fn format_currency_rounds_up() {
         let amount = Decimal::from_str("100.123").unwrap();
         assert_eq!(format_currency(&amount, 2), "100.12");
+    }
+
+    #[test]
+    fn card_label_uses_unified_format() {
+        let card = payment_document(
+            7,
+            Some("Повседневная"),
+            PaymentCardType::Debit,
+            Some(Currency::Rub),
+        );
+
+        assert_eq!(
+            card_label(&card),
+            "Повседневная - Альфа-Банк - MIR (дебетовая; RUB)"
+        );
+    }
+
+    #[test]
+    fn card_label_without_name_starts_with_bank() {
+        let card = payment_document(8, None, PaymentCardType::Credit, Some(Currency::Usd));
+
+        assert_eq!(card_label(&card), "Альфа-Банк - MIR (кредитная; USD)");
+    }
+
+    #[test]
+    fn card_label_without_currency_uses_placeholder() {
+        let card = payment_document(9, None, PaymentCardType::Debit, None);
+
+        assert_eq!(
+            card_label(&card),
+            "Альфа-Банк - MIR (дебетовая; валюта не указана)"
+        );
+    }
+
+    #[test]
+    fn card_label_ignores_blank_name_and_id() {
+        let card = payment_document(42, Some("  "), PaymentCardType::Debit, Some(Currency::Rub));
+
+        assert_eq!(card_label(&card), "Альфа-Банк - MIR (дебетовая; RUB)");
     }
 }

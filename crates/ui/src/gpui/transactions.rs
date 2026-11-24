@@ -31,12 +31,11 @@ use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
-use super::helpers::DATE_FORMAT;
-use super::helpers::{format_currency, format_date};
+use super::helpers::{card_label, format_currency, format_date, DATE_FORMAT};
 use super::selectable::{selectable_message, selectable_text};
 use super::support::{
-    card_label, category_tree_labels, collect_category_descendants, eligible_cards,
-    expense_place_label, expense_place_tooltip, text_suggestions, DIVISION_ROUNDING_WARNING,
+    category_tree_labels, collect_category_descendants, eligible_cards, expense_place_label,
+    expense_place_tooltip, text_suggestions, DIVISION_ROUNDING_WARNING,
 };
 use super::support::{date_period_range, DatePeriod, DatePeriodRange};
 
@@ -2463,7 +2462,7 @@ mod tests {
         ACTIONS_COLUMN_WIDTH, COL_INCOME_ACTIONS, EXPENSE_COLUMN_TITLES, EXPENSE_PLACE_LABEL,
         INCOME_PAYMENT_FILTER_LABEL, NONE_LABEL, NO_CARD_LABEL, PAYMENT_FILTER_LABEL,
     };
-    use crate::gpui::support::card_label;
+    use crate::gpui::helpers::card_label;
     use chrono::NaiveDate;
     use finance_core::FinancialTransaction;
     use finance_core::{
@@ -2515,11 +2514,11 @@ mod tests {
 
         assert_eq!(
             card_label(&debit),
-            "Повседневная — Альфа-Банк — MIR #7 (дебетовая, RUB)"
+            "Повседневная - Альфа-Банк - MIR (дебетовая; RUB)"
         );
         assert_eq!(
             card_label(&credit),
-            "Повседневная — Альфа-Банк — MIR #8 (кредитная, USD)"
+            "Повседневная - Альфа-Банк - MIR (кредитная; USD)"
         );
         assert_ne!(card_label(&debit), card_label(&credit));
     }
@@ -2530,7 +2529,7 @@ mod tests {
 
         assert_eq!(
             card_label(&card),
-            "Альфа-Банк — MIR #9 (дебетовая, валюта не указана)"
+            "Альфа-Банк - MIR (дебетовая; валюта не указана)"
         );
     }
 
@@ -2586,7 +2585,7 @@ mod tests {
         assert_eq!(labels[0], NONE_LABEL);
         assert_eq!(labels[1], NO_CARD_LABEL);
         assert_eq!(PAYMENT_FILTER_LABEL, "Способ оплаты");
-        assert!(labels[2].contains("MIR #10"));
+        assert_eq!(labels[2], "Альфа-Банк - MIR (дебетовая; RUB)");
     }
 
     #[test]
