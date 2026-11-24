@@ -50,12 +50,12 @@ const COLUMN_HEADINGS: [&str; 12] = [
     "Дата открытия",
     "Срок",
     "Дата",
-    "Назначение",
+    "Начисление",
     "Действия",
 ];
 const RATE_GROUP_LABEL: &str = "Ставка";
 const RATE_GROUP_SPAN: usize = 3;
-const INTEREST_GROUP_LABEL: &str = "Начисление процентов";
+const INTEREST_GROUP_LABEL: &str = "Выплата процентов";
 const INTEREST_GROUP_SPAN: usize = 2;
 const DEFAULT_COLUMN_WIDTHS: [f32; 12] = [
     120.0, 85.0, 90.0, 70.0, 80.0, 170.0, 90.0, 95.0, 115.0, 105.0, 120.0, 160.0,
@@ -1904,6 +1904,34 @@ mod tests {
         assert!(edited != initial);
     }
 
+    #[test]
+    fn interest_destination_options_include_other() {
+        assert_eq!(
+            InterestDestination::ALL.map(|destination| destination.title()),
+            ["Капитализация", "На карту", "Другое"]
+        );
+    }
+
+    #[test]
+    fn saved_other_interest_destination_is_displayed_and_loaded_into_edit_form() {
+        let database = filtered_database();
+        let account = finance_db::list_savings_filtered(&database, None, None, None, "")
+            .expect("savings should load")
+            .into_iter()
+            .find(|account| account.id == 6)
+            .expect("other-destination savings should load");
+
+        assert_eq!(account.interest_destination.title(), "Другое");
+        let form = SavingsForm::from_account(&account);
+        assert_eq!(form.interest_destination, Some(InterestDestination::Other));
+        assert_eq!(
+            form.details()
+                .expect("saved other destination should be editable")
+                .interest_destination,
+            InterestDestination::Other
+        );
+    }
+
     fn sortable_savings() -> Vec<SavingsAccount> {
         vec![
             SavingsAccount {
@@ -2007,7 +2035,7 @@ mod tests {
         assert_eq!(COLUMN_HEADINGS[COL_RATE_AFTER_THRESHOLD], "Повышенная");
         assert_eq!(COLUMN_HEADINGS[COL_THRESHOLD], "Условие");
         assert_eq!(COLUMN_HEADINGS[COL_INTEREST_DATE], "Дата");
-        assert_eq!(COLUMN_HEADINGS[COL_ACTIONS - 1], "Назначение");
+        assert_eq!(COLUMN_HEADINGS[COL_ACTIONS - 1], "Начисление");
 
         let rows = savings_group_headers();
         assert_eq!(rows.len(), 1);
@@ -2063,7 +2091,12 @@ mod tests {
 
     #[test]
     fn savings_filters_match_each_value_combine_and_reset() {
-        let entries = sortable_savings();
+        let mut entries = sortable_savings();
+        let mut other = sortable_savings().into_iter().next().unwrap();
+        other.id = 4;
+        other.term_type = SavingsTerm::Unlimited;
+        other.interest_destination = InterestDestination::Other;
+        entries.push(other);
         let ids =
             |rows: Vec<SavingsAccount>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
 
@@ -2073,7 +2106,7 @@ mod tests {
         );
         assert_eq!(
             destination_filter_labels(),
-            ["Все", "Капитализация", "На карту"]
+            ["Все", "Капитализация", "На карту", "Другое"]
         );
         assert_eq!(
             ids(filter_savings(
@@ -2089,7 +2122,7 @@ mod tests {
                 Some(SavingsTerm::Unlimited),
                 None
             )),
-            [2]
+            [2, 4]
         );
         assert_eq!(
             ids(filter_savings(
@@ -2110,12 +2143,23 @@ mod tests {
         assert_eq!(
             ids(filter_savings(
                 entries.clone(),
+                None,
+                Some(InterestDestination::Other)
+            )),
+            [4]
+        );
+        assert_eq!(
+            ids(filter_savings(
+                entries.clone(),
                 Some(SavingsTerm::Limited),
                 Some(InterestDestination::Withdraw)
             )),
             [3]
         );
-        assert_eq!(ids(filter_savings(entries.clone(), None, None)), [1, 2, 3]);
+        assert_eq!(
+            ids(filter_savings(entries.clone(), None, None)),
+            [1, 2, 3, 4]
+        );
     }
 
     #[test]
@@ -2221,6 +2265,11 @@ mod tests {
             include_str!("../../../db/migrations/V8__currencies.sql"),
             include_str!("../../../db/migrations/V9__savings_currency.sql"),
             include_str!("../../../db/migrations/V10__expense_card_balances.sql"),
+            include_str!("../../../db/migrations/V11__expense_places_and_card_names.sql"),
+            include_str!("../../../db/migrations/V12__transfers.sql"),
+            include_str!("../../../db/migrations/V13__payment_document_next_payment.sql"),
+            include_str!("../../../db/migrations/V14__prices.sql"),
+            include_str!("../../../db/migrations/V15__other_interest_destination.sql"),
         ] {
             database.execute_batch(sql).expect("migration should apply");
         }
@@ -2236,7 +2285,8 @@ mod tests {
                      (2, 1, 'Alpha', '100', '1', 'unlimited', NULL, NULL, NULL, 'reinvest', 0, NULL),
                      (3, 1, 'Gamma', '100', '1', 'unlimited', NULL, NULL, NULL, 'reinvest', 1, 'RUB'),
                      (4, 2, 'Alpha', '100', '1', 'unlimited', NULL, NULL, NULL, 'reinvest', 1, NULL),
-                     (5, 2, 'Beta', '100', '1', 'unlimited', NULL, NULL, NULL, 'reinvest', 0, NULL);",
+                     (5, 2, 'Beta', '100', '1', 'unlimited', NULL, NULL, NULL, 'reinvest', 0, NULL),
+                     (6, 1, 'Другой вариант', '100', '1', 'unlimited', NULL, NULL, NULL, 'other', 1, 'RUB');",
             )
             .expect("savings fixtures should be inserted");
         database
@@ -2260,11 +2310,11 @@ mod tests {
     fn savings_filters_combine_and_clear_independently() {
         let database = filtered_database();
         assert_eq!(ids(&database, Some(1), Some(true), None, "Alpha"), [1]);
-        assert_eq!(ids(&database, Some(1), Some(true), None, ""), [1, 3]);
+        assert_eq!(ids(&database, Some(1), Some(true), None, ""), [1, 3, 6]);
         assert_eq!(ids(&database, None, Some(true), None, "Alpha"), [1, 4]);
         assert_eq!(ids(&database, Some(1), None, None, "Alpha"), [1, 2]);
         assert_eq!(ids(&database, None, None, Some(Currency::Usd), ""), [1]);
-        assert_eq!(ids(&database, None, None, None, "").len(), 5);
+        assert_eq!(ids(&database, None, None, None, "").len(), 6);
     }
 
     #[test]

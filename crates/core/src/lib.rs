@@ -167,15 +167,17 @@ impl FromStr for SavingsTerm {
 pub enum InterestDestination {
     Reinvest,
     Withdraw,
+    Other,
 }
 
 impl InterestDestination {
-    pub const ALL: [Self; 2] = [Self::Reinvest, Self::Withdraw];
+    pub const ALL: [Self; 3] = [Self::Reinvest, Self::Withdraw, Self::Other];
 
     pub const fn code(self) -> &'static str {
         match self {
             Self::Reinvest => "reinvest",
             Self::Withdraw => "withdraw",
+            Self::Other => "other",
         }
     }
 
@@ -183,6 +185,7 @@ impl InterestDestination {
         match self {
             Self::Reinvest => "Капитализация",
             Self::Withdraw => "На карту",
+            Self::Other => "Другое",
         }
     }
 }
@@ -194,6 +197,7 @@ impl FromStr for InterestDestination {
         match value {
             "reinvest" => Ok(Self::Reinvest),
             "withdraw" => Ok(Self::Withdraw),
+            "other" => Ok(Self::Other),
             _ => Err(DomainError::UnknownInterestDestination(value.to_owned())),
         }
     }
@@ -1721,6 +1725,38 @@ mod tests {
         assert_eq!(
             "withdraw".parse::<InterestDestination>(),
             Ok(InterestDestination::Withdraw)
+        );
+    }
+
+    #[test]
+    fn other_interest_destination_uses_its_storage_code_and_title() {
+        assert_eq!(InterestDestination::Other.code(), "other");
+        assert_eq!(InterestDestination::Other.title(), "Другое");
+    }
+
+    #[test]
+    fn all_interest_destinations_include_other() {
+        assert_eq!(
+            InterestDestination::ALL,
+            [
+                InterestDestination::Reinvest,
+                InterestDestination::Withdraw,
+                InterestDestination::Other,
+            ]
+        );
+    }
+
+    #[test]
+    fn interest_destination_parser_accepts_other_and_rejects_unknown_codes() {
+        assert_eq!(
+            "other".parse::<InterestDestination>(),
+            Ok(InterestDestination::Other)
+        );
+        assert_eq!(
+            "unknown".parse::<InterestDestination>(),
+            Err(DomainError::UnknownInterestDestination(
+                "unknown".to_owned()
+            ))
         );
     }
 

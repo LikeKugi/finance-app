@@ -77,6 +77,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 14,
         sql: include_str!("../migrations/V14__prices.sql"),
     },
+    Migration {
+        version: 15,
+        sql: include_str!("../migrations/V15__other_interest_destination.sql"),
+    },
 ];
 
 struct Migration {
@@ -2669,10 +2673,10 @@ fn apply_migrations(connection: &mut Connection, database_path: &Path) -> Result
         backup_before_migration(connection, database_path, latest_version)?;
     }
 
-    let rebuilds_currency_tables = MIGRATIONS.iter().any(|migration| {
-        migration.version == 8 && migration.version > current_version.unwrap_or(0)
+    let rebuilds_tables_with_foreign_keys = MIGRATIONS.iter().any(|migration| {
+        matches!(migration.version, 8 | 15) && migration.version > current_version.unwrap_or(0)
     });
-    if rebuilds_currency_tables {
+    if rebuilds_tables_with_foreign_keys {
         connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
     }
 
@@ -2696,7 +2700,7 @@ fn apply_migrations(connection: &mut Connection, database_path: &Path) -> Result
             )?;
         }
 
-        if rebuilds_currency_tables {
+        if rebuilds_tables_with_foreign_keys {
             let foreign_key_violation = transaction
                 .query_row(
                     "SELECT \"table\", rowid, parent FROM pragma_foreign_key_check LIMIT 1",
@@ -2721,7 +2725,7 @@ fn apply_migrations(connection: &mut Connection, database_path: &Path) -> Result
         Ok(())
     })();
 
-    if rebuilds_currency_tables {
+    if rebuilds_tables_with_foreign_keys {
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
     }
     migration_result
@@ -3642,7 +3646,7 @@ mod tests {
                         )
                         .unwrap();
                 }
-                4..=13 => {}
+                4..=14 => {}
                 _ => unreachable!(),
             }
         }
@@ -3659,7 +3663,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v14-")
+                    .starts_with("data.before-migration-v15-")
             })
             .count()
     }
@@ -3907,7 +3911,7 @@ mod tests {
 
     #[test]
     fn initialize_migrates_supported_versions_and_preserves_backup_and_data() {
-        for version in 1..=13 {
+        for version in 1..=14 {
             let directory = tempfile::tempdir().unwrap();
             let database_path = directory.path().join("data.db");
             drop(create_legacy_database(&database_path, version));
@@ -4063,7 +4067,7 @@ mod tests {
                     entry
                         .file_name()
                         .to_string_lossy()
-                        .starts_with("data.before-migration-v14-")
+                        .starts_with("data.before-migration-v15-")
                 })
                 .expect("upgrade should create a backup")
                 .path();
@@ -4423,7 +4427,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v14-")
+                    .starts_with("data.before-migration-v15-")
             })
             .map(|entry| Connection::open(entry.path()).unwrap())
             .map(|backup| {
@@ -4437,6 +4441,239 @@ mod tests {
         assert_eq!(savings.len(), 1);
         assert_eq!(savings[0].currency, None);
         assert_eq!(backup_version, Some(8));
+    }
+
+    #[test]
+    fn migration_v15_preserves_savings_fields_links_triggers_and_foreign_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let legacy = create_legacy_database(&database_path, 14);
+        legacy
+            .execute_batch(
+                "UPDATE savings
+                 SET rate_after_threshold = '6.25', threshold_amount = '1000.50',
+                     term_type = 'limited', term_end_date = '2028-01-31',
+                     interest_destination = 'withdraw', is_active = 0,
+                     opened_date = '2024-01-02', interest_accrual_date = '2024-02-02',
+                     currency = 'RUB'
+                 WHERE id = 1;
+                 INSERT INTO savings (
+                     id, bank_id, title, amount, base_rate, term_type,
+                     interest_destination, is_active, currency
+                 ) VALUES (
+                     2, 1, 'Второй резерв', '2000.000', '6.25',
+                     'unlimited', 'reinvest', 1, 'RUB'
+                 );
+                 INSERT INTO payment_documents (
+                     id, bank_id, payment_system, card_type, amount, currency,
+                     affects_deposit_rate, min_monthly_spend
+                 ) VALUES (9, 1, 'VISA', 'debit', '500', 'RUB', 1, '100');
+                 INSERT INTO document_rate_links (id, document_id, savings_id)
+                 VALUES (17, 9, 1);
+                 INSERT INTO transfers (
+                     id, operation_date, operation_type, source_kind, destination_kind,
+                     destination_savings_id, amount, currency, comment, created_at
+                 ) VALUES (
+                     31, '2026-01-02', 'top_up', 'external', 'savings',
+                     1, '50', 'RUB', 'Пополнение', '2026-01-02T10:00:00Z'
+                 );
+                 INSERT INTO transfers (
+                     id, operation_date, operation_type, source_kind, source_savings_id,
+                     destination_kind, destination_savings_id, amount, currency, comment,
+                     created_at
+                 ) VALUES (
+                     32, '2026-01-03', 'transfer', 'savings', 1,
+                     'savings', 2, '20', 'RUB', 'Между счетами', '2026-01-03T10:00:00Z'
+                 );",
+            )
+            .unwrap();
+        drop(legacy);
+
+        let database = initialize(&database_path).unwrap();
+        let mut statement = database
+            .prepare(
+                "SELECT id, bank_id, title, amount, base_rate, rate_after_threshold,
+                        threshold_amount, term_type, term_end_date, interest_destination,
+                        is_active, opened_date, interest_accrual_date, currency
+                 FROM savings ORDER BY id",
+            )
+            .unwrap();
+        let savings_rows = statement
+            .query_map([], |row| {
+                Ok((
+                    (
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                    ),
+                    (
+                        row.get::<_, String>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, bool>(10)?,
+                        row.get::<_, Option<String>>(11)?,
+                        row.get::<_, Option<String>>(12)?,
+                        row.get::<_, Option<String>>(13)?,
+                    ),
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        drop(statement);
+        assert_eq!(
+            savings_rows,
+            vec![
+                (
+                    (
+                        1,
+                        1,
+                        "Резерв".to_owned(),
+                        "999.0100".to_owned(),
+                        "5.00".to_owned(),
+                        Some("6.25".to_owned()),
+                        Some("1000.50".to_owned()),
+                    ),
+                    (
+                        "limited".to_owned(),
+                        Some("2028-01-31".to_owned()),
+                        "withdraw".to_owned(),
+                        false,
+                        Some("2024-01-02".to_owned()),
+                        Some("2024-02-02".to_owned()),
+                        Some("RUB".to_owned()),
+                    ),
+                ),
+                (
+                    (
+                        2,
+                        1,
+                        "Второй резерв".to_owned(),
+                        "2000.000".to_owned(),
+                        "6.25".to_owned(),
+                        None,
+                        None,
+                    ),
+                    (
+                        "unlimited".to_owned(),
+                        None,
+                        "reinvest".to_owned(),
+                        true,
+                        None,
+                        None,
+                        Some("RUB".to_owned()),
+                    ),
+                ),
+            ]
+        );
+
+        let mut statement = database
+            .prepare(
+                "SELECT type, name FROM sqlite_master
+                 WHERE tbl_name = 'savings' AND type IN ('index', 'trigger')
+                 ORDER BY type, name",
+            )
+            .unwrap();
+        let savings_schema_objects = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        drop(statement);
+        assert_eq!(
+            savings_schema_objects,
+            vec![
+                (
+                    "index".to_owned(),
+                    "savings_bank_active_title_idx".to_owned()
+                ),
+                ("index".to_owned(), "savings_currency_idx".to_owned()),
+                ("trigger".to_owned(), "savings_bank_update".to_owned()),
+                (
+                    "trigger".to_owned(),
+                    "transfers_preserve_savings_currency".to_owned()
+                ),
+            ]
+        );
+
+        let rate_link = database
+            .query_row(
+                "SELECT document_id, savings_id FROM document_rate_links WHERE id = 17",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rate_link, (9, 1));
+        let transfer_links = database
+            .prepare(
+                "SELECT id, source_savings_id, destination_savings_id
+                 FROM transfers ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            transfer_links,
+            vec![(31, None, Some(1)), (32, Some(1), Some(2))]
+        );
+
+        let foreign_key_violations = database
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!(foreign_key_violations, 0);
+
+        database
+            .execute(
+                "INSERT INTO banks (id, name, comment) VALUES (2, 'Другой банк', '')",
+                [],
+            )
+            .unwrap();
+        assert!(database
+            .execute("UPDATE savings SET bank_id = 2 WHERE id = 1", [])
+            .is_err());
+        assert!(database
+            .execute("UPDATE savings SET currency = 'USD' WHERE id = 1", [])
+            .is_err());
+
+        let backup_path = std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("data.before-migration-v15-")
+            })
+            .expect("upgrade from V14 should create a backup")
+            .path();
+        let backup = Connection::open(backup_path).unwrap();
+        let backup_version = backup
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!(backup_version, 14);
+        assert_eq!(migration_backup_count(directory.path()), 1);
+
+        drop(database);
+        drop(initialize(&database_path).unwrap());
+        assert_eq!(migration_backup_count(directory.path()), 1);
     }
 
     #[test]
@@ -6409,7 +6646,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .contains("before-migration-v14")
+                    .contains("before-migration-v15")
             })
             .count();
 
@@ -6461,6 +6698,24 @@ mod tests {
         assert!(list_savings(&connection, None, Some(false), "")
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn save_and_list_savings_preserves_other_interest_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let bank_id = save_bank(&connection, None, "Банк", "").unwrap();
+        let mut details = savings_details(bank_id);
+        details.interest_destination = InterestDestination::Other;
+
+        let savings_id = save_savings(&connection, None, &details).unwrap();
+        let savings = list_savings(&connection, Some(bank_id), Some(true), "")
+            .unwrap()
+            .into_iter()
+            .find(|account| account.id == savings_id)
+            .unwrap();
+
+        assert_eq!(savings.interest_destination, InterestDestination::Other);
     }
 
     #[test]
@@ -6662,7 +6917,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v14-")
+                    .starts_with("data.before-migration-v15-")
             })
             .expect("upgrade from V4 should create a backup")
             .path();
@@ -7913,7 +8168,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, MIGRATIONS.last().unwrap().version);
         let transfer_table: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'transfers'",
