@@ -39,6 +39,12 @@ const TABLE_ROW_HEIGHT: f32 = 32.0;
 /// Высота таблицы: 10 строк данных плюс строка заголовка.
 const TABLE_HEIGHT: f32 = TABLE_ROW_HEIGHT * (VISIBLE_TABLE_ROWS as f32 + 1.0);
 const ACTIONS_WIDTH: f32 = 160.0;
+/// Ширины колонок таблицы валют подобраны так, чтобы она помещалась в правую
+/// половину страницы при минимальном разрешении 1280×720.
+const CURRENCY_COLUMN_WIDTH: f32 = 80.0;
+const CURRENCY_RATE_COLUMN_WIDTH: f32 = 160.0;
+const CURRENCY_PRIMARY_COLUMN_WIDTH: f32 = 120.0;
+const CURRENCY_ACTIONS_WIDTH: f32 = 240.0;
 
 type ParentChoice = Entity<SelectState<Vec<ParentCategoryItem>>>;
 
@@ -249,9 +255,30 @@ fn directory_cell(content: AnyElement, col_ix: usize, cx: &App) -> AnyElement {
         .h_full()
         .flex()
         .items_center()
+        .overflow_hidden()
         .when(col_ix > 0, |cell| cell.border_l_1().border_color(border))
         .child(content)
         .into_any_element()
+}
+
+/// В таблице показываем только код базовых валют: полное название дублирует
+/// код и занимает место в узкой колонке. Остальные валюты подписаны подробнее.
+fn currency_cell_label(currency: &CurrencyDefinition) -> String {
+    match currency.code.as_str() {
+        "RUB" | "USD" => currency.code.clone(),
+        _ => format!("{} {}", currency.code, currency.name),
+    }
+}
+
+/// Предпочтительные ширины колонок таблицы валют. Контейнер таблицы занимает
+/// весь правый блок страницы, как и таблицы банков и мест покупок.
+fn currency_column_widths() -> [f32; 4] {
+    [
+        CURRENCY_COLUMN_WIDTH,
+        CURRENCY_RATE_COLUMN_WIDTH,
+        CURRENCY_PRIMARY_COLUMN_WIDTH,
+        CURRENCY_ACTIONS_WIDTH,
+    ]
 }
 
 impl DirectoriesPage {
@@ -1365,11 +1392,12 @@ impl TableDelegate for CurrenciesTable {
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
+        let widths = currency_column_widths();
         match col_ix {
-            0 => directory_column("currency", "Валюта", 220.0, false),
-            1 => directory_column("rate", "Курс", 300.0, false),
-            2 => directory_column("primary", "Основная", 160.0, false),
-            _ => directory_column("actions", "Действия", 240.0, true),
+            0 => directory_column("currency", "Валюта", widths[0], false),
+            1 => directory_column("rate", "Курс", widths[1], false),
+            2 => directory_column("primary", "Основная", widths[2], false),
+            _ => directory_column("actions", "Действия", widths[3], true),
         }
     }
 
@@ -1398,7 +1426,7 @@ impl TableDelegate for CurrenciesTable {
             0 => div()
                 .w_full()
                 .truncate()
-                .child(format!("{} {}", row.currency.code, row.currency.name))
+                .child(currency_cell_label(&row.currency))
                 .into_any_element(),
             1 => {
                 let tooltip = row.rate_label.clone();
@@ -1425,6 +1453,12 @@ impl TableDelegate for CurrenciesTable {
                 } else {
                     let page = self.page.clone();
                     let code = row.currency.code.clone();
+                    let has_rate = row.currency.rate_to_primary.is_some();
+                    let primary_tooltip = if has_rate {
+                        "Сделать основной валютой"
+                    } else {
+                        "Сначала задайте курс этой валюты"
+                    };
                     div()
                         .w_full()
                         .flex()
@@ -1432,9 +1466,9 @@ impl TableDelegate for CurrenciesTable {
                         .child(
                             Button::new(("currency-primary", row_ix))
                                 .compact()
-                                .label("Сделать основной")
-                                .tooltip("Сначала задайте курс этой валюты")
-                                .disabled(row.currency.rate_to_primary.is_none())
+                                .label("Основной")
+                                .tooltip(primary_tooltip)
+                                .disabled(!has_rate)
                                 .on_click(move |_, window, cx| {
                                     let code = code.clone();
                                     let _ = page.update(cx, |page, cx| {
@@ -1498,7 +1532,7 @@ impl TableDelegate for CurrenciesTable {
         let row = &self.rows[row_ix];
         Some(
             match col_ix {
-                0 => format!("{} {}", row.currency.code, row.currency.name),
+                0 => currency_cell_label(&row.currency),
                 1 => row.rate_label.clone(),
                 2 if row.currency.is_primary => "Основная".to_owned(),
                 _ => "Действия".to_owned(),
@@ -1694,9 +1728,10 @@ impl Render for DirectoriesPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        directory_column, parent_category_options, Category, ACTIONS_WIDTH, TABLE_HEIGHT,
-        TABLE_ROW_HEIGHT, VISIBLE_TABLE_ROWS,
+        currency_cell_label, currency_column_widths, directory_column, parent_category_options,
+        Category, ACTIONS_WIDTH, TABLE_HEIGHT, TABLE_ROW_HEIGHT, VISIBLE_TABLE_ROWS,
     };
+    use finance_core::CurrencyDefinition;
     use gpui_kit::component::table::ColumnFixed;
 
     fn category(id: i64, parent_id: Option<i64>, name: &str) -> Category {
@@ -1749,6 +1784,32 @@ mod tests {
         let options = parent_category_options(&categories(), Some(3));
         assert!(options.contains(&(Some(2), "Транспорт".to_owned())));
         assert!(!options.iter().any(|(id, _)| *id == Some(3)));
+    }
+
+    #[test]
+    fn builtin_currency_cells_show_only_the_code() {
+        let builtin = |code: &str, name: &str| CurrencyDefinition {
+            code: code.to_owned(),
+            name: name.to_owned(),
+            is_primary: code == "RUB",
+            rate_to_primary: None,
+            rate_date: None,
+        };
+
+        assert_eq!(
+            currency_cell_label(&builtin("RUB", "Российский рубль")),
+            "RUB"
+        );
+        assert_eq!(currency_cell_label(&builtin("USD", "Доллар США")), "USD");
+        assert_eq!(currency_cell_label(&builtin("EUR", "Евро")), "EUR Евро");
+    }
+
+    #[test]
+    fn currency_columns_reserve_enough_space_for_row_buttons() {
+        let widths = currency_column_widths();
+
+        assert_eq!(widths, [80.0, 160.0, 120.0, 240.0]);
+        assert_eq!(widths.iter().sum::<f32>(), 600.0);
     }
 
     #[test]
