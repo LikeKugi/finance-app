@@ -1095,7 +1095,7 @@ impl PaymentDocumentsPage {
             state
         });
         let next_payment_amount = text_input(
-            "Размер следующего платежа",
+            "Например, 5000",
             &document
                 .next_payment_amount
                 .map_or_else(String::new, canonical_amount),
@@ -1103,7 +1103,7 @@ impl PaymentDocumentsPage {
             cx,
         );
         let expense_amount = text_input(
-            "Сумма расхода",
+            "Например, 5000",
             &document
                 .next_payment_amount
                 .map_or_else(String::new, canonical_amount),
@@ -1116,7 +1116,11 @@ impl PaymentDocumentsPage {
             window,
             cx,
         );
-        let comment = cx.new(|cx| TextareaState::new(window, cx).rows(3));
+        let comment = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .rows(3)
+                .placeholder("Введите комментарий")
+        });
         let subscriptions = vec![
             cx.subscribe_in(&due_date, window, |_, _, _: &DatePickerEvent, _, cx| {
                 cx.notify()
@@ -1385,7 +1389,9 @@ impl PaymentDocumentsPage {
                         ))
                         .child(field(
                             "Валюта расхода",
-                            Select::new(&form.currency_select).into_any_element(),
+                            Select::new(&form.currency_select)
+                                .placeholder("Выберите валюту")
+                                .into_any_element(),
                         )),
                 )
                 .child(
