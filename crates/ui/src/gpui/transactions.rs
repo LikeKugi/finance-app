@@ -31,11 +31,11 @@ use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
-use super::helpers::{card_label, format_currency, format_date, DATE_FORMAT};
+use super::helpers::{card_label, expense_place_label, format_currency, format_date, DATE_FORMAT};
 use super::selectable::{selectable_message, selectable_text};
 use super::support::{
-    category_tree_labels, collect_category_descendants, eligible_cards, expense_place_label,
-    expense_place_tooltip, text_suggestions, DIVISION_ROUNDING_WARNING,
+    category_tree_labels, collect_category_descendants, eligible_cards, text_suggestions,
+    DIVISION_ROUNDING_WARNING,
 };
 use super::support::{date_period_range, DatePeriod, DatePeriodRange};
 
@@ -742,7 +742,7 @@ impl TransactionsPage {
                 tooltip: id
                     .checked_sub(1)
                     .and_then(|row| self.expense_places.get(row))
-                    .map(expense_place_tooltip),
+                    .map(expense_place_label),
                 label,
             })
             .collect();
@@ -1448,7 +1448,7 @@ impl TransactionsPage {
             .map(|ix| ix.row)
             .and_then(|row| row.checked_sub(1))
             .and_then(|row| self.expense_places.get(row))
-            .map(expense_place_tooltip);
+            .map(expense_place_label);
 
         div()
             .flex()

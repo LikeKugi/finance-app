@@ -17,11 +17,10 @@ use gpui_kit::component::{
 };
 use gpui_kit::*;
 
-use super::helpers::card_label;
+use super::helpers::{card_label, expense_place_label};
 use super::selectable::{selectable_message, selectable_text};
 use super::support::{
-    category_tree_labels, eligible_cards, expense_place_label, quick_form_date_caption,
-    DIVISION_ROUNDING_WARNING,
+    category_tree_labels, eligible_cards, quick_form_date_caption, DIVISION_ROUNDING_WARNING,
 };
 
 type Choice = Entity<SelectState<Vec<SharedString>>>;

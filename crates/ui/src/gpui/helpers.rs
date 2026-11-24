@@ -1,7 +1,7 @@
 //! Чистые функции-хелперы для универсальной логики отображения.
 
 use chrono::NaiveDate;
-use finance_core::{Currency, PaymentCardType, PaymentDocument};
+use finance_core::{Currency, ExpensePlace, PaymentCardType, PaymentDocument};
 use rust_decimal::Decimal;
 
 /// Единый формат отображения дат: `DD.MM.YYYY`.
@@ -102,6 +102,22 @@ pub(crate) fn card_label(card: &PaymentDocument) -> String {
     {
         Some(name) => format!("{name} - {details}"),
         None => details,
+    }
+}
+
+/// Единая подпись места покупки: `Название (Комментарий)`.
+///
+/// Если комментарий отсутствует или содержит только пробелы, возвращается
+/// только название. Технический id в подпись не входит.
+pub(crate) fn expense_place_label(place: &ExpensePlace) -> String {
+    match place
+        .comment
+        .as_deref()
+        .map(str::trim)
+        .filter(|comment| !comment.is_empty())
+    {
+        Some(comment) => format!("{} ({comment})", place.name),
+        None => place.name.clone(),
     }
 }
 
@@ -256,5 +272,39 @@ mod tests {
         let card = payment_document(42, Some("  "), PaymentCardType::Debit, Some(Currency::Rub));
 
         assert_eq!(card_label(&card), "Альфа-Банк - MIR (дебетовая; RUB)");
+    }
+
+    fn expense_place(id: i64, name: &str, comment: Option<&str>) -> ExpensePlace {
+        ExpensePlace {
+            id,
+            name: name.to_owned(),
+            comment: comment.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn expense_place_label_uses_unified_format() {
+        let place = expense_place(7, "Магазин", Some("возле дома"));
+
+        assert_eq!(expense_place_label(&place), "Магазин (возле дома)");
+    }
+
+    #[test]
+    fn expense_place_label_trims_comment() {
+        let place = expense_place(7, "Магазин", Some("  возле дома  \n"));
+
+        assert_eq!(expense_place_label(&place), "Магазин (возле дома)");
+    }
+
+    #[test]
+    fn expense_place_label_without_comment_returns_name_only() {
+        assert_eq!(
+            expense_place_label(&expense_place(8, "Рынок", None)),
+            "Рынок"
+        );
+        assert_eq!(
+            expense_place_label(&expense_place(9, "Рынок", Some("   "))),
+            "Рынок"
+        );
     }
 }

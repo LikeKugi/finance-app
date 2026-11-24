@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{Datelike, Days, Months, NaiveDate};
 
 use super::helpers::format_date;
-use finance_core::{Category, Currency, CurrencyDefinition, ExpensePlace, PaymentDocument};
+use finance_core::{Category, Currency, CurrencyDefinition, PaymentDocument};
 use rust_decimal::RoundingStrategy;
 
 pub(crate) const DIVISION_ROUNDING_WARNING: &str = "Деление округляется до 2 знаков после запятой; погрешность может накапливаться при нескольких делениях.";
@@ -231,25 +231,6 @@ pub(crate) fn eligible_cards(
         .collect()
 }
 
-pub(crate) fn expense_place_label(place: &ExpensePlace) -> String {
-    format!("{} · #{}", place.name, place.id)
-}
-
-/// Подсказка для опций «Место покупки»: название, технический id и комментарий.
-pub(crate) fn expense_place_tooltip(place: &ExpensePlace) -> String {
-    let mut tooltip = expense_place_label(place);
-    if let Some(comment) = place
-        .comment
-        .as_deref()
-        .map(str::trim)
-        .filter(|comment| !comment.is_empty())
-    {
-        tooltip.push_str("\nКомментарий: ");
-        tooltip.push_str(comment);
-    }
-    tooltip
-}
-
 /// Пояснение к полю суммы компактной формы: дата записи без поля выбора даты.
 pub(crate) fn quick_form_date_caption(date: NaiveDate) -> String {
     format!("Дата: сегодня ({})", format_date(date))
@@ -305,38 +286,6 @@ mod tests {
             .collect();
         assert_eq!(ids, vec![1]);
         assert!(eligible_cards(&cards, None).is_empty());
-    }
-
-    #[test]
-    fn expense_place_label_includes_id() {
-        let place = ExpensePlace {
-            id: 4,
-            name: "Магазин".to_owned(),
-            comment: None,
-        };
-        assert_eq!(expense_place_label(&place), "Магазин · #4");
-    }
-
-    #[test]
-    fn expense_place_tooltip_includes_name_id_and_trimmed_comment() {
-        let place = ExpensePlace {
-            id: 7,
-            name: "Магазин".to_owned(),
-            comment: Some("  возле дома  \n".to_owned()),
-        };
-
-        assert_eq!(
-            expense_place_tooltip(&place),
-            "Магазин · #7\nКомментарий: возле дома"
-        );
-        assert_eq!(
-            expense_place_tooltip(&ExpensePlace {
-                id: 8,
-                name: "Рынок".to_owned(),
-                comment: None,
-            }),
-            "Рынок · #8"
-        );
     }
 
     #[test]

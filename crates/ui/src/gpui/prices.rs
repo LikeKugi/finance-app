@@ -24,12 +24,9 @@ use gpui_kit::prelude::{FluentBuilder as _, StatefulInteractiveElement};
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
-use super::helpers::DATE_FORMAT;
-use super::helpers::{format_currency, format_date};
+use super::helpers::{expense_place_label, format_currency, format_date, DATE_FORMAT};
 use super::selectable::{selectable_message, selectable_text};
-use super::support::{
-    date_period_range, expense_place_tooltip, text_suggestions, DatePeriod, DatePeriodRange,
-};
+use super::support::{date_period_range, text_suggestions, DatePeriod, DatePeriodRange};
 
 const ALL_PLACES_LABEL: &str = "Все места";
 const PLACE_OPTION_ITEM_ID: &str = "price-place-option";
@@ -178,10 +175,13 @@ fn place_choice(
     let items = places
         .iter()
         .enumerate()
-        .map(|(id, place)| PricePlaceItem {
-            id,
-            label: place.name.clone(),
-            tooltip: expense_place_tooltip(place),
+        .map(|(id, place)| {
+            let label = expense_place_label(place);
+            PricePlaceItem {
+                id,
+                tooltip: label.clone(),
+                label,
+            }
         })
         .collect();
     cx.new(|cx| SelectState::new(items, Some(IndexPath::default().row(selected)), window, cx))
@@ -193,16 +193,14 @@ fn place_filter_items(places: &[ExpensePlace]) -> Vec<PricePlaceFilterItem> {
         label: ALL_PLACES_LABEL.to_owned(),
         tooltip: None,
     })
-    .chain(
-        places
-            .iter()
-            .enumerate()
-            .map(|(index, place)| PricePlaceFilterItem {
-                id: index + 1,
-                label: place.name.clone(),
-                tooltip: Some(expense_place_tooltip(place)),
-            }),
-    )
+    .chain(places.iter().enumerate().map(|(index, place)| {
+        let label = expense_place_label(place);
+        PricePlaceFilterItem {
+            id: index + 1,
+            tooltip: Some(label.clone()),
+            label,
+        }
+    }))
     .collect()
 }
 
@@ -651,7 +649,7 @@ impl PricesSection {
         let this = cx.entity();
         let place_tooltip = selected_place_row(&form.place, cx)
             .and_then(|row| self.places.get(row))
-            .map(expense_place_tooltip);
+            .map(expense_place_label);
         let mut body = div()
             .flex()
             .flex_col()
@@ -924,7 +922,7 @@ impl PricesSection {
         let filter_place_tooltip = selected_filter_place_row(&self.place_filter, cx)
             .and_then(|row| row.checked_sub(1))
             .and_then(|row| self.places.get(row))
-            .map(expense_place_tooltip);
+            .map(expense_place_label);
         let filter = |label: &'static str, width: f32, control: AnyElement| {
             div()
                 .w(px(width))
@@ -1125,7 +1123,7 @@ mod tests {
         place_filter_items, sort_prices, widths_with_fixed_actions, PricePlaceItem, ACTIONS_WIDTH,
         ALL_PLACES_LABEL, TABLE_HEIGHT, TABLE_ROW_HEIGHT, VISIBLE_TABLE_ROWS,
     };
-    use crate::gpui::support::expense_place_tooltip;
+    use crate::gpui::helpers::expense_place_label;
 
     fn record(
         id: i64,
@@ -1177,7 +1175,7 @@ mod tests {
     }
 
     #[test]
-    fn price_place_option_keeps_label_and_exposes_full_tooltip() {
+    fn price_place_option_uses_unified_label() {
         let place = ExpensePlace {
             id: 7,
             name: "Магазин".to_owned(),
@@ -1185,25 +1183,25 @@ mod tests {
         };
         let item = PricePlaceItem {
             id: 0,
-            label: place.name.clone(),
-            tooltip: expense_place_tooltip(&place),
+            label: expense_place_label(&place),
+            tooltip: expense_place_label(&place),
         };
 
-        assert_eq!(item.title().to_string(), "Магазин");
-        assert_eq!(item.value(), "Магазин");
-        assert_eq!(item.tooltip, "Магазин · #7\nКомментарий: возле дома");
+        assert_eq!(item.title().to_string(), "Магазин (возле дома)");
+        assert_eq!(item.value(), "Магазин (возле дома)");
+        assert_eq!(item.tooltip, "Магазин (возле дома)");
         assert_eq!(
-            expense_place_tooltip(&ExpensePlace {
+            expense_place_label(&ExpensePlace {
                 id: 8,
                 name: "Рынок".to_owned(),
                 comment: None,
             }),
-            "Рынок · #8"
+            "Рынок"
         );
     }
 
     #[test]
-    fn price_place_filter_options_carry_full_tooltip() {
+    fn price_place_filter_options_use_unified_label() {
         let places = vec![ExpensePlace {
             id: 7,
             name: "Магазин".to_owned(),
@@ -1215,12 +1213,9 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].label, ALL_PLACES_LABEL);
         assert_eq!(items[0].tooltip, None);
-        assert_eq!(items[1].title().to_string(), "Магазин");
-        assert_eq!(items[1].value(), "Магазин");
-        assert_eq!(
-            items[1].tooltip.as_deref(),
-            Some("Магазин · #7\nКомментарий: возле дома")
-        );
+        assert_eq!(items[1].title().to_string(), "Магазин (возле дома)");
+        assert_eq!(items[1].value(), "Магазин (возле дома)");
+        assert_eq!(items[1].tooltip.as_deref(), Some("Магазин (возле дома)"));
     }
 
     #[test]
