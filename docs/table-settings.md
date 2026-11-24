@@ -37,6 +37,6 @@
 - Each table is sized for exactly 10 data rows plus the header row (352 logical pixels with the default 32-pixel row height). When a directory has more rows, the table body scrolls without rendering the whole list.
 - The `Действия` column is pinned to the right edge and is not selectable or resizable.
 - Category rows keep their tree indentation and inactive-state marker; currency and place cells truncate long values and expose the full rate or comment text through a tooltip or the existing comment dialog.
-- The `Валюты` table uses the same full-width right slot as the `Банки` and `Места покупок` tables. Its preferred column widths are `Валюта` (80 px), `Курс` (160 px), `Основная` (120 px) and `Действия` (240 px); the wide `Действия` column keeps both row buttons inside the table and out of neighbouring columns.
+- The `Банки`, `Валюты` and `Места покупок` tables share the same full-width slot in the right half of the page. The preferred `Валюты` column widths are `Валюта` (80 px), `Курс` (160 px), `Основная` (180 px) and `Действия` (160 px); the `Основная` column is wide enough to show the full `Назначить основной` label instead of truncating it.
 - The `Валюта` cell shows only the code for `RUB` and `USD`; full names are omitted to keep the narrow column readable. Other currencies keep the `код название` format.
-- The primary-currency button is labelled `Основной`; its tooltip explains that it makes the currency primary or that a rate must be set first.
+- The primary-currency button is labelled `Назначить основной`; the exchange-rate button is labelled `Изменить`. Their tooltips explain the action or why it is unavailable.

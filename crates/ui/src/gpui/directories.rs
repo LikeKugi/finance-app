@@ -43,8 +43,12 @@ const ACTIONS_WIDTH: f32 = 160.0;
 /// половину страницы при минимальном разрешении 1280×720.
 const CURRENCY_COLUMN_WIDTH: f32 = 80.0;
 const CURRENCY_RATE_COLUMN_WIDTH: f32 = 160.0;
-const CURRENCY_PRIMARY_COLUMN_WIDTH: f32 = 120.0;
-const CURRENCY_ACTIONS_WIDTH: f32 = 240.0;
+/// Кнопка «Назначить основной» рендерится в этой колонке и не должна
+/// обрезаться, поэтому ширина рассчитана под её полную подпись.
+const CURRENCY_PRIMARY_COLUMN_WIDTH: f32 = 180.0;
+const CURRENCY_ACTIONS_WIDTH: f32 = 160.0;
+const MAKE_PRIMARY_BUTTON_LABEL: &str = "Назначить основной";
+const EDIT_CURRENCY_BUTTON_LABEL: &str = "Изменить";
 
 type ParentChoice = Entity<SelectState<Vec<ParentCategoryItem>>>;
 
@@ -1004,7 +1008,7 @@ impl DirectoriesPage {
     }
 
     fn render_banks(&mut self, _: &mut Context<Self>) -> Div {
-        div().h(px(TABLE_HEIGHT)).child(
+        div().h(px(TABLE_HEIGHT)).w_full().child(
             DataTable::new(&self.banks_table)
                 .stripe(true)
                 .bordered(true)
@@ -1013,7 +1017,7 @@ impl DirectoriesPage {
     }
 
     fn render_expense_places(&mut self, _: &mut Context<Self>) -> Div {
-        div().h(px(TABLE_HEIGHT)).child(
+        div().h(px(TABLE_HEIGHT)).w_full().child(
             DataTable::new(&self.expense_places_table)
                 .stripe(true)
                 .bordered(true)
@@ -1026,10 +1030,12 @@ impl DirectoriesPage {
         div()
             .flex()
             .flex_col()
+            .w_full()
             .gap_2()
             .child(
                 div()
                     .h(px(TABLE_HEIGHT))
+                    .w_full()
                     .child(
                         DataTable::new(&self.currencies_table)
                             .stripe(true)
@@ -1466,7 +1472,7 @@ impl TableDelegate for CurrenciesTable {
                         .child(
                             Button::new(("currency-primary", row_ix))
                                 .compact()
-                                .label("Основной")
+                                .label(MAKE_PRIMARY_BUTTON_LABEL)
                                 .tooltip(primary_tooltip)
                                 .disabled(!has_rate)
                                 .on_click(move |_, window, cx| {
@@ -1494,7 +1500,7 @@ impl TableDelegate for CurrenciesTable {
                     .child(
                         Button::new(("currency-rate", row_ix))
                             .xsmall()
-                            .label("Изменить курс")
+                            .label(EDIT_CURRENCY_BUTTON_LABEL)
                             .disabled(row.currency.is_primary)
                             .on_click(move |_, window, cx| {
                                 let edit = edit.clone();
@@ -1729,7 +1735,8 @@ impl Render for DirectoriesPage {
 mod tests {
     use super::{
         currency_cell_label, currency_column_widths, directory_column, parent_category_options,
-        Category, ACTIONS_WIDTH, TABLE_HEIGHT, TABLE_ROW_HEIGHT, VISIBLE_TABLE_ROWS,
+        Category, ACTIONS_WIDTH, EDIT_CURRENCY_BUTTON_LABEL, MAKE_PRIMARY_BUTTON_LABEL,
+        TABLE_HEIGHT, TABLE_ROW_HEIGHT, VISIBLE_TABLE_ROWS,
     };
     use finance_core::CurrencyDefinition;
     use gpui_kit::component::table::ColumnFixed;
@@ -1808,8 +1815,17 @@ mod tests {
     fn currency_columns_reserve_enough_space_for_row_buttons() {
         let widths = currency_column_widths();
 
-        assert_eq!(widths, [80.0, 160.0, 120.0, 240.0]);
-        assert_eq!(widths.iter().sum::<f32>(), 600.0);
+        assert_eq!(widths, [80.0, 160.0, 180.0, 160.0]);
+        assert_eq!(widths.iter().sum::<f32>(), 580.0);
+        // Ширина колонки «Основная» должна вмещать кнопку «Назначить основной»,
+        // иначе её подпись обрезается многоточием.
+        assert!(widths[2] >= 180.0);
+    }
+
+    #[test]
+    fn currency_row_buttons_use_the_requested_labels() {
+        assert_eq!(MAKE_PRIMARY_BUTTON_LABEL, "Назначить основной");
+        assert_eq!(EDIT_CURRENCY_BUTTON_LABEL, "Изменить");
     }
 
     #[test]
