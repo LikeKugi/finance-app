@@ -19,15 +19,15 @@ use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 
-/// Вкладки приложения; порядок и названия как в прежнем интерфейсе.
+/// Вкладки приложения; порядок задаёт [`PageTab::ALL`] и панель вкладок.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PageTab {
     Home,
-    Income,
     Expenses,
-    Savings,
+    Income,
     Transfers,
     PaymentDocuments,
+    Savings,
     Analysis,
     Directories,
     Settings,
@@ -36,11 +36,11 @@ pub(crate) enum PageTab {
 impl PageTab {
     pub(crate) const ALL: [Self; 9] = [
         Self::Home,
-        Self::Income,
         Self::Expenses,
-        Self::Savings,
+        Self::Income,
         Self::Transfers,
         Self::PaymentDocuments,
+        Self::Savings,
         Self::Analysis,
         Self::Directories,
         Self::Settings,
@@ -49,11 +49,11 @@ impl PageTab {
     pub(crate) const fn title(self) -> &'static str {
         match self {
             Self::Home => "Главная",
-            Self::Income => "Доходы",
             Self::Expenses => "Расходы",
-            Self::Savings => "Накопления",
+            Self::Income => "Доходы",
             Self::Transfers => "Переводы",
             Self::PaymentDocuments => "Платёжные карты",
+            Self::Savings => "Накопления",
             Self::Analysis => "Анализ",
             Self::Directories => "Справочники",
             Self::Settings => "Настройки",
@@ -326,13 +326,28 @@ mod tests {
     use super::PageTab;
 
     #[test]
-    fn home_is_the_first_tab_and_has_a_russian_title() {
+    fn tabs_follow_the_requested_order_and_have_russian_titles() {
+        let titles: Vec<&'static str> = PageTab::ALL.iter().map(|tab| tab.title()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Главная",
+                "Расходы",
+                "Доходы",
+                "Переводы",
+                "Платёжные карты",
+                "Накопления",
+                "Анализ",
+                "Справочники",
+                "Настройки",
+            ]
+        );
         assert_eq!(PageTab::ALL.len(), 9);
         assert_eq!(PageTab::ALL[0], PageTab::Home);
         assert_eq!(PageTab::Home.title(), "Главная");
-        let mut titles = std::collections::HashSet::new();
-        for tab in PageTab::ALL {
-            assert!(titles.insert(tab.title()), "дубликат названия вкладки");
+        let mut unique = std::collections::HashSet::new();
+        for title in titles {
+            assert!(unique.insert(title), "дубликат названия вкладки");
         }
     }
 }

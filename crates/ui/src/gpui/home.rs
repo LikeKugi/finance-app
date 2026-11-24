@@ -40,14 +40,14 @@ pub(crate) struct HomeLink {
 pub(crate) fn described_sections() -> [HomeLink; 3] {
     [
         HomeLink {
-            title: "Доходы",
-            description: "Учёт поступлений: дата, категория, сумма в RUB или USD и комментарий. Поиск, фильтры по периоду, категории, банку и карте; итоги отдельно по валютам.",
-            action: HomeAction::Incomes,
-        },
-        HomeLink {
             title: "Расходы",
             description: "Учёт списаний: дата, категория, сумма в RUB или USD, место траты и комментарий. Поиск, фильтры и итоги; расход с привязкой к дебетовой карте меняет её остаток.",
             action: HomeAction::Expenses,
+        },
+        HomeLink {
+            title: "Доходы",
+            description: "Учёт поступлений: дата, категория, сумма в RUB или USD и комментарий. Поиск, фильтры по периоду, категории, банку и карте; итоги отдельно по валютам.",
+            action: HomeAction::Incomes,
         },
         HomeLink {
             title: "Справочники",
@@ -61,19 +61,14 @@ pub(crate) fn described_sections() -> [HomeLink; 3] {
 pub(crate) fn all_page_links() -> [HomeLink; 8] {
     [
         HomeLink {
-            title: "Доходы",
-            description: "Поступления по категориям и валютам",
-            action: HomeAction::Incomes,
-        },
-        HomeLink {
             title: "Расходы",
             description: "Списания по категориям и местам трат",
             action: HomeAction::Expenses,
         },
         HomeLink {
-            title: "Накопления",
-            description: "Вклады и счета с условиями ставок",
-            action: HomeAction::Savings,
+            title: "Доходы",
+            description: "Поступления по категориям и валютам",
+            action: HomeAction::Incomes,
         },
         HomeLink {
             title: "Переводы",
@@ -84,6 +79,11 @@ pub(crate) fn all_page_links() -> [HomeLink; 8] {
             title: "Платёжные карты",
             description: "Дебетовые и кредитные карты, связанные вклады",
             action: HomeAction::PaymentDocuments,
+        },
+        HomeLink {
+            title: "Накопления",
+            description: "Вклады и счета с условиями ставок",
+            action: HomeAction::Savings,
         },
         HomeLink {
             title: "Анализ",
@@ -112,11 +112,11 @@ mod tests {
     fn described_sections_cover_three_main_pages() {
         let sections = described_sections();
         assert_eq!(sections.len(), 3);
-        assert_eq!(sections[0].title, "Доходы");
-        assert_eq!(sections[1].title, "Расходы");
+        assert_eq!(sections[0].title, "Расходы");
+        assert_eq!(sections[1].title, "Доходы");
         assert_eq!(sections[2].title, "Справочники");
-        assert_eq!(sections[0].action, HomeAction::Incomes);
-        assert_eq!(sections[1].action, HomeAction::Expenses);
+        assert_eq!(sections[0].action, HomeAction::Expenses);
+        assert_eq!(sections[1].action, HomeAction::Incomes);
         assert_eq!(sections[2].action, HomeAction::Directories);
         assert!(sections.iter().all(|section| {
             let length = section.description.trim().chars().count();
@@ -127,6 +127,20 @@ mod tests {
     #[test]
     fn page_links_cover_every_tab_except_home() {
         let links = all_page_links();
+        let titles: Vec<_> = links.iter().map(|link| link.title).collect();
+        assert_eq!(
+            titles,
+            [
+                "Расходы",
+                "Доходы",
+                "Переводы",
+                "Платёжные карты",
+                "Накопления",
+                "Анализ",
+                "Справочники",
+                "Настройки",
+            ]
+        );
         assert_eq!(links.len(), PageTab::ALL.len() - 1);
         let tabs: Vec<PageTab> = links
             .iter()
