@@ -145,6 +145,7 @@ pub(crate) struct PricesSection {
 struct PricesTable {
     page: WeakEntity<PricesSection>,
     rows: Vec<PriceRecord>,
+    places: Vec<ExpensePlace>,
     widths: Vec<f32>,
     sort: Option<(usize, ColumnSort)>,
 }
@@ -243,6 +244,24 @@ fn period_dates(
     })
 }
 
+/// Подпись места покупки в таблице цен: берётся из справочника, чтобы в ячейке
+/// отображался комментарий. Если места нет в справочнике, используется имя из записи.
+fn price_place_label(record: &PriceRecord, places: &[ExpensePlace]) -> String {
+    places
+        .iter()
+        .find(|place| place.id == record.expense_place_id)
+        .map_or_else(
+            || {
+                expense_place_label(&ExpensePlace {
+                    id: record.expense_place_id,
+                    name: record.expense_place_name.clone(),
+                    comment: None,
+                })
+            },
+            expense_place_label,
+        )
+}
+
 fn sort_prices(rows: &mut [PriceRecord], sort: Option<(usize, ColumnSort)>) {
     let Some((column, direction)) = sort else {
         rows.sort_by(|a, b| {
@@ -302,6 +321,7 @@ impl PricesSection {
                 PricesTable {
                     page: page.clone(),
                     rows: Vec::new(),
+                    places: Vec::new(),
                     widths,
                     sort: None,
                 },
@@ -436,7 +456,9 @@ impl PricesSection {
             Ok(rows) => {
                 self.entries = rows;
                 self.table.update(cx, |table, cx| {
-                    table.delegate_mut().set_rows(self.entries.clone());
+                    table
+                        .delegate_mut()
+                        .set_rows(self.entries.clone(), self.places.clone());
                     cx.notify();
                 });
                 self.message = None;
@@ -778,8 +800,9 @@ impl PricesSection {
 }
 
 impl PricesTable {
-    fn set_rows(&mut self, rows: Vec<PriceRecord>) {
+    fn set_rows(&mut self, rows: Vec<PriceRecord>, places: Vec<ExpensePlace>) {
         self.rows = rows;
+        self.places = places;
         sort_prices(&mut self.rows, self.sort);
     }
     fn set_widths(&mut self, widths: &[f32]) {
@@ -869,7 +892,7 @@ impl TableDelegate for PricesTable {
                 .into_any_element(),
             3 => div().child(record.currency.code()).into_any_element(),
             4 => div()
-                .child(record.expense_place_name.clone())
+                .child(price_place_label(&record, &self.places))
                 .into_any_element(),
             _ => {
                 let edit_page = self.page.clone();
@@ -1120,8 +1143,9 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::{
-        place_filter_items, sort_prices, widths_with_fixed_actions, PricePlaceItem, ACTIONS_WIDTH,
-        ALL_PLACES_LABEL, TABLE_HEIGHT, TABLE_ROW_HEIGHT, VISIBLE_TABLE_ROWS,
+        place_filter_items, price_place_label, sort_prices, widths_with_fixed_actions,
+        PricePlaceItem, ACTIONS_WIDTH, ALL_PLACES_LABEL, TABLE_HEIGHT, TABLE_ROW_HEIGHT,
+        VISIBLE_TABLE_ROWS,
     };
     use crate::gpui::helpers::expense_place_label;
 
@@ -1172,6 +1196,19 @@ mod tests {
         assert_eq!(widths[4], 250.0);
         assert_eq!(widths[5], ACTIONS_WIDTH);
         assert!(widths_with_fixed_actions(&[100.0]).is_none());
+    }
+
+    #[test]
+    fn price_table_place_cell_uses_unified_label() {
+        let row = record(7, "Хлеб", (2026, 2, 1), 1, Currency::Rub, "Магазин");
+        let places = vec![ExpensePlace {
+            id: 7,
+            name: "Магазин".to_owned(),
+            comment: Some("возле дома".to_owned()),
+        }];
+
+        assert_eq!(price_place_label(&row, &places), "Магазин (возле дома)");
+        assert_eq!(price_place_label(&row, &[]), "Магазин");
     }
 
     #[test]
