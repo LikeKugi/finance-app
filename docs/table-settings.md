@@ -9,6 +9,8 @@
 
 ## Savings
 
+- The columns are `Название`, `Банк`, `Сумма`, `Валюта`, `Базовая ставка`, `Ставка при выполнении условий`, `Порог`, `Дата открытия`, `Срок`, `Дата начисления процентов`, `Назначение процентов`, and `Действия`.
+- Saved widths use the `table_columns.savings.v3` setting. Widths stored under `table_columns.savings.v2` are reordered to follow their columns after `Название` and `Банк` were swapped; widths under the oldest `table_columns.savings` key are remapped for that swap and for the earlier `Дата открытия`/`Срок` swap. Invalid or missing values fall back to defaults.
 - The table has an outer border and internal vertical and horizontal borders for every column and row, including the headers.
 - The pinned `Действия` column is 160 logical pixels wide.
 - The `Изменить` and `Удалить` buttons are centered together in the column, leaving equal horizontal space on each side and keeping both buttons on one line.

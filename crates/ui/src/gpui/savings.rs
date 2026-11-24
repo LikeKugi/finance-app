@@ -38,8 +38,8 @@ const ALL_BANKS_LABEL: &str = "Все банки";
 const NO_CURRENCY_LABEL: &str = "Не указана";
 const TERMS: [SavingsTerm; 2] = [SavingsTerm::Limited, SavingsTerm::Unlimited];
 const COLUMN_HEADINGS: [&str; 12] = [
-    "Банк",
     "Название",
+    "Банк",
     "Сумма",
     "Валюта",
     "Базовая ставка",
@@ -52,15 +52,16 @@ const COLUMN_HEADINGS: [&str; 12] = [
     "Действия",
 ];
 const DEFAULT_COLUMN_WIDTHS: [f32; 12] = [
-    85.0, 120.0, 90.0, 70.0, 80.0, 170.0, 90.0, 95.0, 115.0, 105.0, 120.0, 160.0,
+    120.0, 85.0, 90.0, 70.0, 80.0, 170.0, 90.0, 95.0, 115.0, 105.0, 120.0, 160.0,
 ];
 const ACTIONS_COLUMN_WIDTH: f32 = 160.0;
 const MIN_COLUMN_WIDTH: f32 = 60.0;
 const MAX_COLUMN_WIDTH: f32 = 1200.0;
-const SAVINGS_COLUMN_WIDTHS_KEY: &str = "table_columns.savings.v2";
+const SAVINGS_COLUMN_WIDTHS_KEY: &str = "table_columns.savings.v3";
+const PREVIOUS_SAVINGS_COLUMN_WIDTHS_KEY: &str = "table_columns.savings.v2";
 const LEGACY_SAVINGS_COLUMN_WIDTHS_KEY: &str = "table_columns.savings";
-const COL_BANK: usize = 0;
-const COL_TITLE: usize = 1;
+const COL_TITLE: usize = 0;
+const COL_BANK: usize = 1;
 const COL_AMOUNT: usize = 2;
 const COL_BASE_RATE: usize = 4;
 const COL_RATE_AFTER_THRESHOLD: usize = 5;
@@ -1306,8 +1307,15 @@ fn parse_column_widths(value: &str) -> Option<Vec<f32>> {
     .then_some(widths)
 }
 
-fn parse_legacy_column_widths(value: &str) -> Option<Vec<f32>> {
+/// Ширины сохранялись по индексам; после перестановки `Название` и `Банк` возвращаем каждой её ширину.
+fn parse_previous_column_widths(value: &str) -> Option<Vec<f32>> {
     let mut widths = parse_column_widths(value)?;
+    widths.swap(COL_TITLE, COL_BANK);
+    Some(column_widths_with_fixed_actions(widths))
+}
+
+fn parse_legacy_column_widths(value: &str) -> Option<Vec<f32>> {
+    let mut widths = parse_previous_column_widths(value)?;
     widths.swap(COL_OPENED_DATE, COL_TERM);
     Some(column_widths_with_fixed_actions(widths))
 }
@@ -1320,28 +1328,43 @@ fn column_widths_with_fixed_actions(mut widths: Vec<f32>) -> Vec<f32> {
 }
 
 fn load_column_widths(database: &Database) -> Vec<f32> {
+    const INVALID_WIDTHS: &str =
+        "Некорректная сохранённая ширина колонок накоплений; использованы значения по умолчанию";
+    const READ_ERROR: &str = "Не удалось прочитать ширину колонок накоплений:";
+
     match finance_db::get_app_setting(database, column_widths_key()) {
         Ok(Some(value)) => parse_column_widths(&value)
             .map(column_widths_with_fixed_actions)
             .unwrap_or_else(|| {
-                eprintln!("Некорректная сохранённая ширина колонок накоплений; использованы значения по умолчанию");
+                eprintln!("{INVALID_WIDTHS}");
                 DEFAULT_COLUMN_WIDTHS.to_vec()
             }),
-        Ok(None) => match finance_db::get_app_setting(database, LEGACY_SAVINGS_COLUMN_WIDTHS_KEY) {
-            Ok(Some(value)) => parse_legacy_column_widths(&value).unwrap_or_else(|| {
-                eprintln!(
-                    "Некорректная сохранённая ширина колонок накоплений; использованы значения по умолчанию"
-                );
+        Ok(None) => match finance_db::get_app_setting(database, PREVIOUS_SAVINGS_COLUMN_WIDTHS_KEY)
+        {
+            Ok(Some(value)) => parse_previous_column_widths(&value).unwrap_or_else(|| {
+                eprintln!("{INVALID_WIDTHS}");
                 DEFAULT_COLUMN_WIDTHS.to_vec()
             }),
-            Ok(None) => DEFAULT_COLUMN_WIDTHS.to_vec(),
+            Ok(None) => {
+                match finance_db::get_app_setting(database, LEGACY_SAVINGS_COLUMN_WIDTHS_KEY) {
+                    Ok(Some(value)) => parse_legacy_column_widths(&value).unwrap_or_else(|| {
+                        eprintln!("{INVALID_WIDTHS}");
+                        DEFAULT_COLUMN_WIDTHS.to_vec()
+                    }),
+                    Ok(None) => DEFAULT_COLUMN_WIDTHS.to_vec(),
+                    Err(error) => {
+                        eprintln!("{READ_ERROR} {error}");
+                        DEFAULT_COLUMN_WIDTHS.to_vec()
+                    }
+                }
+            }
             Err(error) => {
-                eprintln!("Не удалось прочитать ширину колонок накоплений: {error}");
+                eprintln!("{READ_ERROR} {error}");
                 DEFAULT_COLUMN_WIDTHS.to_vec()
             }
         },
         Err(error) => {
-            eprintln!("Не удалось прочитать ширину колонок накоплений: {error}");
+            eprintln!("{READ_ERROR} {error}");
             DEFAULT_COLUMN_WIDTHS.to_vec()
         }
     }
@@ -1745,10 +1768,11 @@ mod tests {
     use super::{
         column_widths_key, column_widths_with_fixed_actions, destination_filter_labels,
         filter_savings, format_column_widths, load_column_widths, parse_column_widths,
-        parse_legacy_column_widths, sort_savings, term_filter_labels, tooltip_items, SavingsForm,
-        ACTIONS_COLUMN_WIDTH, BANK_FILTER_ITEM_ID, COLUMN_HEADINGS, COL_ACTIONS, COL_AMOUNT,
-        COL_BANK, COL_BASE_RATE, COL_OPENED_DATE, COL_RATE_AFTER_THRESHOLD, COL_TERM,
-        COL_THRESHOLD, COL_TITLE, DEFAULT_COLUMN_WIDTHS, LEGACY_SAVINGS_COLUMN_WIDTHS_KEY,
+        parse_legacy_column_widths, parse_previous_column_widths, sort_savings, term_filter_labels,
+        tooltip_items, SavingsForm, ACTIONS_COLUMN_WIDTH, BANK_FILTER_ITEM_ID, COLUMN_HEADINGS,
+        COL_ACTIONS, COL_AMOUNT, COL_BANK, COL_BASE_RATE, COL_OPENED_DATE,
+        COL_RATE_AFTER_THRESHOLD, COL_TERM, COL_THRESHOLD, COL_TITLE, DEFAULT_COLUMN_WIDTHS,
+        LEGACY_SAVINGS_COLUMN_WIDTHS_KEY, PREVIOUS_SAVINGS_COLUMN_WIDTHS_KEY,
     };
 
     fn valid_savings_form() -> SavingsForm {
@@ -1954,6 +1978,16 @@ mod tests {
     }
 
     #[test]
+    fn savings_column_order_places_title_before_bank() {
+        assert_eq!(COL_TITLE, 0);
+        assert_eq!(COL_BANK, 1);
+        assert_eq!(COLUMN_HEADINGS[COL_TITLE], "Название");
+        assert_eq!(COLUMN_HEADINGS[COL_BANK], "Банк");
+        assert_eq!(DEFAULT_COLUMN_WIDTHS[COL_TITLE], 120.0);
+        assert_eq!(DEFAULT_COLUMN_WIDTHS[COL_BANK], 85.0);
+    }
+
+    #[test]
     fn savings_filter_tooltip_items_keep_labels_and_have_unique_ids() {
         let labels = vec!["Все банки".to_owned(), "Банк".to_owned()];
 
@@ -2031,7 +2065,7 @@ mod tests {
     fn savings_column_widths_are_loaded_from_database_and_validated() {
         let database = filtered_database();
         let mut widths = DEFAULT_COLUMN_WIDTHS;
-        widths[1] = 245.0;
+        widths[COL_TITLE] = 245.0;
         widths[COL_ACTIONS] = 235.0;
         finance_db::set_app_setting(
             &database,
@@ -2045,9 +2079,35 @@ mod tests {
     }
 
     #[test]
+    fn previous_savings_column_widths_follow_swapped_title_and_bank() {
+        let database = filtered_database();
+        let mut previous_widths = DEFAULT_COLUMN_WIDTHS;
+        // V2 хранил ширину банка первым, а названия — вторым.
+        previous_widths.swap(COL_TITLE, COL_BANK);
+        previous_widths[0] = 245.0;
+        previous_widths[COL_ACTIONS] = 235.0;
+        finance_db::set_app_setting(
+            &database,
+            PREVIOUS_SAVINGS_COLUMN_WIDTHS_KEY,
+            &format_column_widths(&previous_widths),
+        )
+        .expect("previous column widths should be stored");
+
+        let mut expected = DEFAULT_COLUMN_WIDTHS;
+        expected[COL_BANK] = 245.0;
+        expected[COL_ACTIONS] = ACTIONS_COLUMN_WIDTH;
+        assert_eq!(
+            parse_previous_column_widths(&format_column_widths(&previous_widths)),
+            Some(expected.to_vec())
+        );
+        assert_eq!(load_column_widths(&database), expected);
+    }
+
+    #[test]
     fn legacy_savings_column_widths_are_remapped_to_the_new_column_order() {
         let database = filtered_database();
         let mut legacy_widths = DEFAULT_COLUMN_WIDTHS;
+        legacy_widths.swap(COL_TITLE, COL_BANK);
         legacy_widths[COL_OPENED_DATE] = 125.0;
         legacy_widths[COL_TERM] = 235.0;
         legacy_widths[COL_ACTIONS] = 220.0;
@@ -2060,6 +2120,7 @@ mod tests {
 
         let mut expected = legacy_widths;
         expected.swap(COL_OPENED_DATE, COL_TERM);
+        expected.swap(COL_TITLE, COL_BANK);
         expected[COL_ACTIONS] = ACTIONS_COLUMN_WIDTH;
         assert_eq!(
             parse_legacy_column_widths(&format_column_widths(&legacy_widths)),
