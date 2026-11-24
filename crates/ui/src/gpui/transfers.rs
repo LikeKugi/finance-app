@@ -31,7 +31,9 @@ use rust_decimal::Decimal;
 
 use super::helpers::DATE_FORMAT;
 use super::helpers::{format_currency, format_date};
-use super::selectable::{selectable_message, selectable_table_cell, selectable_text};
+use super::selectable::{
+    selectable_message, selectable_right_aligned_table_cell, selectable_table_cell, selectable_text,
+};
 
 const ALL_LABEL: &str = "Все";
 const EXTERNAL_LABEL: &str = "Внешние средства";
@@ -1860,16 +1862,13 @@ impl TableDelegate for TransfersTable {
                     row.destination_label.clone(),
                 ))
                 .into_any_element(),
-            4 => div()
-                .w_full()
-                .text_right()
-                .child(selectable_table_cell(
-                    "transfers",
-                    row.record.id,
-                    col_ix,
-                    format_currency(&row.record.amount, 2),
-                ))
-                .into_any_element(),
+            4 => selectable_right_aligned_table_cell(
+                "transfers",
+                row.record.id,
+                col_ix,
+                format_currency(&row.record.amount, 2),
+            )
+            .into_any_element(),
             5 => div()
                 .child(selectable_table_cell(
                     "transfers",

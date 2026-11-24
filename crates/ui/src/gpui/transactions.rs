@@ -32,7 +32,9 @@ use gpui_kit::*;
 use rust_decimal::Decimal;
 
 use super::helpers::{card_label, expense_place_label, format_currency, format_date, DATE_FORMAT};
-use super::selectable::{selectable_message, selectable_table_cell, selectable_text};
+use super::selectable::{
+    selectable_message, selectable_right_aligned_table_cell, selectable_table_cell, selectable_text,
+};
 use super::support::{
     category_tree_labels, collect_category_descendants, eligible_cards, text_suggestions,
     DIVISION_ROUNDING_WARNING,
@@ -2274,16 +2276,13 @@ impl TableDelegate for TransactionsTable {
                     transaction.category_name.clone(),
                 ))
                 .into_any_element(),
-            COL_AMOUNT => div()
-                .w_full()
-                .text_right()
-                .child(selectable_table_cell(
-                    "transactions",
-                    id,
-                    col_ix,
-                    format_currency(&transaction.amount, 2),
-                ))
-                .into_any_element(),
+            COL_AMOUNT => selectable_right_aligned_table_cell(
+                "transactions",
+                id,
+                col_ix,
+                format_currency(&transaction.amount, 2),
+            )
+            .into_any_element(),
             COL_CURRENCY => div()
                 .child(selectable_table_cell(
                     "transactions",

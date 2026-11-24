@@ -32,7 +32,9 @@ use gpui_kit::*;
 use rust_decimal::Decimal;
 
 use super::helpers::{card_label, expense_place_label, format_currency, format_date, DATE_FORMAT};
-use super::selectable::{selectable_message, selectable_table_cell, selectable_text};
+use super::selectable::{
+    selectable_message, selectable_right_aligned_table_cell, selectable_table_cell, selectable_text,
+};
 use super::support::{category_tree_labels, eligible_cards, text_suggestions};
 
 const ALL_LABEL: &str = "Все";
@@ -2144,16 +2146,13 @@ impl TableDelegate for CardsTable {
             COL_BANK => cell(col_ix, document.bank_name.clone()),
             COL_SYSTEM => cell(col_ix, document.payment_system.code().to_owned()),
             3 => cell(col_ix, document.card_type.title().to_owned()),
-            COL_AMOUNT => div()
-                .w_full()
-                .text_right()
-                .child(selectable_table_cell(
-                    "cards",
-                    document.id,
-                    col_ix,
-                    format_currency(&document.amount, 2),
-                ))
-                .into_any_element(),
+            COL_AMOUNT => selectable_right_aligned_table_cell(
+                "cards",
+                document.id,
+                col_ix,
+                format_currency(&document.amount, 2),
+            )
+            .into_any_element(),
             5 => cell(
                 col_ix,
                 document

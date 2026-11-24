@@ -58,6 +58,28 @@ pub(crate) fn selectable_table_cell(
     selectable_text(table_cell_element_id(table, row_id, column), text)
 }
 
+/// Выделяемый текст ячейки, прижатый к правому краю.
+///
+/// Не используйте для этого `text_right()` на самой ячейке: `gpui` рисует
+/// глифы с учётом `text_align`, но `TextLayout::position_for_index()`, по
+/// которому слой выделения считает квадраты, работает от левого края
+/// `bounds`. Из-за этого подсветка остаётся слева от цифр. Здесь вместо
+/// выравнивания текста используется flex-контейнер: он прижимает сам
+/// `SelectableText` к правому краю, поэтому его `bounds` совпадают с местом,
+/// где реально нарисован текст.
+pub(crate) fn selectable_right_aligned_table_cell(
+    table: &'static str,
+    row_id: impl std::fmt::Display,
+    column: usize,
+    text: impl Into<SharedString>,
+) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .justify_end()
+        .child(selectable_table_cell(table, row_id, column, text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::table_cell_element_id;

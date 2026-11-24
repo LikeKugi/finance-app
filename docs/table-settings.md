@@ -1,5 +1,9 @@
 # Table Settings
 
+## Text selection in numeric cells
+
+- Right-aligned selectable cells use a flex container with `justify_end` instead of `text_right()` on the text itself. GPUI applies `text_align` when painting glyphs but not in `TextLayout::position_for_index()`, which the selection layer uses for highlight quads. With `text_right()` the digits were painted at the right edge while the highlight stayed at the left edge of the cell. Do not reintroduce `text_right()` on `SelectableText` cells.
+
 ## Income and Expenses
 
 - Both tables have an outer border and internal vertical and horizontal borders for every column and row, including the headers.

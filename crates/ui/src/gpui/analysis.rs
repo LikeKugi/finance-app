@@ -29,7 +29,9 @@ use gpui_kit::*;
 use rust_decimal::prelude::ToPrimitive;
 
 use super::helpers::{format_currency, DATE_FORMAT};
-use super::selectable::{selectable_message, selectable_table_cell, selectable_text};
+use super::selectable::{
+    selectable_message, selectable_right_aligned_table_cell, selectable_table_cell, selectable_text,
+};
 
 const NONE_LABEL: &str = "Все";
 const ROW_HEIGHT: f32 = 30.0;
@@ -43,8 +45,11 @@ const COL_CATEGORY: usize = 0;
 const COL_TRANSACTION_COUNT: usize = 1;
 const COL_AMOUNT: usize = 2;
 const COL_SHARE: usize = 3;
-const PIE_CHART_COLORS: [u32; 8] = [
+const PIE_CHART_COLORS_DARK: [u32; 8] = [
     0x4e7db1, 0xcd6e5c, 0x379291, 0xcfb171, 0x7b5da0, 0xd79669, 0x61855b, 0xad5d76,
+];
+const PIE_CHART_COLORS_LIGHT: [u32; 8] = [
+    0x3975a8, 0xbd523c, 0x247e75, 0xa47b22, 0x78539b, 0xbe692c, 0x5a7d3c, 0xaa4c67,
 ];
 
 type Choice = Entity<SelectState<Vec<SharedString>>>;
@@ -344,36 +349,27 @@ impl TableDelegate for AnalysisTable {
                     category.category_name.clone(),
                 ))
                 .into_any_element(),
-            COL_TRANSACTION_COUNT => div()
-                .w_full()
-                .text_right()
-                .child(selectable_table_cell(
-                    "analysis",
-                    &row_id,
-                    col_ix,
-                    category.transaction_count.to_string(),
-                ))
-                .into_any_element(),
-            COL_AMOUNT => div()
-                .w_full()
-                .text_right()
-                .child(selectable_table_cell(
-                    "analysis",
-                    &row_id,
-                    col_ix,
-                    format_currency(&category.amount, 2),
-                ))
-                .into_any_element(),
-            COL_SHARE => div()
-                .w_full()
-                .text_right()
-                .child(selectable_table_cell(
-                    "analysis",
-                    &row_id,
-                    col_ix,
-                    format!("{}%", category.share_percent.round_dp(2)),
-                ))
-                .into_any_element(),
+            COL_TRANSACTION_COUNT => selectable_right_aligned_table_cell(
+                "analysis",
+                &row_id,
+                col_ix,
+                category.transaction_count.to_string(),
+            )
+            .into_any_element(),
+            COL_AMOUNT => selectable_right_aligned_table_cell(
+                "analysis",
+                &row_id,
+                col_ix,
+                format_currency(&category.amount, 2),
+            )
+            .into_any_element(),
+            COL_SHARE => selectable_right_aligned_table_cell(
+                "analysis",
+                &row_id,
+                col_ix,
+                format!("{}%", category.share_percent.round_dp(2)),
+            )
+            .into_any_element(),
             _ => div().into_any_element(),
         }
     }
@@ -398,9 +394,14 @@ fn pie_chart_slices(
         .collect()
 }
 
-fn pie_chart_color(category_id: i64) -> Hsla {
-    let index = category_id.rem_euclid(PIE_CHART_COLORS.len() as i64) as usize;
-    Hsla::from(rgb(PIE_CHART_COLORS[index]))
+fn pie_chart_color(category_id: i64, is_dark: bool) -> Hsla {
+    let colors = if is_dark {
+        &PIE_CHART_COLORS_DARK
+    } else {
+        &PIE_CHART_COLORS_LIGHT
+    };
+    let index = category_id.rem_euclid(colors.len() as i64) as usize;
+    Hsla::from(rgb(colors[index]))
 }
 
 /// Вершины сектора: центр и дуга, координаты относительно левого верхнего угла.
@@ -424,7 +425,7 @@ fn pie_slice_points(
     points
 }
 
-fn pie_chart(slices: Vec<(i64, f32)>) -> impl IntoElement {
+fn pie_chart(slices: Vec<(i64, f32)>, is_dark: bool) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
@@ -458,7 +459,7 @@ fn pie_chart(slices: Vec<(i64, f32)>) -> impl IntoElement {
                 // завершаться ошибкой; при сбое сектор не рисуется, а таблица
                 // и легенда остаются источником данных.
                 if let Ok(path) = builder.build() {
-                    window.paint_path(path, pie_chart_color(*category_id));
+                    window.paint_path(path, pie_chart_color(*category_id, is_dark));
                 }
                 start = end;
             }
@@ -1150,6 +1151,7 @@ impl AnalysisPage {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         const LEGEND_VISIBLE_MAX: usize = 4;
+        let is_dark = cx.theme().is_dark();
         div().flex().gap_4().children(
             [TransactionKind::Income, TransactionKind::Expense]
                 .into_iter()
@@ -1199,24 +1201,23 @@ impl AnalysisPage {
                             slices[..LEGEND_VISIBLE_MAX.min(slices.len())].to_vec();
                         let hidden: Vec<_> =
                             slices[LEGEND_VISIBLE_MAX.min(slices.len())..].to_vec();
-                        let legend_item = |slice: &PieChartSlice| {
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .size(px(12.0))
-                                        .flex_none()
-                                        .rounded_sm()
-                                        .bg(pie_chart_color(slice.category.category_id)),
-                                )
-                                .child(format!(
-                                    "{} — {}%",
-                                    slice.category.category_name,
-                                    slice.category.share_percent.round_dp(2)
-                                ))
-                        };
+                        let legend_item =
+                            |slice: &PieChartSlice| {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div().size(px(12.0)).flex_none().rounded_sm().bg(
+                                            pie_chart_color(slice.category.category_id, is_dark),
+                                        ),
+                                    )
+                                    .child(format!(
+                                        "{} — {}%",
+                                        slice.category.category_name,
+                                        slice.category.share_percent.round_dp(2)
+                                    ))
+                            };
                         // Соберём данные скрытых элементов как owned-значения для замыкания on_click.
                         let hidden_data: Vec<(i64, String, f64)> = hidden
                             .iter()
@@ -1272,7 +1273,9 @@ impl AnalysisPage {
                                                                     .size(px(12.0))
                                                                     .flex_none()
                                                                     .rounded_sm()
-                                                                    .bg(pie_chart_color(*cat_id)),
+                                                                    .bg(pie_chart_color(
+                                                                        *cat_id, is_dark,
+                                                                    )),
                                                             )
                                                             .child(format!(
                                                                 "{} — {:.2}%",
@@ -1303,7 +1306,7 @@ impl AnalysisPage {
                                 div()
                                     .flex()
                                     .gap_3()
-                                    .child(pie_chart(geometry))
+                                    .child(pie_chart(geometry, is_dark))
                                     .child(legend),
                             ),
                         );
@@ -1470,7 +1473,8 @@ mod tests {
         analysis_balance_lines, parse_filters, pie_chart_color, pie_chart_slices, pie_slice_points,
         sort_analysis_categories, AnalysisFilters, AnalysisTable, CategoryFilterItem,
         CategoryPicker, RequestTracker, COL_AMOUNT, COL_CATEGORY, COL_SHARE, COL_TRANSACTION_COUNT,
-        EXPENSE_CATEGORY_FILTER_ITEM_ID, INCOME_CATEGORY_FILTER_ITEM_ID, PIE_CHART_COLORS,
+        EXPENSE_CATEGORY_FILTER_ITEM_ID, INCOME_CATEGORY_FILTER_ITEM_ID, PIE_CHART_COLORS_DARK,
+        PIE_CHART_COLORS_LIGHT,
     };
     use chrono::NaiveDate;
     use finance_core::{
@@ -1861,20 +1865,26 @@ mod tests {
     }
 
     #[test]
-    fn pie_chart_uses_the_configured_eight_color_palette() {
+    fn pie_chart_uses_the_configured_palette_for_each_theme() {
         assert_eq!(
-            PIE_CHART_COLORS,
+            PIE_CHART_COLORS_DARK,
             [0x4e7db1, 0xcd6e5c, 0x379291, 0xcfb171, 0x7b5da0, 0xd79669, 0x61855b, 0xad5d76,]
+        );
+        assert_eq!(
+            PIE_CHART_COLORS_LIGHT,
+            [0x3975a8, 0xbd523c, 0x247e75, 0xa47b22, 0x78539b, 0xbe692c, 0x5a7d3c, 0xaa4c67,]
         );
     }
 
     #[test]
-    fn pie_chart_colors_repeat_for_categories_outside_the_palette() {
-        for category_id in -8..8 {
-            assert_eq!(
-                pie_chart_color(category_id),
-                pie_chart_color(category_id + PIE_CHART_COLORS.len() as i64)
-            );
+    fn pie_chart_colors_repeat_for_categories_outside_each_palette() {
+        for is_dark in [false, true] {
+            for category_id in -8..8 {
+                assert_eq!(
+                    pie_chart_color(category_id, is_dark),
+                    pie_chart_color(category_id + 8, is_dark)
+                );
+            }
         }
     }
 

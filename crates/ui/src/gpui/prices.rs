@@ -25,7 +25,9 @@ use gpui_kit::*;
 use rust_decimal::Decimal;
 
 use super::helpers::{expense_place_label, format_currency, format_date, DATE_FORMAT};
-use super::selectable::{selectable_message, selectable_table_cell, selectable_text};
+use super::selectable::{
+    selectable_message, selectable_right_aligned_table_cell, selectable_table_cell, selectable_text,
+};
 use super::support::{date_period_range, text_suggestions, DatePeriod, DatePeriodRange};
 
 const ALL_PLACES_LABEL: &str = "Все места";
@@ -899,16 +901,13 @@ impl TableDelegate for PricesTable {
                     format_date(record.date),
                 ))
                 .into_any_element(),
-            2 => div()
-                .w_full()
-                .text_right()
-                .child(selectable_table_cell(
-                    "prices",
-                    record.id,
-                    col_ix,
-                    format_currency(&record.amount, 2),
-                ))
-                .into_any_element(),
+            2 => selectable_right_aligned_table_cell(
+                "prices",
+                record.id,
+                col_ix,
+                format_currency(&record.amount, 2),
+            )
+            .into_any_element(),
             3 => div()
                 .child(selectable_table_cell(
                     "prices",

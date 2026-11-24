@@ -31,7 +31,9 @@ use gpui_kit::*;
 
 use super::helpers::DATE_FORMAT;
 use super::helpers::{format_currency, format_date};
-use super::selectable::{selectable_message, selectable_table_cell, selectable_text};
+use super::selectable::{
+    selectable_message, selectable_right_aligned_table_cell, selectable_table_cell, selectable_text,
+};
 
 const ALL_LABEL: &str = "Все";
 const ALL_BANKS_LABEL: &str = "Все банки";
@@ -1587,16 +1589,13 @@ impl TableDelegate for SavingsTable {
                     account.title.clone(),
                 ))
                 .into_any_element(),
-            COL_AMOUNT => div()
-                .w_full()
-                .text_right()
-                .child(selectable_table_cell(
-                    "savings",
-                    account.id,
-                    col_ix,
-                    format_currency(&account.amount, 2),
-                ))
-                .into_any_element(),
+            COL_AMOUNT => selectable_right_aligned_table_cell(
+                "savings",
+                account.id,
+                col_ix,
+                format_currency(&account.amount, 2),
+            )
+            .into_any_element(),
             3 => div()
                 .child(selectable_table_cell(
                     "savings",
