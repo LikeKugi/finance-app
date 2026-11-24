@@ -994,7 +994,11 @@ impl SavingsPage {
             state.set_value(initial_amount, window, cx);
             state
         });
-        let comment = cx.new(|cx| TextareaState::new(window, cx).rows(3));
+        let comment = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .rows(3)
+                .placeholder("Введите комментарий")
+        });
 
         let mut subscriptions = vec![
             cx.subscribe_in(
@@ -1597,6 +1601,7 @@ impl SavingsPage {
                         "Дата начисления процентов",
                         250.0,
                         DatePicker::new(&form.accrual_date)
+                            .placeholder("Выбрать дату")
                             .cleanable(true)
                             .into_any_element(),
                     ))
@@ -1627,6 +1632,7 @@ impl SavingsPage {
                             "Дата дохода",
                             230.0,
                             DatePicker::new(&form.income_date)
+                                .placeholder("Выбрать дату")
                                 .cleanable(true)
                                 .into_any_element(),
                         ))
