@@ -380,18 +380,6 @@ fn selected_date(state: &DatePickerState) -> Option<NaiveDate> {
     }
 }
 
-fn income_date_after_accrual_change(
-    accrual_date: Option<NaiveDate>,
-    current_income_date: Option<NaiveDate>,
-    manually_edited: bool,
-) -> Option<NaiveDate> {
-    if manually_edited {
-        current_income_date
-    } else {
-        accrual_date
-    }
-}
-
 fn default_interest_amount(
     account: &SavingsAccount,
     higher_rate_applied: bool,
@@ -528,8 +516,6 @@ struct InterestAccrualForm {
     interest_destination_select: Choice,
     create_income: bool,
     income_date: Entity<DatePickerState>,
-    automatic_income_date: Option<NaiveDate>,
-    manual_income_date: bool,
     income_amount: Entity<InputState>,
     income_currency: Option<Currency>,
     income_currency_select: Choice,
@@ -1002,35 +988,10 @@ impl SavingsPage {
 
         let mut subscriptions = vec![
             cx.subscribe_in(
-                &accrual_date,
-                window,
-                |this: &mut Self, state, _: &DatePickerEvent, window, cx| {
-                    let accrual_date = selected_date(state.read(cx));
-                    let date_to_set = this.interest_form.as_mut().and_then(|form| {
-                        let current_income_date = selected_date(form.income_date.read(cx));
-                        let income_date = income_date_after_accrual_change(
-                            accrual_date,
-                            current_income_date,
-                            form.manual_income_date,
-                        );
-                        form.automatic_income_date = accrual_date;
-                        (!form.manual_income_date).then(|| (form.income_date.clone(), income_date))
-                    });
-                    if let Some((income_date, date)) = date_to_set {
-                        income_date.update(cx, |state, cx| {
-                            state.set_date(Date::Single(date), window, cx)
-                        });
-                    }
-                    cx.notify();
-                },
-            ),
-            cx.subscribe_in(
                 &income_date,
                 window,
-                |this: &mut Self, state, _: &DatePickerEvent, _, cx| {
-                    let income_date = selected_date(state.read(cx));
+                |this: &mut Self, _state, _: &DatePickerEvent, _, cx| {
                     if let Some(form) = this.interest_form.as_mut() {
-                        form.manual_income_date = income_date != form.automatic_income_date;
                         form.error = None;
                     }
                     cx.notify();
@@ -1113,8 +1074,6 @@ impl SavingsPage {
             interest_destination_select,
             create_income: false,
             income_date,
-            automatic_income_date: accrual_date_value,
-            manual_income_date: false,
             income_amount,
             income_currency: Some(income_currency),
             income_currency_select,
@@ -2683,17 +2642,16 @@ mod tests {
     use super::{
         build_interest_accrual_update, column_widths_key, column_widths_with_fixed_actions,
         default_interest_amount, destination_filter_labels, filter_savings, format_column_widths,
-        income_date_after_accrual_change, interest_amount_for_rate_change,
-        interest_recipient_choices, load_column_widths, parse_column_widths,
-        parse_legacy_column_widths, parse_previous_column_widths, parse_v3_column_widths,
-        savings_group_headers, sort_savings, term_filter_labels, tooltip_items,
-        InterestAccrualInput, SavingsForm, ACTIONS_COLUMN_WIDTH, BANK_FILTER_ITEM_ID,
-        COLUMN_HEADINGS, COL_ACTIONS, COL_AMOUNT, COL_BANK, COL_BASE_RATE, COL_INTEREST_ACTION,
-        COL_INTEREST_DATE, COL_OPENED_DATE, COL_RATE_AFTER_THRESHOLD, COL_TERM, COL_THRESHOLD,
-        COL_TITLE, DEFAULT_COLUMN_WIDTHS, INTEREST_ACTION_COLUMN_WIDTH, INTEREST_GROUP_LABEL,
-        INTEREST_GROUP_SPAN, LEGACY_SAVINGS_COLUMN_WIDTHS_KEY, OLDER_SAVINGS_COLUMN_WIDTHS_KEY,
-        PREVIOUS_SAVINGS_COLUMN_WIDTHS_KEY, RATE_GROUP_LABEL, RATE_GROUP_SPAN,
-        SAVINGS_COLUMN_WIDTHS_KEY,
+        interest_amount_for_rate_change, interest_recipient_choices, load_column_widths,
+        parse_column_widths, parse_legacy_column_widths, parse_previous_column_widths,
+        parse_v3_column_widths, savings_group_headers, sort_savings, term_filter_labels,
+        tooltip_items, InterestAccrualInput, SavingsForm, ACTIONS_COLUMN_WIDTH,
+        BANK_FILTER_ITEM_ID, COLUMN_HEADINGS, COL_ACTIONS, COL_AMOUNT, COL_BANK, COL_BASE_RATE,
+        COL_INTEREST_ACTION, COL_INTEREST_DATE, COL_OPENED_DATE, COL_RATE_AFTER_THRESHOLD,
+        COL_TERM, COL_THRESHOLD, COL_TITLE, DEFAULT_COLUMN_WIDTHS, INTEREST_ACTION_COLUMN_WIDTH,
+        INTEREST_GROUP_LABEL, INTEREST_GROUP_SPAN, LEGACY_SAVINGS_COLUMN_WIDTHS_KEY,
+        OLDER_SAVINGS_COLUMN_WIDTHS_KEY, PREVIOUS_SAVINGS_COLUMN_WIDTHS_KEY, RATE_GROUP_LABEL,
+        RATE_GROUP_SPAN, SAVINGS_COLUMN_WIDTHS_KEY,
     };
 
     const DEFAULT_V3_COLUMN_WIDTHS: [f32; 12] = [
@@ -2768,34 +2726,6 @@ mod tests {
         assert_eq!(
             default_interest_amount(&account, true),
             Ok(Decimal::new(725, 1))
-        );
-    }
-
-    #[test]
-    fn income_date_follows_accrual_date_while_not_manually_edited() {
-        let accrual_date = NaiveDate::from_ymd_opt(2026, 11, 25);
-
-        assert_eq!(
-            income_date_after_accrual_change(
-                accrual_date,
-                NaiveDate::from_ymd_opt(2026, 11, 20),
-                false,
-            ),
-            accrual_date
-        );
-    }
-
-    #[test]
-    fn manually_edited_income_date_is_not_replaced_by_accrual_date() {
-        let manual_date = NaiveDate::from_ymd_opt(2026, 11, 18);
-
-        assert_eq!(
-            income_date_after_accrual_change(
-                NaiveDate::from_ymd_opt(2026, 11, 25),
-                manual_date,
-                true,
-            ),
-            manual_date
         );
     }
 
