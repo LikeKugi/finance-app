@@ -39,13 +39,19 @@ const TABLE_ROW_HEIGHT: f32 = 32.0;
 /// Высота таблицы: 10 строк данных плюс строка заголовка.
 const TABLE_HEIGHT: f32 = TABLE_ROW_HEIGHT * (VISIBLE_TABLE_ROWS as f32 + 1.0);
 const ACTIONS_WIDTH: f32 = 160.0;
+/// Ширина колонки «Название» в таблице банков. Используется как ориентир для
+/// ширины основной части данных таблицы валют.
+const BANK_NAME_COLUMN_WIDTH: f32 = 480.0;
 /// Ширины колонок таблицы валют подобраны так, чтобы она помещалась в правую
 /// половину страницы при минимальном разрешении 1280×720.
 const CURRENCY_COLUMN_WIDTH: f32 = 80.0;
 const CURRENCY_RATE_COLUMN_WIDTH: f32 = 160.0;
-/// Кнопка «Назначить основной» рендерится в этой колонке и не должна
-/// обрезаться, поэтому ширина рассчитана под её полную подпись.
-const CURRENCY_PRIMARY_COLUMN_WIDTH: f32 = 180.0;
+/// «Валюта», «Курс» и «Основная» вместе занимают столько же, сколько колонка
+/// «Название» в таблице банков. Этого достаточно для полной подписи кнопки
+/// «Назначить основной», а ширина всей таблицы вместе с «Действиями»
+/// совпадает с шириной таблицы банков.
+const CURRENCY_PRIMARY_COLUMN_WIDTH: f32 =
+    BANK_NAME_COLUMN_WIDTH - CURRENCY_COLUMN_WIDTH - CURRENCY_RATE_COLUMN_WIDTH;
 const CURRENCY_ACTIONS_WIDTH: f32 = 160.0;
 const MAKE_PRIMARY_BUTTON_LABEL: &str = "Назначить основной";
 const EDIT_CURRENCY_BUTTON_LABEL: &str = "Изменить";
@@ -1172,7 +1178,7 @@ impl TableDelegate for BanksTable {
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
         match col_ix {
-            0 => directory_column("name", "Название", 480.0, false),
+            0 => directory_column("name", "Название", BANK_NAME_COLUMN_WIDTH, false),
             _ => directory_column("actions", "Действия", ACTIONS_WIDTH, true),
         }
     }
@@ -1735,8 +1741,8 @@ impl Render for DirectoriesPage {
 mod tests {
     use super::{
         currency_cell_label, currency_column_widths, directory_column, parent_category_options,
-        Category, ACTIONS_WIDTH, EDIT_CURRENCY_BUTTON_LABEL, MAKE_PRIMARY_BUTTON_LABEL,
-        TABLE_HEIGHT, TABLE_ROW_HEIGHT, VISIBLE_TABLE_ROWS,
+        Category, ACTIONS_WIDTH, BANK_NAME_COLUMN_WIDTH, EDIT_CURRENCY_BUTTON_LABEL,
+        MAKE_PRIMARY_BUTTON_LABEL, TABLE_HEIGHT, TABLE_ROW_HEIGHT, VISIBLE_TABLE_ROWS,
     };
     use finance_core::CurrencyDefinition;
     use gpui_kit::component::table::ColumnFixed;
@@ -1812,11 +1818,16 @@ mod tests {
     }
 
     #[test]
-    fn currency_columns_reserve_enough_space_for_row_buttons() {
+    fn currency_columns_match_bank_name_width() {
         let widths = currency_column_widths();
 
-        assert_eq!(widths, [80.0, 160.0, 180.0, 160.0]);
-        assert_eq!(widths.iter().sum::<f32>(), 580.0);
+        assert_eq!(widths, [80.0, 160.0, 240.0, 160.0]);
+        assert_eq!(widths.iter().sum::<f32>(), 640.0);
+        assert_eq!(widths[0] + widths[1] + widths[2], BANK_NAME_COLUMN_WIDTH);
+        assert_eq!(
+            widths.iter().sum::<f32>(),
+            BANK_NAME_COLUMN_WIDTH + ACTIONS_WIDTH
+        );
         // Ширина колонки «Основная» должна вмещать кнопку «Назначить основной»,
         // иначе её подпись обрезается многоточием.
         assert!(widths[2] >= 180.0);
@@ -1841,7 +1852,7 @@ mod tests {
         assert_eq!(f32::from(actions.width), ACTIONS_WIDTH);
         assert!(!actions.selectable);
 
-        let name = directory_column("name", "Название", 480.0, false);
+        let name = directory_column("name", "Название", BANK_NAME_COLUMN_WIDTH, false);
         assert_eq!(name.fixed, None);
         assert!(name.selectable);
     }
