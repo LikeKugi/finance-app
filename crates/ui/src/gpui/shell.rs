@@ -11,7 +11,7 @@ use super::payment_documents::PaymentDocumentsPage;
 use super::quick_forms::QuickTransactionForm;
 use super::savings::SavingsPage;
 use super::selectable::selectable_text;
-use super::settings::SettingsPage;
+use super::settings::{SettingsPage, StartFullscreenPreference};
 use super::transactions::TransactionsPage;
 use super::transfers::TransfersPage;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -274,11 +274,16 @@ pub fn run(database: Database, database_path: PathBuf, app_version: &'static str
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             init(cx);
+            let database = Rc::new(database);
+            let start_fullscreen = StartFullscreenPreference::load(&database);
+            let min_size = size(px(1280.0), px(720.0));
             let options = WindowOptions {
-                window_min_size: Some(size(px(1280.0), px(720.0))),
+                window_bounds: start_fullscreen
+                    .enabled
+                    .then(|| WindowBounds::Fullscreen(Bounds::centered(None, min_size, cx))),
+                window_min_size: Some(min_size),
                 ..WindowOptions::default()
             };
-            let database = Rc::new(database);
             open_window(options, cx, move |window, cx| {
                 let quick_form =
                     cx.new(|cx| QuickTransactionForm::new(database.clone(), window, cx));
@@ -300,6 +305,7 @@ pub fn run(database: Database, database_path: PathBuf, app_version: &'static str
                         database.clone(),
                         database_path.clone(),
                         app_version,
+                        start_fullscreen,
                         window,
                         cx,
                     )

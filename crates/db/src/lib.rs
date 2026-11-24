@@ -7362,6 +7362,29 @@ mod tests {
     }
 
     #[test]
+    fn start_fullscreen_setting_can_be_read_and_updated() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = initialize(&directory.path().join("data.db")).unwrap();
+
+        assert_eq!(
+            get_app_setting(&database, "start_fullscreen").unwrap(),
+            None
+        );
+
+        set_app_setting(&database, "start_fullscreen", "true").unwrap();
+        assert_eq!(
+            get_app_setting(&database, "start_fullscreen").unwrap(),
+            Some("true".to_owned())
+        );
+
+        set_app_setting(&database, "start_fullscreen", "false").unwrap();
+        assert_eq!(
+            get_app_setting(&database, "start_fullscreen").unwrap(),
+            Some("false".to_owned())
+        );
+    }
+
+    #[test]
     fn export_database_backup_includes_committed_wal_changes() {
         let directory = tempfile::tempdir().unwrap();
         let database_path = directory.path().join("data.db");

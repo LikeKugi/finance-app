@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use finance_db::Database;
 use gpui_kit::component::button::Button;
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::AlertDialog;
 use gpui_kit::component::radio::{Radio, RadioGroup};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Theme, ThemeMode, WindowExt as _};
@@ -57,6 +58,51 @@ impl ThemePreference {
     }
 }
 
+/// Сохранённый выбор полноэкранного запуска и причина безопасного отката к оконному режиму.
+pub(crate) struct StartFullscreenPreference {
+    pub(crate) enabled: bool,
+    pub(crate) error: Option<String>,
+}
+
+impl StartFullscreenPreference {
+    const SETTING_KEY: &'static str = "start_fullscreen";
+
+    pub(crate) fn load(database: &Database) -> Self {
+        match finance_db::get_app_setting(database, Self::SETTING_KEY) {
+            Ok(value) => Self::from_setting(value.as_deref()),
+            Err(error) => Self {
+                enabled: false,
+                error: Some(format!(
+                    "Не удалось прочитать настройку полноэкранного запуска: {error}"
+                )),
+            },
+        }
+    }
+
+    fn from_setting(value: Option<&str>) -> Self {
+        match value {
+            None => Self {
+                enabled: false,
+                error: None,
+            },
+            Some("true") => Self {
+                enabled: true,
+                error: None,
+            },
+            Some("false") => Self {
+                enabled: false,
+                error: None,
+            },
+            Some(value) => Self {
+                enabled: false,
+                error: Some(format!(
+                    "Некорректная настройка полноэкранного запуска («{value}»); используется оконный режим"
+                )),
+            },
+        }
+    }
+}
+
 enum OperationOutcome {
     BackupExported(PathBuf),
     ImportPrepared,
@@ -67,6 +113,8 @@ pub(crate) struct SettingsPage {
     database_path: PathBuf,
     app_version: &'static str,
     theme: ThemePreference,
+    start_fullscreen: bool,
+    start_fullscreen_error: Option<String>,
     message: Option<(String, bool)>,
     operation_message: Option<String>,
     busy: bool,
@@ -77,6 +125,7 @@ impl SettingsPage {
         database: Rc<Database>,
         database_path: PathBuf,
         app_version: &'static str,
+        start_fullscreen: StartFullscreenPreference,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -85,6 +134,8 @@ impl SettingsPage {
             database_path,
             app_version,
             theme: ThemePreference::System,
+            start_fullscreen: start_fullscreen.enabled,
+            start_fullscreen_error: start_fullscreen.error,
             message: None,
             operation_message: None,
             busy: false,
@@ -119,6 +170,25 @@ impl SettingsPage {
             Ok(()) => {
                 self.theme = theme;
                 theme.apply(window, cx);
+            }
+            Err(error) => self.message = Some((error.to_string(), true)),
+        }
+        cx.notify();
+    }
+
+    fn select_start_fullscreen(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if enabled == self.start_fullscreen {
+            return;
+        }
+        let value = if enabled { "true" } else { "false" };
+        match finance_db::set_app_setting(
+            &self.database,
+            StartFullscreenPreference::SETTING_KEY,
+            value,
+        ) {
+            Ok(()) => {
+                self.start_fullscreen = enabled;
+                self.start_fullscreen_error = None;
             }
             Err(error) => self.message = Some((error.to_string(), true)),
         }
@@ -281,6 +351,29 @@ impl Render for SettingsPage {
             )
             .child(
                 panel()
+                    .child(heading("Запуск приложения"))
+                    .child(
+                        Checkbox::new("start-fullscreen")
+                            .label("Открывать приложение в полноэкранном режиме")
+                            .checked(self.start_fullscreen)
+                            .on_click(cx.listener(|page, checked: &bool, _, cx| {
+                                page.select_start_fullscreen(*checked, cx);
+                            })),
+                    )
+                    .child(selectable_text(
+                        "settings-start-fullscreen-note",
+                        "Новый режим окна будет применён при следующем запуске приложения.",
+                    ))
+                    .when_some(self.start_fullscreen_error.clone(), |p, text| {
+                        p.child(selectable_message(
+                            "settings-start-fullscreen-error",
+                            text,
+                            cx.theme().danger,
+                        ))
+                    }),
+            )
+            .child(
+                panel()
                     .child(heading("Резервная копия данных"))
                     .child(
                         selectable_text(
@@ -338,7 +431,7 @@ impl Render for SettingsPage {
 
 #[cfg(test)]
 mod tests {
-    use super::ThemePreference;
+    use super::{StartFullscreenPreference, ThemePreference};
 
     #[test]
     fn theme_setting_values_map_to_supported_preferences() {
@@ -365,5 +458,31 @@ mod tests {
                 Some(theme)
             );
         }
+    }
+
+    #[test]
+    fn start_fullscreen_setting_defaults_to_windowed_mode() {
+        let preference = StartFullscreenPreference::from_setting(None);
+        assert!(!preference.enabled);
+        assert!(preference.error.is_none());
+    }
+
+    #[test]
+    fn start_fullscreen_setting_values_select_the_window_mode() {
+        let enabled = StartFullscreenPreference::from_setting(Some("true"));
+        assert!(enabled.enabled);
+        assert!(enabled.error.is_none());
+
+        let disabled = StartFullscreenPreference::from_setting(Some("false"));
+        assert!(!disabled.enabled);
+        assert!(disabled.error.is_none());
+    }
+
+    #[test]
+    fn invalid_start_fullscreen_setting_falls_back_to_windowed_mode() {
+        let preference = StartFullscreenPreference::from_setting(Some("unknown"));
+        assert!(!preference.enabled);
+        let error = preference.error.expect("invalid value should be reported");
+        assert!(error.contains("оконный режим"), "unexpected error: {error}");
     }
 }
