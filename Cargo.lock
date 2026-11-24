@@ -1673,6 +1673,8 @@ dependencies = [
  "gpui-kit",
  "rfd",
  "rust_decimal",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]

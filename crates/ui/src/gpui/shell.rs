@@ -11,7 +11,7 @@ use super::payment_documents::PaymentDocumentsPage;
 use super::quick_forms::QuickTransactionForm;
 use super::savings::SavingsPage;
 use super::selectable::selectable_text;
-use super::settings::{SettingsPage, StartFullscreenPreference};
+use super::settings::{register_dark_theme, SettingsPage, StartFullscreenPreference};
 use super::transactions::TransactionsPage;
 use super::transfers::TransfersPage;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -274,6 +274,7 @@ pub fn run(database: Database, database_path: PathBuf, app_version: &'static str
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             init(cx);
+            register_dark_theme(cx);
             let database = Rc::new(database);
             let start_fullscreen = StartFullscreenPreference::load(&database);
             let min_size = size(px(1280.0), px(720.0));

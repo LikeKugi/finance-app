@@ -44,7 +44,7 @@ const COL_TRANSACTION_COUNT: usize = 1;
 const COL_AMOUNT: usize = 2;
 const COL_SHARE: usize = 3;
 const PIE_CHART_COLORS: [u32; 8] = [
-    0x4682b4, 0xe76f51, 0x2a9d8f, 0xe9c46a, 0x805aa0, 0xf4a261, 0x5e8c50, 0xbe5a70,
+    0x4e7db1, 0xcd6e5c, 0x379291, 0xcfb171, 0x7b5da0, 0xd79669, 0x61855b, 0xad5d76,
 ];
 
 type Choice = Entity<SelectState<Vec<SharedString>>>;
@@ -1467,10 +1467,10 @@ fn render_balance_summary(summary: &AnalysisSummary, danger: Hsla) -> Div {
 mod tests {
     // Глоб-импорт `gpui_kit::*` затеняет атрибут `#[test]`, поэтому имена импортируются явно.
     use super::{
-        analysis_balance_lines, parse_filters, pie_chart_slices, pie_slice_points,
+        analysis_balance_lines, parse_filters, pie_chart_color, pie_chart_slices, pie_slice_points,
         sort_analysis_categories, AnalysisFilters, AnalysisTable, CategoryFilterItem,
         CategoryPicker, RequestTracker, COL_AMOUNT, COL_CATEGORY, COL_SHARE, COL_TRANSACTION_COUNT,
-        EXPENSE_CATEGORY_FILTER_ITEM_ID, INCOME_CATEGORY_FILTER_ITEM_ID,
+        EXPENSE_CATEGORY_FILTER_ITEM_ID, INCOME_CATEGORY_FILTER_ITEM_ID, PIE_CHART_COLORS,
     };
     use chrono::NaiveDate;
     use finance_core::{
@@ -1858,6 +1858,24 @@ mod tests {
         let last = points[points.len() - 1];
         assert!((first.0 - 15.0).abs() < 1e-4 && (first.1 - 10.0).abs() < 1e-4);
         assert!((last.0 - 10.0).abs() < 1e-4 && (last.1 - 15.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn pie_chart_uses_the_configured_eight_color_palette() {
+        assert_eq!(
+            PIE_CHART_COLORS,
+            [0x4e7db1, 0xcd6e5c, 0x379291, 0xcfb171, 0x7b5da0, 0xd79669, 0x61855b, 0xad5d76,]
+        );
+    }
+
+    #[test]
+    fn pie_chart_colors_repeat_for_categories_outside_the_palette() {
+        for category_id in -8..8 {
+            assert_eq!(
+                pie_chart_color(category_id),
+                pie_chart_color(category_id + PIE_CHART_COLORS.len() as i64)
+            );
+        }
     }
 
     #[test]
