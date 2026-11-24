@@ -19,7 +19,7 @@ use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::table::{
-    Column, ColumnFixed, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
+    Column, ColumnFixed, ColumnGroup, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
 };
 use gpui_kit::component::tooltip::Tooltip as ComponentTooltip;
 use gpui_kit::component::{
@@ -42,15 +42,19 @@ const COLUMN_HEADINGS: [&str; 12] = [
     "Банк",
     "Сумма",
     "Валюта",
-    "Базовая ставка",
-    "Ставка при выполнении условий",
-    "Порог",
+    "Базовая",
+    "Повышенная",
+    "Условие",
     "Дата открытия",
     "Срок",
-    "Дата начисления процентов",
-    "Назначение процентов",
+    "Дата",
+    "Назначение",
     "Действия",
 ];
+const RATE_GROUP_LABEL: &str = "Ставка";
+const RATE_GROUP_SPAN: usize = 3;
+const INTEREST_GROUP_LABEL: &str = "Начисление процентов";
+const INTEREST_GROUP_SPAN: usize = 2;
 const DEFAULT_COLUMN_WIDTHS: [f32; 12] = [
     120.0, 85.0, 90.0, 70.0, 80.0, 170.0, 90.0, 95.0, 115.0, 105.0, 120.0, 160.0,
 ];
@@ -73,6 +77,21 @@ const COL_ACTIONS: usize = 11;
 const FOOTER_NOTE: &str = "Даты открытия и начисления процентов сохраняются как справочные значения; процентный доход здесь не рассчитывается без истории остатка и правил начисления банка. Повышенная ставка показана как условие, а не как подтверждённая доходность.";
 const FOOTER_WARNING: &str =
     "Валюта накопления указывается отдельно; фактические начисления процентов здесь не рассчитываются.";
+
+/// Группы объединяют ставки и параметры начисления процентов.
+/// Пустые группы сохраняют позиции остальных колонок, включая закреплённую «Действия».
+fn savings_group_headers() -> Vec<Vec<ColumnGroup>> {
+    vec![vec![
+        ColumnGroup::new("", COL_BASE_RATE),
+        ColumnGroup::new(RATE_GROUP_LABEL, RATE_GROUP_SPAN),
+        ColumnGroup::new("", COL_INTEREST_DATE - COL_THRESHOLD - 1),
+        ColumnGroup::new(INTEREST_GROUP_LABEL, INTEREST_GROUP_SPAN),
+        ColumnGroup::new(
+            "",
+            COLUMN_HEADINGS.len() - COL_INTEREST_DATE - INTEREST_GROUP_SPAN,
+        ),
+    ]]
+}
 
 const BANK_FILTER_ITEM_ID: &str = "savings-bank-filter-item";
 const TERM_FILTER_ITEM_ID: &str = "savings-term-filter-item";
@@ -1453,6 +1472,10 @@ impl TableDelegate for SavingsTable {
         self.rows.len()
     }
 
+    fn group_headers(&self, _: &App) -> Option<Vec<Vec<ColumnGroup>>> {
+        Some(savings_group_headers())
+    }
+
     fn render_th(
         &mut self,
         col_ix: usize,
@@ -1768,11 +1791,13 @@ mod tests {
     use super::{
         column_widths_key, column_widths_with_fixed_actions, destination_filter_labels,
         filter_savings, format_column_widths, load_column_widths, parse_column_widths,
-        parse_legacy_column_widths, parse_previous_column_widths, sort_savings, term_filter_labels,
-        tooltip_items, SavingsForm, ACTIONS_COLUMN_WIDTH, BANK_FILTER_ITEM_ID, COLUMN_HEADINGS,
-        COL_ACTIONS, COL_AMOUNT, COL_BANK, COL_BASE_RATE, COL_OPENED_DATE,
-        COL_RATE_AFTER_THRESHOLD, COL_TERM, COL_THRESHOLD, COL_TITLE, DEFAULT_COLUMN_WIDTHS,
-        LEGACY_SAVINGS_COLUMN_WIDTHS_KEY, PREVIOUS_SAVINGS_COLUMN_WIDTHS_KEY,
+        parse_legacy_column_widths, parse_previous_column_widths, savings_group_headers,
+        sort_savings, term_filter_labels, tooltip_items, SavingsForm, ACTIONS_COLUMN_WIDTH,
+        BANK_FILTER_ITEM_ID, COLUMN_HEADINGS, COL_ACTIONS, COL_AMOUNT, COL_BANK, COL_BASE_RATE,
+        COL_INTEREST_DATE, COL_OPENED_DATE, COL_RATE_AFTER_THRESHOLD, COL_TERM, COL_THRESHOLD,
+        COL_TITLE, DEFAULT_COLUMN_WIDTHS, INTEREST_GROUP_LABEL, INTEREST_GROUP_SPAN,
+        LEGACY_SAVINGS_COLUMN_WIDTHS_KEY, PREVIOUS_SAVINGS_COLUMN_WIDTHS_KEY, RATE_GROUP_LABEL,
+        RATE_GROUP_SPAN,
     };
 
     fn valid_savings_form() -> SavingsForm {
@@ -1975,6 +2000,39 @@ mod tests {
         assert_eq!(COL_TERM, 8);
         assert_eq!(COLUMN_HEADINGS[COL_OPENED_DATE], "Дата открытия");
         assert_eq!(COLUMN_HEADINGS[COL_TERM], "Срок");
+    }
+
+    #[test]
+    fn savings_headers_group_rates_and_interest_accrual() {
+        assert_eq!(COLUMN_HEADINGS[COL_BASE_RATE], "Базовая");
+        assert_eq!(COLUMN_HEADINGS[COL_RATE_AFTER_THRESHOLD], "Повышенная");
+        assert_eq!(COLUMN_HEADINGS[COL_THRESHOLD], "Условие");
+        assert_eq!(COLUMN_HEADINGS[COL_INTEREST_DATE], "Дата");
+        assert_eq!(COLUMN_HEADINGS[COL_ACTIONS - 1], "Назначение");
+
+        let rows = savings_group_headers();
+        assert_eq!(rows.len(), 1);
+        let groups = &rows[0];
+        assert_eq!(
+            groups.iter().map(|group| group.span).sum::<usize>(),
+            COLUMN_HEADINGS.len()
+        );
+        assert_eq!(
+            groups
+                .iter()
+                .take_while(|group| group.label.is_empty())
+                .map(|group| group.span)
+                .sum::<usize>(),
+            COL_BASE_RATE
+        );
+        assert_eq!(groups[1].label, RATE_GROUP_LABEL);
+        assert_eq!(groups[1].span, RATE_GROUP_SPAN);
+        assert_eq!(
+            COL_BASE_RATE + groups[1].span + groups[2].span,
+            COL_INTEREST_DATE
+        );
+        assert_eq!(groups[3].label, INTEREST_GROUP_LABEL);
+        assert_eq!(groups[3].span, INTEREST_GROUP_SPAN);
     }
 
     #[test]
