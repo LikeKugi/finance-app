@@ -168,36 +168,42 @@ impl AppShell {
                     .font_weight(FontWeight::BOLD)
                     .child("Функционал"),
             )
-            .child(div().flex().flex_wrap().gap_3().children(links.map(|link| {
-                let action = link.action;
+            .child(
                 div()
-                    .w(px(360.0))
-                    .flex_none()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_4()
-                    .border_1()
-                    .border_color(border)
-                    .rounded_md()
-                    .child(
-                        Button::new(format!("home-link-{}", link.title))
-                            .link()
-                            .label(link.title)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.run_home_action(action, window, cx);
-                            })),
-                    )
-                    .child(
+                    .grid()
+                    .grid_cols(4)
+                    .gap_3()
+                    .children(links.map(|link| {
+                        let action = link.action;
                         div()
-                            .text_size(px(13.0))
-                            .text_color(description_color)
-                            .child(selectable_text(
-                                format!("home-page-description-{}", link.title),
-                                link.description,
-                            )),
-                    )
-            })))
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .p_4()
+                            .border_1()
+                            .border_color(border)
+                            .rounded_md()
+                            .child(
+                                Button::new(format!("home-link-{}", link.title))
+                                    .link()
+                                    .label(link.title)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.run_home_action(action, window, cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .text_color(description_color)
+                                    .child(selectable_text(
+                                        format!("home-page-description-{}", link.title),
+                                        link.description,
+                                    )),
+                            )
+                    })),
+            )
             .into_any_element()
     }
 
