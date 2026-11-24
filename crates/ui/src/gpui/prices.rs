@@ -25,7 +25,7 @@ use gpui_kit::*;
 use rust_decimal::Decimal;
 
 use super::helpers::{expense_place_label, format_currency, format_date, DATE_FORMAT};
-use super::selectable::{selectable_message, selectable_text};
+use super::selectable::{selectable_message, selectable_table_cell, selectable_text};
 use super::support::{date_period_range, text_suggestions, DatePeriod, DatePeriodRange};
 
 const ALL_PLACES_LABEL: &str = "Все места";
@@ -883,16 +883,47 @@ impl TableDelegate for PricesTable {
     ) -> impl IntoElement {
         let record = self.rows[row_ix].clone();
         let content = match col_ix {
-            0 => div().child(record.name.clone()).into_any_element(),
-            1 => div().child(format_date(record.date)).into_any_element(),
+            0 => div()
+                .child(selectable_table_cell(
+                    "prices",
+                    record.id,
+                    col_ix,
+                    record.name.clone(),
+                ))
+                .into_any_element(),
+            1 => div()
+                .child(selectable_table_cell(
+                    "prices",
+                    record.id,
+                    col_ix,
+                    format_date(record.date),
+                ))
+                .into_any_element(),
             2 => div()
                 .w_full()
                 .text_right()
-                .child(format_currency(&record.amount, 2))
+                .child(selectable_table_cell(
+                    "prices",
+                    record.id,
+                    col_ix,
+                    format_currency(&record.amount, 2),
+                ))
                 .into_any_element(),
-            3 => div().child(record.currency.code()).into_any_element(),
+            3 => div()
+                .child(selectable_table_cell(
+                    "prices",
+                    record.id,
+                    col_ix,
+                    record.currency.code(),
+                ))
+                .into_any_element(),
             4 => div()
-                .child(price_place_label(&record, &self.places))
+                .child(selectable_table_cell(
+                    "prices",
+                    record.id,
+                    col_ix,
+                    price_place_label(&record, &self.places),
+                ))
                 .into_any_element(),
             _ => {
                 let edit_page = self.page.clone();

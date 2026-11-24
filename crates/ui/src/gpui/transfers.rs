@@ -31,7 +31,7 @@ use rust_decimal::Decimal;
 
 use super::helpers::DATE_FORMAT;
 use super::helpers::{format_currency, format_date};
-use super::selectable::{selectable_message, selectable_text};
+use super::selectable::{selectable_message, selectable_table_cell, selectable_text};
 
 const ALL_LABEL: &str = "Все";
 const EXTERNAL_LABEL: &str = "Внешние средства";
@@ -1829,22 +1829,54 @@ impl TableDelegate for TransfersTable {
         let row = &self.rows[row_ix];
         let content = match col_ix {
             0 => div()
-                .child(format_date(row.record.operation_date))
+                .child(selectable_table_cell(
+                    "transfers",
+                    row.record.id,
+                    col_ix,
+                    format_date(row.record.operation_date),
+                ))
                 .into_any_element(),
             1 => div()
-                .child(row.record.operation_type.title().to_owned())
+                .child(selectable_table_cell(
+                    "transfers",
+                    row.record.id,
+                    col_ix,
+                    row.record.operation_type.title().to_owned(),
+                ))
                 .into_any_element(),
-            2 => div().child(row.source_label.clone()).into_any_element(),
+            2 => div()
+                .child(selectable_table_cell(
+                    "transfers",
+                    row.record.id,
+                    col_ix,
+                    row.source_label.clone(),
+                ))
+                .into_any_element(),
             3 => div()
-                .child(row.destination_label.clone())
+                .child(selectable_table_cell(
+                    "transfers",
+                    row.record.id,
+                    col_ix,
+                    row.destination_label.clone(),
+                ))
                 .into_any_element(),
             4 => div()
                 .w_full()
                 .text_right()
-                .child(format_currency(&row.record.amount, 2))
+                .child(selectable_table_cell(
+                    "transfers",
+                    row.record.id,
+                    col_ix,
+                    format_currency(&row.record.amount, 2),
+                ))
                 .into_any_element(),
             5 => div()
-                .child(row.record.currency.code().to_owned())
+                .child(selectable_table_cell(
+                    "transfers",
+                    row.record.id,
+                    col_ix,
+                    row.record.currency.code().to_owned(),
+                ))
                 .into_any_element(),
             6 => {
                 let text: String = row.comment.chars().take(40).collect();
@@ -1853,7 +1885,14 @@ impl TableDelegate for TransfersTable {
                 } else {
                     text
                 };
-                div().child(text).into_any_element()
+                div()
+                    .child(selectable_table_cell(
+                        "transfers",
+                        row.record.id,
+                        col_ix,
+                        text,
+                    ))
+                    .into_any_element()
             }
             COL_ACTIONS => {
                 let id = row.record.id;

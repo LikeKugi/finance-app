@@ -29,7 +29,7 @@ use gpui_kit::*;
 use rust_decimal::prelude::ToPrimitive;
 
 use super::helpers::{format_currency, DATE_FORMAT};
-use super::selectable::{selectable_message, selectable_text};
+use super::selectable::{selectable_message, selectable_table_cell, selectable_text};
 
 const NONE_LABEL: &str = "Все";
 const ROW_HEIGHT: f32 = 30.0;
@@ -326,27 +326,53 @@ impl TableDelegate for AnalysisTable {
         _: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let category = &self.rows[row_ix];
+        let row_id = format!(
+            "{}-{}",
+            analysis_table_index(self.kind, self.currency),
+            category.category_id
+        );
         match col_ix {
             COL_CATEGORY => div()
+                .w_full()
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .child(category.category_name.clone())
+                .child(selectable_table_cell(
+                    "analysis",
+                    &row_id,
+                    col_ix,
+                    category.category_name.clone(),
+                ))
                 .into_any_element(),
             COL_TRANSACTION_COUNT => div()
                 .w_full()
                 .text_right()
-                .child(category.transaction_count.to_string())
+                .child(selectable_table_cell(
+                    "analysis",
+                    &row_id,
+                    col_ix,
+                    category.transaction_count.to_string(),
+                ))
                 .into_any_element(),
             COL_AMOUNT => div()
                 .w_full()
                 .text_right()
-                .child(format_currency(&category.amount, 2))
+                .child(selectable_table_cell(
+                    "analysis",
+                    &row_id,
+                    col_ix,
+                    format_currency(&category.amount, 2),
+                ))
                 .into_any_element(),
             COL_SHARE => div()
                 .w_full()
                 .text_right()
-                .child(format!("{}%", category.share_percent.round_dp(2)))
+                .child(selectable_table_cell(
+                    "analysis",
+                    &row_id,
+                    col_ix,
+                    format!("{}%", category.share_percent.round_dp(2)),
+                ))
                 .into_any_element(),
             _ => div().into_any_element(),
         }

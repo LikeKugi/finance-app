@@ -32,7 +32,7 @@ use gpui_kit::*;
 use rust_decimal::Decimal;
 
 use super::helpers::{card_label, expense_place_label, format_currency, format_date, DATE_FORMAT};
-use super::selectable::{selectable_message, selectable_text};
+use super::selectable::{selectable_message, selectable_table_cell, selectable_text};
 use super::support::{category_tree_labels, eligible_cards, text_suggestions};
 
 const ALL_LABEL: &str = "Все";
@@ -2134,30 +2134,45 @@ impl TableDelegate for CardsTable {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let document = &self.rows[row_ix];
-        let text = |value: String| div().child(value).into_any_element();
+        let cell = |col: usize, value: String| {
+            div()
+                .child(selectable_table_cell("cards", document.id, col, value))
+                .into_any_element()
+        };
         let content = match col_ix {
-            COL_NAME => text(document.name.clone().unwrap_or_default()),
-            COL_BANK => text(document.bank_name.clone()),
-            COL_SYSTEM => text(document.payment_system.code().to_owned()),
-            3 => text(document.card_type.title().to_owned()),
+            COL_NAME => cell(col_ix, document.name.clone().unwrap_or_default()),
+            COL_BANK => cell(col_ix, document.bank_name.clone()),
+            COL_SYSTEM => cell(col_ix, document.payment_system.code().to_owned()),
+            3 => cell(col_ix, document.card_type.title().to_owned()),
             COL_AMOUNT => div()
                 .w_full()
                 .text_right()
-                .child(format_currency(&document.amount, 2))
+                .child(selectable_table_cell(
+                    "cards",
+                    document.id,
+                    col_ix,
+                    format_currency(&document.amount, 2),
+                ))
                 .into_any_element(),
-            5 => text(
+            5 => cell(
+                col_ix,
                 document
                     .currency
                     .map_or(NO_CURRENCY_LABEL, Currency::code)
                     .to_owned(),
             ),
-            COL_GRACE_PERIOD => text(
+            COL_GRACE_PERIOD => cell(
+                col_ix,
                 document
                     .grace_period_days
                     .map_or_else(String::new, |d| d.to_string()),
             ),
-            COL_NEXT_PAYMENT_DATE => text(document.due_date.map_or_else(String::new, format_date)),
-            COL_NEXT_PAYMENT => text(
+            COL_NEXT_PAYMENT_DATE => cell(
+                col_ix,
+                document.due_date.map_or_else(String::new, format_date),
+            ),
+            COL_NEXT_PAYMENT => cell(
+                col_ix,
                 document
                     .next_payment_amount
                     .map_or_else(String::new, |a| format_currency(&a, 2)),
@@ -2187,7 +2202,8 @@ impl TableDelegate for CardsTable {
                     div().into_any_element()
                 }
             }
-            10 => text(
+            10 => cell(
+                col_ix,
                 if document.affects_deposit_rate {
                     "Условно повышает"
                 } else {
@@ -2195,12 +2211,14 @@ impl TableDelegate for CardsTable {
                 }
                 .to_owned(),
             ),
-            11 => text(
+            11 => cell(
+                col_ix,
                 document
                     .min_monthly_spend
                     .map_or_else(String::new, |a| format_currency(&a, 2)),
             ),
-            COL_SAVINGS => text(
+            COL_SAVINGS => cell(
+                col_ix,
                 document
                     .linked_savings
                     .iter()

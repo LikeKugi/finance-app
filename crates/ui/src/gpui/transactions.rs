@@ -32,7 +32,7 @@ use gpui_kit::*;
 use rust_decimal::Decimal;
 
 use super::helpers::{card_label, expense_place_label, format_currency, format_date, DATE_FORMAT};
-use super::selectable::{selectable_message, selectable_text};
+use super::selectable::{selectable_message, selectable_table_cell, selectable_text};
 use super::support::{
     category_tree_labels, collect_category_descendants, eligible_cards, text_suggestions,
     DIVISION_ROUNDING_WARNING,
@@ -2255,21 +2255,42 @@ impl TableDelegate for TransactionsTable {
         let id = transaction.id;
         let content = match col_ix {
             COL_DATE => div()
-                .child(format_date(transaction.date))
+                .child(selectable_table_cell(
+                    "transactions",
+                    id,
+                    col_ix,
+                    format_date(transaction.date),
+                ))
                 .into_any_element(),
             COL_CATEGORY => div()
+                .w_full()
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .child(transaction.category_name.clone())
+                .child(selectable_table_cell(
+                    "transactions",
+                    id,
+                    col_ix,
+                    transaction.category_name.clone(),
+                ))
                 .into_any_element(),
             COL_AMOUNT => div()
                 .w_full()
                 .text_right()
-                .child(format_currency(&transaction.amount, 2))
+                .child(selectable_table_cell(
+                    "transactions",
+                    id,
+                    col_ix,
+                    format_currency(&transaction.amount, 2),
+                ))
                 .into_any_element(),
             COL_CURRENCY => div()
-                .child(transaction.currency.code().to_owned())
+                .child(selectable_table_cell(
+                    "transactions",
+                    id,
+                    col_ix,
+                    transaction.currency.code().to_owned(),
+                ))
                 .into_any_element(),
             COL_EXPENSE_PLACE if self.kind == TransactionKind::Expense => {
                 let place_name = transaction
@@ -2277,10 +2298,16 @@ impl TableDelegate for TransactionsTable {
                     .clone()
                     .unwrap_or_else(|| "—".to_owned());
                 div()
+                    .w_full()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .child(place_name)
+                    .child(selectable_table_cell(
+                        "transactions",
+                        id,
+                        col_ix,
+                        place_name,
+                    ))
                     .into_any_element()
             }
             column if column == comment_column(self.kind) => {
@@ -2294,7 +2321,12 @@ impl TableDelegate for TransactionsTable {
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .cursor_pointer()
-                        .child(comment_preview(&comment))
+                        .child(selectable_table_cell(
+                            "transactions",
+                            id,
+                            col_ix,
+                            comment_preview(&comment),
+                        ))
                         .on_click(move |_, window, cx| {
                             let comment = comment.clone();
                             window.open_dialog(cx, move |dialog: Dialog, _, _| {

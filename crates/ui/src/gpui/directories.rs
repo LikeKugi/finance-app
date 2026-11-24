@@ -25,7 +25,7 @@ use rust_decimal::Decimal;
 
 use super::helpers::DATE_FORMAT;
 use super::prices::PricesSection;
-use super::selectable::{selectable_message, selectable_text};
+use super::selectable::{selectable_message, selectable_table_cell, selectable_text};
 use super::support::category_tree_labels;
 use super::support::category_tree_rows;
 use super::support::collect_category_descendants;
@@ -1113,7 +1113,12 @@ impl TableDelegate for CategoriesTable {
             div()
                 .w_full()
                 .truncate()
-                .child(format!("{prefix}{}{suffix}", row.category.name))
+                .child(selectable_table_cell(
+                    "categories",
+                    row.category.id,
+                    col_ix,
+                    format!("{prefix}{}{suffix}", row.category.name),
+                ))
                 .into_any_element()
         } else {
             let id = row.category.id;
@@ -1208,7 +1213,12 @@ impl TableDelegate for BanksTable {
             div()
                 .w_full()
                 .truncate()
-                .child(bank.name.clone())
+                .child(selectable_table_cell(
+                    "banks",
+                    bank.id,
+                    col_ix,
+                    bank.name.clone(),
+                ))
                 .into_any_element()
         } else {
             let id = bank.id;
@@ -1307,7 +1317,12 @@ impl TableDelegate for ExpensePlacesTable {
             0 => div()
                 .w_full()
                 .truncate()
-                .child(place.name.clone())
+                .child(selectable_table_cell(
+                    "expense-places",
+                    place.id,
+                    col_ix,
+                    place.name.clone(),
+                ))
                 .into_any_element(),
             1 => match place.comment.as_deref() {
                 Some(comment) if !comment.is_empty() => {
@@ -1318,7 +1333,12 @@ impl TableDelegate for ExpensePlacesTable {
                         .w_full()
                         .truncate()
                         .cursor_pointer()
-                        .child(comment_preview(comment))
+                        .child(selectable_table_cell(
+                            "expense-places",
+                            comment_id,
+                            col_ix,
+                            comment_preview(comment),
+                        ))
                         .on_click(move |_, window, cx| {
                             let comment = full_comment.clone();
                             window.open_dialog(cx, move |dialog: Dialog, _, _| {
@@ -1328,7 +1348,10 @@ impl TableDelegate for ExpensePlacesTable {
                                         .max_h(px(420.0))
                                         .overflow_y_scroll()
                                         .overflow_x_scroll()
-                                        .child(comment.clone()),
+                                        .child(selectable_text(
+                                            ("expense-place-comment-dialog", comment_id as usize),
+                                            comment.clone(),
+                                        )),
                                 )
                             });
                         })
@@ -1438,7 +1461,12 @@ impl TableDelegate for CurrenciesTable {
             0 => div()
                 .w_full()
                 .truncate()
-                .child(currency_cell_label(&row.currency))
+                .child(selectable_table_cell(
+                    "currencies",
+                    row.currency.code.clone(),
+                    col_ix,
+                    currency_cell_label(&row.currency),
+                ))
                 .into_any_element(),
             1 => {
                 let tooltip = row.rate_label.clone();
@@ -1447,7 +1475,12 @@ impl TableDelegate for CurrenciesTable {
                     .w_full()
                     .truncate()
                     .text_color(cx.theme().muted_foreground)
-                    .child(row.rate_label.clone())
+                    .child(selectable_table_cell(
+                        "currencies",
+                        row.currency.code.clone(),
+                        col_ix,
+                        row.rate_label.clone(),
+                    ))
                     .tooltip(move |window, cx| {
                         ComponentTooltip::new(tooltip.clone()).build(window, cx)
                     })
@@ -1460,7 +1493,12 @@ impl TableDelegate for CurrenciesTable {
                         .flex()
                         .justify_center()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Основная")
+                        .child(selectable_table_cell(
+                            "currencies",
+                            row.currency.code.clone(),
+                            col_ix,
+                            "Основная",
+                        ))
                         .into_any_element()
                 } else {
                     let page = self.page.clone();

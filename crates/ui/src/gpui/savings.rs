@@ -31,7 +31,7 @@ use gpui_kit::*;
 
 use super::helpers::DATE_FORMAT;
 use super::helpers::{format_currency, format_date};
-use super::selectable::{selectable_message, selectable_text};
+use super::selectable::{selectable_message, selectable_table_cell, selectable_text};
 
 const ALL_LABEL: &str = "Все";
 const ALL_BANKS_LABEL: &str = "Все банки";
@@ -1525,46 +1525,96 @@ impl TableDelegate for SavingsTable {
             (SavingsTerm::Unlimited, _) => "Бессрочный".to_owned(),
         };
         let content = match col_ix {
-            COL_BANK => div().child(account.bank_name.clone()).into_any_element(),
-            COL_TITLE => div().child(account.title.clone()).into_any_element(),
+            COL_BANK => div()
+                .child(selectable_table_cell(
+                    "savings",
+                    account.id,
+                    col_ix,
+                    account.bank_name.clone(),
+                ))
+                .into_any_element(),
+            COL_TITLE => div()
+                .child(selectable_table_cell(
+                    "savings",
+                    account.id,
+                    col_ix,
+                    account.title.clone(),
+                ))
+                .into_any_element(),
             COL_AMOUNT => div()
                 .w_full()
                 .text_right()
-                .child(format_currency(&account.amount, 2))
+                .child(selectable_table_cell(
+                    "savings",
+                    account.id,
+                    col_ix,
+                    format_currency(&account.amount, 2),
+                ))
                 .into_any_element(),
             3 => div()
-                .child(
+                .child(selectable_table_cell(
+                    "savings",
+                    account.id,
+                    col_ix,
                     account
                         .currency
                         .map_or_else(dash, |currency| currency.code().to_owned()),
-                )
+                ))
                 .into_any_element(),
             COL_BASE_RATE => div()
-                .child(format!("{}%", account.base_rate))
+                .child(selectable_table_cell(
+                    "savings",
+                    account.id,
+                    col_ix,
+                    format!("{}%", account.base_rate),
+                ))
                 .into_any_element(),
             COL_RATE_AFTER_THRESHOLD => div()
-                .child(
+                .child(selectable_table_cell(
+                    "savings",
+                    account.id,
+                    col_ix,
                     account
                         .rate_after_threshold
                         .map_or_else(dash, |rate| format!("{rate}%")),
-                )
+                ))
                 .into_any_element(),
             COL_THRESHOLD => div()
-                .child(
+                .child(selectable_table_cell(
+                    "savings",
+                    account.id,
+                    col_ix,
                     account
                         .threshold_amount
                         .map_or_else(dash, |amount| format_currency(&amount, 2)),
-                )
+                ))
                 .into_any_element(),
-            COL_TERM => div().child(term).into_any_element(),
+            COL_TERM => div()
+                .child(selectable_table_cell("savings", account.id, col_ix, term))
+                .into_any_element(),
             COL_OPENED_DATE => div()
-                .child(account.opened_date.map_or_else(dash, format_date))
+                .child(selectable_table_cell(
+                    "savings",
+                    account.id,
+                    col_ix,
+                    account.opened_date.map_or_else(dash, format_date),
+                ))
                 .into_any_element(),
             COL_INTEREST_DATE => div()
-                .child(account.interest_accrual_date.map_or_else(dash, format_date))
+                .child(selectable_table_cell(
+                    "savings",
+                    account.id,
+                    col_ix,
+                    account.interest_accrual_date.map_or_else(dash, format_date),
+                ))
                 .into_any_element(),
             10 => div()
-                .child(account.interest_destination.title().to_owned())
+                .child(selectable_table_cell(
+                    "savings",
+                    account.id,
+                    col_ix,
+                    account.interest_destination.title().to_owned(),
+                ))
                 .into_any_element(),
             COL_ACTIONS => {
                 let id = account.id;
