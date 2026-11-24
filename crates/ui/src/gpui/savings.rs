@@ -7,16 +7,18 @@ use std::rc::Rc;
 
 use chrono::NaiveDate;
 use finance_core::{
-    canonical_amount, parse_amount, parse_non_negative_decimal, Bank, Currency,
-    InterestDestination, SavingsAccount, SavingsDetails, SavingsTerm,
+    calculate_interest_amount, canonical_amount, parse_amount, parse_non_negative_decimal, Bank,
+    Currency, InterestDestination, PaymentCardType, PaymentDocument, SavingsAccount,
+    SavingsDetails, SavingsTerm, TransactionKind,
 };
-use finance_db::Database;
+use finance_db::{Database, SavingsInterestIncome, SavingsInterestIncomeRecipient};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::calendar::Date;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::dialog::{AlertDialog, Dialog};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::table::{
     Column, ColumnFixed, ColumnGroup, ColumnSort, DataTable, TableDelegate, TableEvent, TableState,
@@ -28,18 +30,19 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
+use rust_decimal::Decimal;
 
-use super::helpers::DATE_FORMAT;
-use super::helpers::{format_currency, format_date};
+use super::helpers::{card_label, format_currency, format_date, DATE_FORMAT};
 use super::selectable::{
     selectable_message, selectable_right_aligned_table_cell, selectable_table_cell, selectable_text,
 };
+use super::support::{category_tree_labels, eligible_cards};
 
 const ALL_LABEL: &str = "Все";
 const ALL_BANKS_LABEL: &str = "Все банки";
 const NO_CURRENCY_LABEL: &str = "Не указана";
 const TERMS: [SavingsTerm; 2] = [SavingsTerm::Limited, SavingsTerm::Unlimited];
-const COLUMN_HEADINGS: [&str; 12] = [
+const COLUMN_HEADINGS: [&str; 13] = [
     "Название",
     "Банк",
     "Сумма",
@@ -51,20 +54,23 @@ const COLUMN_HEADINGS: [&str; 12] = [
     "Срок",
     "Дата",
     "Начисление",
+    "",
     "Действия",
 ];
 const RATE_GROUP_LABEL: &str = "Ставка";
 const RATE_GROUP_SPAN: usize = 3;
 const INTEREST_GROUP_LABEL: &str = "Выплата процентов";
-const INTEREST_GROUP_SPAN: usize = 2;
-const DEFAULT_COLUMN_WIDTHS: [f32; 12] = [
-    120.0, 85.0, 90.0, 70.0, 80.0, 170.0, 90.0, 95.0, 115.0, 105.0, 120.0, 160.0,
+const INTEREST_GROUP_SPAN: usize = 3;
+const DEFAULT_COLUMN_WIDTHS: [f32; 13] = [
+    120.0, 85.0, 90.0, 70.0, 80.0, 170.0, 90.0, 95.0, 115.0, 105.0, 120.0, 40.0, 160.0,
 ];
 const ACTIONS_COLUMN_WIDTH: f32 = 160.0;
+const INTEREST_ACTION_COLUMN_WIDTH: f32 = 40.0;
 const MIN_COLUMN_WIDTH: f32 = 60.0;
 const MAX_COLUMN_WIDTH: f32 = 1200.0;
-const SAVINGS_COLUMN_WIDTHS_KEY: &str = "table_columns.savings.v3";
-const PREVIOUS_SAVINGS_COLUMN_WIDTHS_KEY: &str = "table_columns.savings.v2";
+const SAVINGS_COLUMN_WIDTHS_KEY: &str = "table_columns.savings.v4";
+const PREVIOUS_SAVINGS_COLUMN_WIDTHS_KEY: &str = "table_columns.savings.v3";
+const OLDER_SAVINGS_COLUMN_WIDTHS_KEY: &str = "table_columns.savings.v2";
 const LEGACY_SAVINGS_COLUMN_WIDTHS_KEY: &str = "table_columns.savings";
 const COL_TITLE: usize = 0;
 const COL_BANK: usize = 1;
@@ -75,7 +81,8 @@ const COL_THRESHOLD: usize = 6;
 const COL_OPENED_DATE: usize = 7;
 const COL_TERM: usize = 8;
 const COL_INTEREST_DATE: usize = 9;
-const COL_ACTIONS: usize = 11;
+const COL_INTEREST_ACTION: usize = 11;
+const COL_ACTIONS: usize = 12;
 const FOOTER_NOTE: &str = "Даты открытия и начисления процентов сохраняются как справочные значения; процентный доход здесь не рассчитывается без истории остатка и правил начисления банка. Повышенная ставка показана как условие, а не как подтверждённая доходность.";
 const FOOTER_WARNING: &str =
     "Валюта накопления указывается отдельно; фактические начисления процентов здесь не рассчитываются.";
@@ -172,6 +179,10 @@ fn choice(
             cx,
         )
     })
+}
+
+fn selected_choice_row(state: &Entity<SelectState<Vec<SharedString>>>, cx: &App) -> Option<usize> {
+    state.read(cx).selected_index(cx).map(|index| index.row)
 }
 
 fn currency_labels(first: &str) -> Vec<String> {
@@ -347,6 +358,143 @@ fn parse_optional_savings_date(value: &str, field_name: &str) -> Result<Option<N
         .map_err(|_| format!("Введите дату {field_name} в формате ГГГГ-ММ-ДД"))
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct InterestAccrualInput {
+    accrual_date: Option<NaiveDate>,
+    interest_destination: Option<InterestDestination>,
+    create_income: bool,
+    income_date: Option<NaiveDate>,
+    amount: String,
+    currency: Option<Currency>,
+    category_id: Option<i64>,
+    recipient: Option<SavingsInterestIncomeRecipient>,
+    comment: String,
+    higher_rate_applied: bool,
+    manual_amount: bool,
+}
+
+fn selected_date(state: &DatePickerState) -> Option<NaiveDate> {
+    match state.date() {
+        Date::Single(date) => date,
+        Date::Range(_, _) => None,
+    }
+}
+
+fn income_date_after_accrual_change(
+    accrual_date: Option<NaiveDate>,
+    current_income_date: Option<NaiveDate>,
+    manually_edited: bool,
+) -> Option<NaiveDate> {
+    if manually_edited {
+        current_income_date
+    } else {
+        accrual_date
+    }
+}
+
+fn default_interest_amount(
+    account: &SavingsAccount,
+    higher_rate_applied: bool,
+) -> Result<Decimal, finance_core::DomainError> {
+    let rate = if higher_rate_applied {
+        account
+            .rate_after_threshold
+            .ok_or(finance_core::DomainError::InvalidSavingsRate)?
+    } else {
+        account.base_rate
+    };
+    calculate_interest_amount(account.amount, rate)
+}
+
+fn interest_amount_for_rate_change(
+    account: &SavingsAccount,
+    higher_rate_applied: bool,
+    manual_amount: bool,
+) -> Result<Option<Decimal>, finance_core::DomainError> {
+    if manual_amount {
+        Ok(None)
+    } else {
+        default_interest_amount(account, higher_rate_applied).map(Some)
+    }
+}
+
+fn build_interest_accrual_update(
+    input: &InterestAccrualInput,
+    account: &SavingsAccount,
+) -> Result<
+    (
+        Option<NaiveDate>,
+        InterestDestination,
+        Option<SavingsInterestIncome>,
+    ),
+    String,
+> {
+    let interest_destination = input
+        .interest_destination
+        .ok_or_else(|| "Выберите место начисления процентов".to_owned())?;
+    let income = if input.create_income {
+        let date = input
+            .income_date
+            .ok_or_else(|| "Выберите дату дохода".to_owned())?;
+        let category_id = input
+            .category_id
+            .ok_or_else(|| "Выберите категорию дохода".to_owned())?;
+        let amount = parse_amount(&input.amount).map_err(|error| error.to_string())?;
+        let currency = input
+            .currency
+            .ok_or_else(|| "Выберите валюту дохода".to_owned())?;
+        let recipient = input
+            .recipient
+            .ok_or_else(|| "Выберите получателя дохода".to_owned())?;
+        if recipient == SavingsInterestIncomeRecipient::Savings {
+            if !account.is_active {
+                return Err("Нельзя зачислить доход на неактивное накопление".to_owned());
+            }
+            match account.currency {
+                None => {
+                    return Err(
+                        "Для зачисления на накопление сначала укажите его валюту в настройках"
+                            .to_owned(),
+                    );
+                }
+                Some(account_currency) if account_currency != currency => {
+                    return Err("Валюта накопления должна совпадать с валютой дохода".to_owned());
+                }
+                Some(_) => {}
+            }
+        }
+        Some(SavingsInterestIncome {
+            date,
+            category_id,
+            amount,
+            currency,
+            comment: input.comment.clone(),
+            recipient,
+        })
+    } else {
+        None
+    };
+
+    Ok((input.accrual_date, interest_destination, income))
+}
+
+fn interest_recipient_choices(
+    account: &SavingsAccount,
+    cards: &[PaymentDocument],
+    currency: Option<Currency>,
+) -> (Vec<SavingsInterestIncomeRecipient>, Vec<String>) {
+    let eligible = eligible_cards(cards, currency);
+    let mut recipients = vec![SavingsInterestIncomeRecipient::WithoutCard];
+    let mut labels = vec!["Без карты".to_owned()];
+    for card in eligible {
+        recipients.push(SavingsInterestIncomeRecipient::PaymentDocument(card.id));
+        labels.push(card_label(card));
+    }
+    recipients.push(SavingsInterestIncomeRecipient::Savings);
+    labels.push(format!("Текущее накопление: {}", account.title));
+    (recipients, labels)
+}
+
 /// Состояние открытой формы: поля ввода и выбор вариантов.
 struct Form {
     id: Option<i64>,
@@ -373,6 +521,53 @@ struct Form {
     _subscriptions: Vec<Subscription>,
 }
 
+struct InterestAccrualForm {
+    account: SavingsAccount,
+    accrual_date: Entity<DatePickerState>,
+    interest_destination: InterestDestination,
+    interest_destination_select: Choice,
+    create_income: bool,
+    income_date: Entity<DatePickerState>,
+    automatic_income_date: Option<NaiveDate>,
+    manual_income_date: bool,
+    income_amount: Entity<InputState>,
+    income_currency: Option<Currency>,
+    income_currency_select: Choice,
+    category_ids: Vec<i64>,
+    category_id: Option<i64>,
+    category_select: Choice,
+    cards: Vec<finance_core::PaymentDocument>,
+    recipient_options: Vec<SavingsInterestIncomeRecipient>,
+    recipient: Option<SavingsInterestIncomeRecipient>,
+    recipient_select: Choice,
+    comment: Entity<TextareaState>,
+    higher_rate_applied: bool,
+    manual_amount: bool,
+    automatic_amount: String,
+    error: Option<String>,
+    snapshot: InterestAccrualInput,
+    confirm_discard: bool,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl InterestAccrualForm {
+    fn input(&self, cx: &App) -> InterestAccrualInput {
+        InterestAccrualInput {
+            accrual_date: selected_date(self.accrual_date.read(cx)),
+            interest_destination: Some(self.interest_destination),
+            create_income: self.create_income,
+            income_date: selected_date(self.income_date.read(cx)),
+            amount: self.income_amount.read(cx).value().to_string(),
+            currency: self.income_currency,
+            category_id: self.category_id,
+            recipient: self.recipient,
+            comment: self.comment.read(cx).value().to_string(),
+            higher_rate_applied: self.higher_rate_applied,
+            manual_amount: self.manual_amount,
+        }
+    }
+}
+
 pub(crate) struct SavingsPage {
     database: Rc<Database>,
     banks: Vec<Bank>,
@@ -391,6 +586,7 @@ pub(crate) struct SavingsPage {
     destination_filter: Option<InterestDestination>,
     destination_filter_select: TooltipChoice,
     form: Option<Form>,
+    interest_form: Option<InterestAccrualForm>,
     confirm_discard: bool,
     _subscriptions: Vec<Subscription>,
 }
@@ -525,6 +721,7 @@ impl SavingsPage {
             destination_filter: None,
             destination_filter_select,
             form: None,
+            interest_form: None,
             confirm_discard: false,
             _subscriptions: subscriptions,
         };
@@ -689,6 +886,303 @@ impl SavingsPage {
         };
         let initial = SavingsForm::from_account(account);
         self.open_form(initial, window, cx);
+    }
+
+    fn open_interest_accrual(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.form.is_some() || self.interest_form.is_some() {
+            return;
+        }
+        let Some(account) = self
+            .entries
+            .iter()
+            .find(|account| account.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        let categories =
+            match finance_db::list_categories(&self.database, TransactionKind::Income, true) {
+                Ok(categories) => categories,
+                Err(error) => {
+                    self.error(error.to_string(), cx);
+                    return;
+                }
+            };
+        let cards = match finance_db::list_payment_documents(
+            &self.database,
+            None,
+            Some(PaymentCardType::Debit),
+            None,
+        ) {
+            Ok(cards) => cards,
+            Err(error) => {
+                self.error(error.to_string(), cx);
+                return;
+            }
+        };
+        let category_entries: Vec<_> = category_tree_labels(&categories)
+            .into_iter()
+            .filter(|(category_id, _)| {
+                categories
+                    .iter()
+                    .any(|category| category.id == *category_id && category.is_active)
+            })
+            .collect();
+        let category_ids: Vec<i64> = category_entries
+            .iter()
+            .map(|(category_id, _)| *category_id)
+            .collect();
+        let category_id = category_ids.first().copied();
+        let category_select = choice(
+            category_entries
+                .iter()
+                .map(|(_, label)| label.clone())
+                .collect(),
+            (!category_ids.is_empty()).then_some(0),
+            window,
+            cx,
+        );
+        let accrual_date_value = account.interest_accrual_date;
+        let accrual_date = cx.new(|cx| {
+            let mut state = DatePickerState::new(window, cx).date_format(DATE_FORMAT);
+            state.set_date(Date::Single(accrual_date_value), window, cx);
+            state
+        });
+        let income_date = cx.new(|cx| {
+            let mut state = DatePickerState::new(window, cx).date_format(DATE_FORMAT);
+            state.set_date(Date::Single(accrual_date_value), window, cx);
+            state
+        });
+        let interest_destination = account.interest_destination;
+        let interest_destination_select = choice(
+            InterestDestination::ALL
+                .iter()
+                .map(|destination| destination.title().to_owned())
+                .collect(),
+            InterestDestination::ALL
+                .iter()
+                .position(|destination| *destination == interest_destination),
+            window,
+            cx,
+        );
+        let income_currency = account.currency.unwrap_or(Currency::Rub);
+        let income_currency_select = choice(
+            Currency::ALL
+                .iter()
+                .map(|currency| currency.code().to_owned())
+                .collect(),
+            Currency::ALL
+                .iter()
+                .position(|currency| *currency == income_currency),
+            window,
+            cx,
+        );
+        let (recipient_options, recipient_labels) =
+            interest_recipient_choices(&account, &cards, Some(income_currency));
+        let recipient = Some(SavingsInterestIncomeRecipient::WithoutCard);
+        let recipient_select = choice(recipient_labels, Some(0), window, cx);
+        let (amount, error) = match default_interest_amount(&account, false) {
+            Ok(amount) => (format!("{amount:.2}"), None),
+            Err(error) => (
+                String::new(),
+                Some(format!("Не удалось рассчитать сумму по умолчанию: {error}")),
+            ),
+        };
+        let initial_amount = amount.clone();
+        let income_amount = cx.new(|cx| {
+            let mut state = InputState::new(window, cx).placeholder("Например, 125,50");
+            state.set_value(initial_amount, window, cx);
+            state
+        });
+        let comment = cx.new(|cx| TextareaState::new(window, cx).rows(3));
+
+        let mut subscriptions = vec![
+            cx.subscribe_in(
+                &accrual_date,
+                window,
+                |this: &mut Self, state, _: &DatePickerEvent, window, cx| {
+                    let accrual_date = selected_date(state.read(cx));
+                    let date_to_set = this.interest_form.as_mut().and_then(|form| {
+                        let current_income_date = selected_date(form.income_date.read(cx));
+                        let income_date = income_date_after_accrual_change(
+                            accrual_date,
+                            current_income_date,
+                            form.manual_income_date,
+                        );
+                        form.automatic_income_date = accrual_date;
+                        (!form.manual_income_date).then(|| (form.income_date.clone(), income_date))
+                    });
+                    if let Some((income_date, date)) = date_to_set {
+                        income_date.update(cx, |state, cx| {
+                            state.set_date(Date::Single(date), window, cx)
+                        });
+                    }
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &income_date,
+                window,
+                |this: &mut Self, state, _: &DatePickerEvent, _, cx| {
+                    let income_date = selected_date(state.read(cx));
+                    if let Some(form) = this.interest_form.as_mut() {
+                        form.manual_income_date = income_date != form.automatic_income_date;
+                        form.error = None;
+                    }
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &income_amount,
+                window,
+                |this: &mut Self, state, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        if let Some(form) = this.interest_form.as_mut() {
+                            form.manual_amount =
+                                state.read(cx).value() != form.automatic_amount.as_str();
+                            form.error = None;
+                        }
+                        cx.notify();
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &interest_destination_select,
+                window,
+                |this: &mut Self, state, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                    let SelectEvent::Confirm(_) = event;
+                    if let Some(form) = this.interest_form.as_mut() {
+                        form.interest_destination = selected_choice_row(state, cx)
+                            .and_then(|row| InterestDestination::ALL.get(row).copied())
+                            .unwrap_or(form.interest_destination);
+                        form.error = None;
+                    }
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &category_select,
+                window,
+                |this: &mut Self, state, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                    let SelectEvent::Confirm(_) = event;
+                    if let Some(form) = this.interest_form.as_mut() {
+                        form.category_id = selected_choice_row(state, cx)
+                            .and_then(|row| form.category_ids.get(row).copied());
+                        form.error = None;
+                    }
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &income_currency_select,
+                window,
+                |this: &mut Self, state, event: &SelectEvent<Vec<SharedString>>, window, cx| {
+                    let SelectEvent::Confirm(_) = event;
+                    if let Some(form) = this.interest_form.as_mut() {
+                        form.income_currency = selected_choice_row(state, cx)
+                            .and_then(|row| Currency::ALL.get(row).copied());
+                        form.error = None;
+                    }
+                    this.rebuild_interest_recipient_select(window, cx);
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &recipient_select,
+                window,
+                |this: &mut Self, state, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                    let SelectEvent::Confirm(_) = event;
+                    if let Some(form) = this.interest_form.as_mut() {
+                        form.recipient = selected_choice_row(state, cx)
+                            .and_then(|row| form.recipient_options.get(row).copied());
+                        form.error = None;
+                    }
+                    cx.notify();
+                },
+            ),
+        ];
+        subscriptions.shrink_to_fit();
+        let mut form = InterestAccrualForm {
+            account,
+            accrual_date,
+            interest_destination,
+            interest_destination_select,
+            create_income: false,
+            income_date,
+            automatic_income_date: accrual_date_value,
+            manual_income_date: false,
+            income_amount,
+            income_currency: Some(income_currency),
+            income_currency_select,
+            category_ids,
+            category_id,
+            category_select,
+            cards,
+            recipient_options,
+            recipient,
+            recipient_select,
+            comment,
+            higher_rate_applied: false,
+            manual_amount: false,
+            automatic_amount: amount.clone(),
+            error,
+            snapshot: InterestAccrualInput {
+                accrual_date: accrual_date_value,
+                interest_destination: Some(interest_destination),
+                create_income: false,
+                income_date: accrual_date_value,
+                amount: amount.clone(),
+                currency: Some(income_currency),
+                category_id,
+                recipient,
+                comment: String::new(),
+                higher_rate_applied: false,
+                manual_amount: false,
+            },
+            confirm_discard: false,
+            _subscriptions: subscriptions,
+        };
+        form.snapshot = form.input(cx);
+        self.interest_form = Some(form);
+        self.open_interest_accrual_dialog(window, cx);
+    }
+
+    fn rebuild_interest_recipient_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = self.interest_form.as_mut() else {
+            return;
+        };
+        let (options, labels) =
+            interest_recipient_choices(&form.account, &form.cards, form.income_currency);
+        let selected = form
+            .recipient
+            .and_then(|recipient| options.iter().position(|option| *option == recipient))
+            .unwrap_or(0);
+        form.recipient = options.get(selected).copied();
+        form.recipient_options = options;
+        form.recipient_select.update(cx, |state, cx| {
+            state.set_items(
+                labels.into_iter().map(SharedString::from).collect(),
+                window,
+                cx,
+            );
+            state.set_selected_index(Some(IndexPath::default().row(selected)), window, cx);
+        });
+    }
+
+    fn open_interest_accrual_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity();
+        window.open_dialog(cx, move |dialog: Dialog, _, cx| {
+            let body = this.update(cx, |page, cx| page.render_interest_accrual_dialog(cx));
+            dialog
+                .title("Изменить выплату процентов")
+                .centered()
+                .w(px(800.0))
+                .max_w(px(900.0))
+                .close_button(false)
+                .overlay_closable(false)
+                .keyboard(false)
+                .child(body)
+        });
     }
 
     fn open_form(&mut self, initial: SavingsForm, window: &mut Window, cx: &mut Context<Self>) {
@@ -932,6 +1426,325 @@ impl SavingsPage {
                 false
             }
         }
+    }
+
+    fn save_interest_accrual(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(form) = self.interest_form.as_ref() else {
+            return false;
+        };
+        let account_id = form.account.id;
+        let account = form.account.clone();
+        let input = form.input(cx);
+        let (accrual_date, interest_destination, income) =
+            match build_interest_accrual_update(&input, &account) {
+                Ok(update) => update,
+                Err(error) => {
+                    if let Some(form) = self.interest_form.as_mut() {
+                        form.error = Some(error);
+                    }
+                    cx.notify();
+                    return false;
+                }
+            };
+        let created_income = income.is_some();
+        match finance_db::save_savings_interest_accrual(
+            &self.database,
+            account_id,
+            accrual_date,
+            interest_destination,
+            income,
+        ) {
+            Ok(_) => {
+                self.interest_form = None;
+                if self.refresh(cx) {
+                    self.message = Some((
+                        if created_income {
+                            "Сведения о выплате процентов сохранены, доход сформирован".to_owned()
+                        } else {
+                            "Сведения о выплате процентов сохранены".to_owned()
+                        },
+                        false,
+                    ));
+                }
+                cx.notify();
+                true
+            }
+            Err(error) => {
+                if let Some(form) = self.interest_form.as_mut() {
+                    form.error = Some(error.to_string());
+                }
+                cx.notify();
+                false
+            }
+        }
+    }
+
+    fn request_cancel_interest_accrual(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dirty = self
+            .interest_form
+            .as_ref()
+            .is_some_and(|form| form.input(cx) != form.snapshot);
+        if dirty {
+            if let Some(form) = self.interest_form.as_mut() {
+                form.confirm_discard = true;
+            }
+        } else {
+            self.interest_form = None;
+            window.close_dialog(cx);
+        }
+        cx.notify();
+    }
+
+    fn render_interest_accrual_dialog(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(form) = self.interest_form.as_ref() else {
+            return div().into_any_element();
+        };
+        if form.confirm_discard {
+            return self.render_interest_discard_confirmation(cx);
+        }
+        self.render_interest_form(cx)
+    }
+
+    fn render_interest_discard_confirmation(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_4()
+            .child("Несохранённые изменения будут потеряны.")
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("interest-continue-editing")
+                            .label("Вернуться к форме")
+                            .on_click(cx.listener(|page, _, _, cx| {
+                                if let Some(form) = page.interest_form.as_mut() {
+                                    form.confirm_discard = false;
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("interest-discard-changes")
+                            .primary()
+                            .label("Не сохранять")
+                            .on_click(cx.listener(|page, _, window, cx| {
+                                page.interest_form = None;
+                                window.close_dialog(cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn set_higher_rate_applied(
+        &mut self,
+        checked: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(form) = self.interest_form.as_mut() else {
+            return;
+        };
+        form.higher_rate_applied = checked;
+        form.error = None;
+        match interest_amount_for_rate_change(&form.account, checked, form.manual_amount) {
+            Ok(Some(amount)) => {
+                let amount = format!("{amount:.2}");
+                form.automatic_amount = amount.clone();
+                form.manual_amount = false;
+                form.income_amount
+                    .update(cx, |state, cx| state.set_value(amount, window, cx));
+            }
+            Ok(None) => {}
+            Err(error) => form.error = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
+    fn render_interest_form(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(form) = self.interest_form.as_ref() else {
+            return div().into_any_element();
+        };
+        let danger = cx.theme().danger;
+        let warning = cx.theme().warning;
+        let field = |label: &'static str, width: f32, control: AnyElement| {
+            div()
+                .w(px(width))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_size(px(12.0)).child(label))
+                .child(control)
+        };
+        let row = || div().flex().items_end().gap_3();
+        let mut content = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .child(format!("Накопление: {}", form.account.title)),
+            )
+            .child(
+                row()
+                    .child(field(
+                        "Дата начисления процентов",
+                        250.0,
+                        DatePicker::new(&form.accrual_date)
+                            .cleanable(true)
+                            .into_any_element(),
+                    ))
+                    .child(field(
+                        "Место начисления процентов",
+                        350.0,
+                        Select::new(&form.interest_destination_select).into_any_element(),
+                    )),
+            )
+            .child(
+                Checkbox::new("interest-create-income")
+                    .label("Сформировать доход")
+                    .checked(form.create_income)
+                    .on_click(cx.listener(|page, checked: &bool, _, cx| {
+                        if let Some(form) = page.interest_form.as_mut() {
+                            form.create_income = *checked;
+                            form.error = None;
+                        }
+                        cx.notify();
+                    })),
+            );
+
+        if form.create_income {
+            content = content
+                .child(
+                    row()
+                        .child(field(
+                            "Дата дохода",
+                            230.0,
+                            DatePicker::new(&form.income_date)
+                                .cleanable(true)
+                                .into_any_element(),
+                        ))
+                        .child(field(
+                            "Сумма",
+                            230.0,
+                            Input::new(&form.income_amount).into_any_element(),
+                        ))
+                        .child(field(
+                            "Валюта",
+                            180.0,
+                            Select::new(&form.income_currency_select).into_any_element(),
+                        )),
+                )
+                .child(
+                    row()
+                        .child(field(
+                            "Категория дохода",
+                            300.0,
+                            Select::new(&form.category_select)
+                                .placeholder("Выберите категорию")
+                                .into_any_element(),
+                        ))
+                        .child(field(
+                            "Получатель дохода",
+                            350.0,
+                            Select::new(&form.recipient_select)
+                                .into_any_element(),
+                        )),
+                )
+                .child(selectable_text(
+                    "interest-form-calculation-note",
+                    "Сумма по выбранной ставке: остаток × ставка / 100; даты и условия банка не проверяются.",
+                ));
+
+            if form.account.rate_after_threshold.is_some() {
+                content = content.child(
+                    Checkbox::new("interest-higher-rate-confirmation")
+                        .label("Условия для повышенного процента выполнены")
+                        .checked(form.higher_rate_applied)
+                        .on_click(cx.listener(|page, checked: &bool, window, cx| {
+                            page.set_higher_rate_applied(*checked, window, cx)
+                        })),
+                );
+            }
+
+            let savings_recipient_selected =
+                form.recipient == Some(SavingsInterestIncomeRecipient::Savings);
+            if savings_recipient_selected {
+                let message = if !form.account.is_active {
+                    Some("Пополнение неактивного накопления недоступно".to_owned())
+                } else {
+                    match form.account.currency {
+                        None => {
+                            Some("Сначала укажите валюту накопления в его настройках".to_owned())
+                        }
+                        Some(currency) if Some(currency) != form.income_currency => {
+                            Some("Валюта накопления должна совпадать с валютой дохода".to_owned())
+                        }
+                        Some(_) => None,
+                    }
+                };
+                if let Some(message) = message {
+                    content = content.child(selectable_message(
+                        "interest-recipient-currency-warning",
+                        message,
+                        warning,
+                    ));
+                }
+            }
+
+            content = content.child(field(
+                "Комментарий",
+                740.0,
+                Textarea::new(&form.comment).into_any_element(),
+            ));
+        }
+
+        if let Some(error) = &form.error {
+            content = content.child(selectable_message(
+                "interest-accrual-error",
+                error.clone(),
+                danger,
+            ));
+        }
+
+        content = content.child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(
+                    Button::new("interest-accrual-save")
+                        .primary()
+                        .label("Сохранить")
+                        .w(px(120.0))
+                        .h(px(36.0))
+                        .on_click(cx.listener(|page, _, window, cx| {
+                            if page.save_interest_accrual(cx) {
+                                window.close_dialog(cx);
+                            }
+                        })),
+                )
+                .child(
+                    Button::new("interest-accrual-cancel")
+                        .label("Отмена")
+                        .w(px(120.0))
+                        .h(px(36.0))
+                        .on_click(cx.listener(|page, _, window, cx| {
+                            page.request_cancel_interest_accrual(window, cx)
+                        })),
+                ),
+        );
+        content
+            .p_4()
+            .max_h(px(620.0))
+            .overflow_y_scrollbar()
+            .into_any_element()
     }
 
     fn request_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1317,31 +2130,58 @@ fn format_column_widths(widths: &[f32]) -> String {
 }
 
 fn parse_column_widths(value: &str) -> Option<Vec<f32>> {
+    Some(column_widths_with_fixed_actions(parse_width_values(
+        value,
+        COLUMN_HEADINGS.len(),
+    )?))
+}
+
+fn parse_width_values(value: &str, count: usize) -> Option<Vec<f32>> {
     let widths = value
         .split(',')
         .map(|part| part.trim().parse::<f32>().ok())
         .collect::<Option<Vec<_>>>()?;
-    (widths.len() == COLUMN_HEADINGS.len()
-        && widths.iter().all(|width| {
-            width.is_finite() && (MIN_COLUMN_WIDTH..=MAX_COLUMN_WIDTH).contains(width)
+    (widths.len() == count
+        && widths.iter().enumerate().all(|(index, width)| {
+            width.is_finite()
+                && ((count == COLUMN_HEADINGS.len()
+                    && index == COL_INTEREST_ACTION
+                    && *width == INTEREST_ACTION_COLUMN_WIDTH)
+                    || (MIN_COLUMN_WIDTH..=MAX_COLUMN_WIDTH).contains(width))
         }))
     .then_some(widths)
 }
 
-/// Ширины сохранялись по индексам; после перестановки `Название` и `Банк` возвращаем каждой её ширину.
+fn insert_interest_action_width(mut widths: Vec<f32>) -> Vec<f32> {
+    widths.insert(COL_INTEREST_ACTION, INTEREST_ACTION_COLUMN_WIDTH);
+    column_widths_with_fixed_actions(widths)
+}
+
+fn parse_v3_column_widths(value: &str) -> Option<Vec<f32>> {
+    Some(insert_interest_action_width(parse_width_values(
+        value,
+        COLUMN_HEADINGS.len() - 1,
+    )?))
+}
+
+/// Ширины V2 сохранялись по индексам; после перестановки `Название` и `Банк` возвращаем каждой её ширину.
 fn parse_previous_column_widths(value: &str) -> Option<Vec<f32>> {
-    let mut widths = parse_column_widths(value)?;
+    let mut widths = parse_width_values(value, COLUMN_HEADINGS.len() - 1)?;
     widths.swap(COL_TITLE, COL_BANK);
-    Some(column_widths_with_fixed_actions(widths))
+    Some(insert_interest_action_width(widths))
 }
 
 fn parse_legacy_column_widths(value: &str) -> Option<Vec<f32>> {
-    let mut widths = parse_previous_column_widths(value)?;
+    let mut widths = parse_width_values(value, COLUMN_HEADINGS.len() - 1)?;
+    widths.swap(COL_TITLE, COL_BANK);
     widths.swap(COL_OPENED_DATE, COL_TERM);
-    Some(column_widths_with_fixed_actions(widths))
+    Some(insert_interest_action_width(widths))
 }
 
 fn column_widths_with_fixed_actions(mut widths: Vec<f32>) -> Vec<f32> {
+    if let Some(width) = widths.get_mut(COL_INTEREST_ACTION) {
+        *width = INTEREST_ACTION_COLUMN_WIDTH;
+    }
     if let Some(width) = widths.get_mut(COL_ACTIONS) {
         *width = ACTIONS_COLUMN_WIDTH;
     }
@@ -1362,17 +2202,34 @@ fn load_column_widths(database: &Database) -> Vec<f32> {
             }),
         Ok(None) => match finance_db::get_app_setting(database, PREVIOUS_SAVINGS_COLUMN_WIDTHS_KEY)
         {
-            Ok(Some(value)) => parse_previous_column_widths(&value).unwrap_or_else(|| {
+            Ok(Some(value)) => parse_v3_column_widths(&value).unwrap_or_else(|| {
                 eprintln!("{INVALID_WIDTHS}");
                 DEFAULT_COLUMN_WIDTHS.to_vec()
             }),
             Ok(None) => {
-                match finance_db::get_app_setting(database, LEGACY_SAVINGS_COLUMN_WIDTHS_KEY) {
-                    Ok(Some(value)) => parse_legacy_column_widths(&value).unwrap_or_else(|| {
+                match finance_db::get_app_setting(database, OLDER_SAVINGS_COLUMN_WIDTHS_KEY) {
+                    Ok(Some(value)) => parse_previous_column_widths(&value).unwrap_or_else(|| {
                         eprintln!("{INVALID_WIDTHS}");
                         DEFAULT_COLUMN_WIDTHS.to_vec()
                     }),
-                    Ok(None) => DEFAULT_COLUMN_WIDTHS.to_vec(),
+                    Ok(None) => {
+                        match finance_db::get_app_setting(
+                            database,
+                            LEGACY_SAVINGS_COLUMN_WIDTHS_KEY,
+                        ) {
+                            Ok(Some(value)) => {
+                                parse_legacy_column_widths(&value).unwrap_or_else(|| {
+                                    eprintln!("{INVALID_WIDTHS}");
+                                    DEFAULT_COLUMN_WIDTHS.to_vec()
+                                })
+                            }
+                            Ok(None) => DEFAULT_COLUMN_WIDTHS.to_vec(),
+                            Err(error) => {
+                                eprintln!("{READ_ERROR} {error}");
+                                DEFAULT_COLUMN_WIDTHS.to_vec()
+                            }
+                        }
+                    }
                     Err(error) => {
                         eprintln!("{READ_ERROR} {error}");
                         DEFAULT_COLUMN_WIDTHS.to_vec()
@@ -1494,19 +2351,26 @@ impl TableDelegate for SavingsTable {
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
         let is_actions = col_ix == COL_ACTIONS;
+        let is_interest_action = col_ix == COL_INTEREST_ACTION;
+        let is_fixed_width = is_actions || is_interest_action;
+        let action_width = if is_interest_action {
+            INTEREST_ACTION_COLUMN_WIDTH
+        } else {
+            ACTIONS_COLUMN_WIDTH
+        };
         let column = Column::new(COLUMN_HEADINGS[col_ix], COLUMN_HEADINGS[col_ix])
             .width(px(self.widths[col_ix]))
-            .min_width(px(if is_actions {
-                ACTIONS_COLUMN_WIDTH
+            .min_width(px(if is_fixed_width {
+                action_width
             } else {
                 MIN_COLUMN_WIDTH
             }))
-            .max_width(px(if is_actions {
-                ACTIONS_COLUMN_WIDTH
+            .max_width(px(if is_fixed_width {
+                action_width
             } else {
                 MAX_COLUMN_WIDTH
             }))
-            .resizable(!is_actions)
+            .resizable(!is_fixed_width)
             .movable(false);
         let column = if is_actions {
             column.fixed(ColumnFixed::Right)
@@ -1661,6 +2525,25 @@ impl TableDelegate for SavingsTable {
                     account.interest_destination.title().to_owned(),
                 ))
                 .into_any_element(),
+            COL_INTEREST_ACTION => {
+                let id = account.id;
+                let page = self.page.clone();
+                div()
+                    .flex()
+                    .w_full()
+                    .justify_center()
+                    .child(
+                        Button::new(("savings-interest-accrual", id as usize))
+                            .xsmall()
+                            .icon(IconName::Inspector)
+                            .on_click(move |_, window, cx| {
+                                let _ = page.update(cx, |page, cx| {
+                                    page.open_interest_accrual(id, window, cx)
+                                });
+                            }),
+                    )
+                    .into_any_element()
+            }
             COL_ACTIONS => {
                 let id = account.id;
                 let title = account.title.clone();
@@ -1783,21 +2666,33 @@ impl Render for SavingsPage {
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
-    use finance_core::{Currency, InterestDestination, SavingsAccount, SavingsTerm};
+    use finance_core::{
+        Currency, InterestDestination, PaymentCardType, PaymentDocument, PaymentSystem,
+        SavingsAccount, SavingsTerm,
+    };
+    use finance_db::SavingsInterestIncomeRecipient;
     use gpui_kit::component::table::ColumnSort;
     use rust_decimal::Decimal;
 
     use super::{
-        column_widths_key, column_widths_with_fixed_actions, destination_filter_labels,
-        filter_savings, format_column_widths, load_column_widths, parse_column_widths,
-        parse_legacy_column_widths, parse_previous_column_widths, savings_group_headers,
-        sort_savings, term_filter_labels, tooltip_items, SavingsForm, ACTIONS_COLUMN_WIDTH,
-        BANK_FILTER_ITEM_ID, COLUMN_HEADINGS, COL_ACTIONS, COL_AMOUNT, COL_BANK, COL_BASE_RATE,
+        build_interest_accrual_update, column_widths_key, column_widths_with_fixed_actions,
+        default_interest_amount, destination_filter_labels, filter_savings, format_column_widths,
+        income_date_after_accrual_change, interest_amount_for_rate_change,
+        interest_recipient_choices, load_column_widths, parse_column_widths,
+        parse_legacy_column_widths, parse_previous_column_widths, parse_v3_column_widths,
+        savings_group_headers, sort_savings, term_filter_labels, tooltip_items,
+        InterestAccrualInput, SavingsForm, ACTIONS_COLUMN_WIDTH, BANK_FILTER_ITEM_ID,
+        COLUMN_HEADINGS, COL_ACTIONS, COL_AMOUNT, COL_BANK, COL_BASE_RATE, COL_INTEREST_ACTION,
         COL_INTEREST_DATE, COL_OPENED_DATE, COL_RATE_AFTER_THRESHOLD, COL_TERM, COL_THRESHOLD,
-        COL_TITLE, DEFAULT_COLUMN_WIDTHS, INTEREST_GROUP_LABEL, INTEREST_GROUP_SPAN,
-        LEGACY_SAVINGS_COLUMN_WIDTHS_KEY, PREVIOUS_SAVINGS_COLUMN_WIDTHS_KEY, RATE_GROUP_LABEL,
-        RATE_GROUP_SPAN,
+        COL_TITLE, DEFAULT_COLUMN_WIDTHS, INTEREST_ACTION_COLUMN_WIDTH, INTEREST_GROUP_LABEL,
+        INTEREST_GROUP_SPAN, LEGACY_SAVINGS_COLUMN_WIDTHS_KEY, OLDER_SAVINGS_COLUMN_WIDTHS_KEY,
+        PREVIOUS_SAVINGS_COLUMN_WIDTHS_KEY, RATE_GROUP_LABEL, RATE_GROUP_SPAN,
+        SAVINGS_COLUMN_WIDTHS_KEY,
     };
+
+    const DEFAULT_V3_COLUMN_WIDTHS: [f32; 12] = [
+        120.0, 85.0, 90.0, 70.0, 80.0, 170.0, 90.0, 95.0, 115.0, 105.0, 120.0, 160.0,
+    ];
 
     fn valid_savings_form() -> SavingsForm {
         SavingsForm {
@@ -1810,6 +2705,204 @@ mod tests {
             is_active: true,
             ..SavingsForm::default()
         }
+    }
+
+    fn interest_account() -> SavingsAccount {
+        let mut account = sortable_savings()[0].clone();
+        account.amount = Decimal::from(1_000);
+        account.base_rate = Decimal::new(55, 1);
+        account.rate_after_threshold = Some(Decimal::new(725, 2));
+        account.currency = Some(Currency::Rub);
+        account
+    }
+
+    fn interest_accrual_input() -> InterestAccrualInput {
+        InterestAccrualInput {
+            accrual_date: NaiveDate::from_ymd_opt(2026, 11, 25),
+            interest_destination: Some(InterestDestination::Withdraw),
+            create_income: false,
+            income_date: NaiveDate::from_ymd_opt(2026, 11, 24),
+            amount: "12.34".to_owned(),
+            currency: Some(Currency::Rub),
+            category_id: Some(42),
+            recipient: Some(SavingsInterestIncomeRecipient::WithoutCard),
+            comment: "Комментарий".to_owned(),
+            higher_rate_applied: false,
+            manual_amount: false,
+        }
+    }
+
+    fn payment_document(id: i64, currency: Currency) -> PaymentDocument {
+        PaymentDocument {
+            id,
+            name: Some(format!("Карта {id}")),
+            bank_id: 1,
+            bank_name: "Банк".to_owned(),
+            payment_system: PaymentSystem::Mir,
+            card_type: PaymentCardType::Debit,
+            amount: Decimal::ZERO,
+            currency: Some(currency),
+            due_date: None,
+            grace_period_days: None,
+            next_payment_amount: None,
+            affects_deposit_rate: false,
+            min_monthly_spend: None,
+            linked_savings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn interest_default_uses_selected_rate_without_date_factor() {
+        let account = interest_account();
+
+        assert_eq!(
+            default_interest_amount(&account, false),
+            Ok(Decimal::from(55))
+        );
+        assert_eq!(
+            default_interest_amount(&account, true),
+            Ok(Decimal::new(725, 1))
+        );
+    }
+
+    #[test]
+    fn income_date_follows_accrual_date_while_not_manually_edited() {
+        let accrual_date = NaiveDate::from_ymd_opt(2026, 11, 25);
+
+        assert_eq!(
+            income_date_after_accrual_change(
+                accrual_date,
+                NaiveDate::from_ymd_opt(2026, 11, 20),
+                false,
+            ),
+            accrual_date
+        );
+    }
+
+    #[test]
+    fn manually_edited_income_date_is_not_replaced_by_accrual_date() {
+        let manual_date = NaiveDate::from_ymd_opt(2026, 11, 18);
+
+        assert_eq!(
+            income_date_after_accrual_change(
+                NaiveDate::from_ymd_opt(2026, 11, 25),
+                manual_date,
+                true,
+            ),
+            manual_date
+        );
+    }
+
+    #[test]
+    fn rate_change_does_not_replace_manually_edited_amount() {
+        let account = interest_account();
+
+        assert_eq!(
+            interest_amount_for_rate_change(&account, true, true),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn interest_accrual_without_income_only_builds_reference_fields() {
+        let account = interest_account();
+        let mut input = interest_accrual_input();
+        input.amount = "invalid hidden amount".to_owned();
+        input.currency = None;
+        input.category_id = None;
+        input.recipient = None;
+
+        let update = build_interest_accrual_update(&input, &account).unwrap();
+
+        assert_eq!(
+            update,
+            (
+                Some(NaiveDate::from_ymd_opt(2026, 11, 25).unwrap()),
+                InterestDestination::Withdraw,
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn interest_accrual_can_keep_the_reference_date_empty_without_income() {
+        let account = interest_account();
+        let mut input = interest_accrual_input();
+        input.accrual_date = None;
+
+        let update = build_interest_accrual_update(&input, &account).unwrap();
+
+        assert_eq!(update.0, None);
+    }
+
+    #[test]
+    fn interest_accrual_builds_an_ordinary_income_with_selected_fields() {
+        let account = interest_account();
+        let mut input = interest_accrual_input();
+        input.create_income = true;
+
+        let (_, _, income) = build_interest_accrual_update(&input, &account).unwrap();
+
+        let income = income.unwrap();
+        assert_eq!(income.date, NaiveDate::from_ymd_opt(2026, 11, 24).unwrap());
+        assert_eq!(income.category_id, 42);
+        assert_eq!(income.amount, Decimal::new(1234, 2));
+        assert_eq!(income.currency, Currency::Rub);
+        assert_eq!(income.comment, "Комментарий");
+        assert_eq!(
+            income.recipient,
+            SavingsInterestIncomeRecipient::WithoutCard
+        );
+    }
+
+    #[test]
+    fn interest_accrual_rejects_savings_recipient_without_matching_currency() {
+        let mut account = interest_account();
+        let mut input = interest_accrual_input();
+        input.create_income = true;
+        input.recipient = Some(SavingsInterestIncomeRecipient::Savings);
+        account.currency = None;
+
+        let error = build_interest_accrual_update(&input, &account).unwrap_err();
+
+        assert!(error.contains("сначала укажите его валюту"));
+    }
+
+    #[test]
+    fn interest_accrual_rejects_savings_recipient_with_a_different_currency() {
+        let account = interest_account();
+        let mut input = interest_accrual_input();
+        input.create_income = true;
+        input.recipient = Some(SavingsInterestIncomeRecipient::Savings);
+        input.currency = Some(Currency::Usd);
+
+        let error = build_interest_accrual_update(&input, &account).unwrap_err();
+
+        assert!(error.contains("должна совпадать"));
+    }
+
+    #[test]
+    fn interest_accrual_recipient_list_filters_cards_by_income_currency() {
+        let account = interest_account();
+        let cards = [
+            payment_document(1, Currency::Rub),
+            payment_document(2, Currency::Usd),
+        ];
+
+        let (recipients, labels) =
+            interest_recipient_choices(&account, &cards, Some(Currency::Rub));
+
+        assert_eq!(
+            recipients,
+            [
+                SavingsInterestIncomeRecipient::WithoutCard,
+                SavingsInterestIncomeRecipient::PaymentDocument(1),
+                SavingsInterestIncomeRecipient::Savings,
+            ]
+        );
+        assert_eq!(labels[0], "Без карты");
+        assert!(labels[1].contains("Карта 1"));
+        assert!(labels[2].contains(&account.title));
     }
 
     #[test]
@@ -2035,7 +3128,8 @@ mod tests {
         assert_eq!(COLUMN_HEADINGS[COL_RATE_AFTER_THRESHOLD], "Повышенная");
         assert_eq!(COLUMN_HEADINGS[COL_THRESHOLD], "Условие");
         assert_eq!(COLUMN_HEADINGS[COL_INTEREST_DATE], "Дата");
-        assert_eq!(COLUMN_HEADINGS[COL_ACTIONS - 1], "Начисление");
+        assert_eq!(COLUMN_HEADINGS[COL_INTEREST_ACTION - 1], "Начисление");
+        assert_eq!(COLUMN_HEADINGS[COL_INTEREST_ACTION], "");
 
         let rows = savings_group_headers();
         assert_eq!(rows.len(), 1);
@@ -2060,6 +3154,12 @@ mod tests {
         );
         assert_eq!(groups[3].label, INTEREST_GROUP_LABEL);
         assert_eq!(groups[3].span, INTEREST_GROUP_SPAN);
+        assert_eq!(INTEREST_GROUP_SPAN, 3);
+        assert_eq!(
+            DEFAULT_COLUMN_WIDTHS[COL_INTEREST_ACTION],
+            INTEREST_ACTION_COLUMN_WIDTH
+        );
+        assert_eq!(COL_ACTIONS, COLUMN_HEADINGS.len() - 1);
     }
 
     #[test]
@@ -2180,16 +3280,43 @@ mod tests {
     }
 
     #[test]
-    fn previous_savings_column_widths_follow_swapped_title_and_bank() {
+    fn v3_savings_column_widths_migrate_to_v4_without_losing_user_widths() {
         let database = filtered_database();
-        let mut previous_widths = DEFAULT_COLUMN_WIDTHS;
-        // V2 хранил ширину банка первым, а названия — вторым.
-        previous_widths.swap(COL_TITLE, COL_BANK);
-        previous_widths[0] = 245.0;
-        previous_widths[COL_ACTIONS] = 235.0;
+        let mut previous_widths = DEFAULT_V3_COLUMN_WIDTHS;
+        previous_widths[COL_TITLE] = 245.0;
+        previous_widths[11] = 235.0;
         finance_db::set_app_setting(
             &database,
             PREVIOUS_SAVINGS_COLUMN_WIDTHS_KEY,
+            &format_column_widths(&previous_widths),
+        )
+        .expect("v3 column widths should be stored");
+
+        let mut expected = DEFAULT_COLUMN_WIDTHS;
+        expected[COL_TITLE] = 245.0;
+        assert_eq!(
+            parse_v3_column_widths(&format_column_widths(&previous_widths)),
+            Some(expected.to_vec())
+        );
+        assert_eq!(load_column_widths(&database), expected);
+        assert_eq!(
+            finance_db::get_app_setting(&database, SAVINGS_COLUMN_WIDTHS_KEY)
+                .expect("v4 setting should be readable"),
+            None
+        );
+    }
+
+    #[test]
+    fn previous_savings_column_widths_follow_swapped_title_and_bank() {
+        let database = filtered_database();
+        let mut previous_widths = DEFAULT_V3_COLUMN_WIDTHS;
+        // V2 хранил ширину банка первым, а названия — вторым.
+        previous_widths.swap(COL_TITLE, COL_BANK);
+        previous_widths[0] = 245.0;
+        previous_widths[11] = 235.0;
+        finance_db::set_app_setting(
+            &database,
+            OLDER_SAVINGS_COLUMN_WIDTHS_KEY,
             &format_column_widths(&previous_widths),
         )
         .expect("previous column widths should be stored");
@@ -2207,11 +3334,11 @@ mod tests {
     #[test]
     fn legacy_savings_column_widths_are_remapped_to_the_new_column_order() {
         let database = filtered_database();
-        let mut legacy_widths = DEFAULT_COLUMN_WIDTHS;
+        let mut legacy_widths = DEFAULT_V3_COLUMN_WIDTHS;
         legacy_widths.swap(COL_TITLE, COL_BANK);
         legacy_widths[COL_OPENED_DATE] = 125.0;
         legacy_widths[COL_TERM] = 235.0;
-        legacy_widths[COL_ACTIONS] = 220.0;
+        legacy_widths[11] = 220.0;
         finance_db::set_app_setting(
             &database,
             LEGACY_SAVINGS_COLUMN_WIDTHS_KEY,
@@ -2219,10 +3346,9 @@ mod tests {
         )
         .expect("legacy column widths should be stored");
 
-        let mut expected = legacy_widths;
-        expected.swap(COL_OPENED_DATE, COL_TERM);
-        expected.swap(COL_TITLE, COL_BANK);
-        expected[COL_ACTIONS] = ACTIONS_COLUMN_WIDTH;
+        let mut expected = DEFAULT_COLUMN_WIDTHS;
+        expected[COL_OPENED_DATE] = 235.0;
+        expected[COL_TERM] = 125.0;
         assert_eq!(
             parse_legacy_column_widths(&format_column_widths(&legacy_widths)),
             Some(expected.to_vec())
@@ -2234,11 +3360,13 @@ mod tests {
     fn changing_savings_column_widths_keeps_actions_fixed_and_other_widths() {
         let mut widths = DEFAULT_COLUMN_WIDTHS.to_vec();
         widths[COL_TITLE] = 275.0;
+        widths[COL_INTEREST_ACTION] = 100.0;
         widths[COL_ACTIONS] = 230.0;
 
         let widths = column_widths_with_fixed_actions(widths);
 
         assert_eq!(widths[COL_TITLE], 275.0);
+        assert_eq!(widths[COL_INTEREST_ACTION], INTEREST_ACTION_COLUMN_WIDTH);
         assert_eq!(widths[COL_ACTIONS], ACTIONS_COLUMN_WIDTH);
     }
 

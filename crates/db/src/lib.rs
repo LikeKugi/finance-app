@@ -1932,6 +1932,87 @@ pub fn save_savings(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SavingsInterestIncomeRecipient {
+    WithoutCard,
+    PaymentDocument(i64),
+    Savings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavingsInterestIncome {
+    pub date: NaiveDate,
+    pub category_id: i64,
+    pub amount: Decimal,
+    pub currency: Currency,
+    pub comment: String,
+    pub recipient: SavingsInterestIncomeRecipient,
+}
+
+/// Updates the interest accrual details and optionally records an income and top-up atomically.
+pub fn save_savings_interest_accrual(
+    connection: &Connection,
+    savings_id: i64,
+    accrual_date: Option<NaiveDate>,
+    interest_destination: InterestDestination,
+    income: Option<SavingsInterestIncome>,
+) -> Result<Option<i64>, DbError> {
+    let transaction =
+        rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    let changed = transaction.execute(
+        "UPDATE savings SET interest_accrual_date = ?1, interest_destination = ?2 WHERE id = ?3",
+        params![
+            accrual_date.map(|date| date.format("%Y-%m-%d").to_string()),
+            interest_destination.code(),
+            savings_id
+        ],
+    )?;
+    if changed == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows.into());
+    }
+
+    let income_id = if let Some(income) = income {
+        let payment_document_id = match income.recipient {
+            SavingsInterestIncomeRecipient::WithoutCard
+            | SavingsInterestIncomeRecipient::Savings => None,
+            SavingsInterestIncomeRecipient::PaymentDocument(id) => Some(id),
+        };
+        let income_id = save_transaction_in_transaction(
+            &transaction,
+            TransactionKind::Income,
+            None,
+            income.date,
+            income.category_id,
+            income.amount,
+            income.currency,
+            &income.comment,
+            payment_document_id,
+            false,
+            None,
+        )?;
+
+        if income.recipient == SavingsInterestIncomeRecipient::Savings {
+            let transfer = TransferDetails {
+                operation_date: income.date,
+                operation_type: TransferOperationType::TopUp,
+                source: TransferEndpoint::External,
+                destination: TransferEndpoint::Savings(savings_id),
+                amount: income.amount,
+                currency: income.currency,
+                comment: None,
+            };
+            save_transfer_in_transaction(&transaction, None, &transfer)?;
+        }
+
+        Some(income_id)
+    } else {
+        None
+    };
+
+    transaction.commit()?;
+    Ok(income_id)
+}
+
 /// Deletes a savings account without cascading into other financial records.
 pub fn delete_savings(connection: &Connection, id: i64) -> Result<(), DbError> {
     let deleted = connection.execute("DELETE FROM savings WHERE id = ?1", [id])?;
@@ -2984,22 +3065,32 @@ pub fn save_transfer(
     id: Option<i64>,
     transfer: &TransferDetails,
 ) -> Result<i64, DbError> {
-    transfer.validate()?;
     let transaction =
         rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
-    validate_transfer_endpoint(&transaction, &transfer.source, transfer.currency, true)?;
-    validate_transfer_endpoint(&transaction, &transfer.destination, transfer.currency, true)?;
+    let saved_id = save_transfer_in_transaction(&transaction, id, transfer)?;
+    transaction.commit()?;
+    Ok(saved_id)
+}
+
+fn save_transfer_in_transaction(
+    connection: &Connection,
+    id: Option<i64>,
+    transfer: &TransferDetails,
+) -> Result<i64, DbError> {
+    transfer.validate()?;
+    validate_transfer_endpoint(connection, &transfer.source, transfer.currency, true)?;
+    validate_transfer_endpoint(connection, &transfer.destination, transfer.currency, true)?;
 
     let saved_id = if let Some(id) = id {
-        let previous = load_transfer(&transaction, id)?;
+        let previous = load_transfer(connection, id)?;
         apply_transfer_legs(
-            &transaction,
+            connection,
             previous.source,
             previous.destination,
             previous.amount,
             Decimal::NEGATIVE_ONE,
         )?;
-        let changed = transaction.execute(
+        let changed = connection.execute(
             "UPDATE transfers
              SET operation_date = ?1, operation_type = ?2, source_kind = ?3,
                  source_payment_document_id = ?4, source_savings_id = ?5,
@@ -3026,7 +3117,7 @@ pub fn save_transfer(
         }
         id
     } else {
-        transaction.execute(
+        connection.execute(
             "INSERT INTO transfers (
                  operation_date, operation_type, source_kind, source_payment_document_id,
                  source_savings_id, destination_kind, destination_payment_document_id,
@@ -3047,17 +3138,16 @@ pub fn save_transfer(
                 Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
             ],
         )?;
-        transaction.last_insert_rowid()
+        connection.last_insert_rowid()
     };
 
     apply_transfer_legs(
-        &transaction,
+        connection,
         transfer.source,
         transfer.destination,
         transfer.amount,
         Decimal::ONE,
     )?;
-    transaction.commit()?;
     Ok(saved_id)
 }
 
@@ -3179,10 +3269,10 @@ mod tests {
         list_transfers_filtered, load_analysis_transactions,
         load_analysis_transactions_by_category, restore_pending_database_import, save_bank,
         save_category, save_expense_place, save_next_payment, save_payment_document, save_price,
-        save_savings, save_transaction, save_transaction_with_card,
+        save_savings, save_savings_interest_accrual, save_transaction, save_transaction_with_card,
         save_transaction_with_card_and_rate_effect_and_place, save_transfer, set_app_setting,
         set_currency_exchange_rate, set_primary_currency, stage_database_import, DbError,
-        NextPaymentExpense, MIGRATIONS,
+        NextPaymentExpense, SavingsInterestIncome, SavingsInterestIncomeRecipient, MIGRATIONS,
     };
 
     fn transfer_fixture() -> (tempfile::TempDir, Connection, i64, i64, i64) {
@@ -3441,6 +3531,423 @@ mod tests {
             expense_place_id,
             affects_deposit_rate: false,
         }
+    }
+
+    fn savings_interest_fixture(
+        savings_currency: Option<Currency>,
+    ) -> (tempfile::TempDir, Connection, i64, i64, i64) {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let bank_id = save_bank(&connection, None, "Банк начисления", "").unwrap();
+        let income_category_id = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Проценты",
+            None,
+            true,
+        )
+        .unwrap();
+
+        let mut savings = savings_details(bank_id);
+        savings.amount = Decimal::from_str("500.75").unwrap();
+        savings.currency = savings_currency;
+        savings.interest_accrual_date = NaiveDate::from_ymd_opt(2026, 10, 10);
+        savings.interest_destination = InterestDestination::Reinvest;
+        savings.term_type = SavingsTerm::Unlimited;
+        savings.term_end_date = None;
+        let savings_id = save_savings(&connection, None, &savings).unwrap();
+
+        let mut debit_card = payment_document_details(bank_id);
+        debit_card.name = Some("Дебетовая карта начисления".to_owned());
+        debit_card.amount = Decimal::from(1_000);
+        debit_card.currency = Some(Currency::Rub);
+        let debit_card_id = save_payment_document(&connection, None, &debit_card).unwrap();
+
+        (
+            directory,
+            connection,
+            savings_id,
+            income_category_id,
+            debit_card_id,
+        )
+    }
+
+    fn savings_interest_income(
+        date: NaiveDate,
+        category_id: i64,
+        recipient: SavingsInterestIncomeRecipient,
+    ) -> SavingsInterestIncome {
+        SavingsInterestIncome {
+            date,
+            category_id,
+            amount: Decimal::from_str("12.34").unwrap(),
+            currency: Currency::Rub,
+            comment: "Проценты за период".to_owned(),
+            recipient,
+        }
+    }
+
+    #[test]
+    fn save_savings_interest_accrual_updates_details_without_financial_entries() {
+        let (_directory, connection, savings_id, _, debit_card_id) =
+            savings_interest_fixture(Some(Currency::Rub));
+        let accrual_date = NaiveDate::from_ymd_opt(2026, 11, 25).unwrap();
+
+        let result = save_savings_interest_accrual(
+            &connection,
+            savings_id,
+            Some(accrual_date),
+            InterestDestination::Other,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result, None);
+        let (stored_date, destination): (String, String) = connection
+            .query_row(
+                "SELECT interest_accrual_date, interest_destination FROM savings WHERE id = ?1",
+                [savings_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored_date, "2026-11-25");
+        assert_eq!(destination, "other");
+        assert_eq!(savings_balance(&connection, savings_id), "500.75");
+        assert_eq!(card_balance(&connection, debit_card_id), "1000");
+        let income_count: i64 = connection
+            .query_row("SELECT count(*) FROM incomes", [], |row| row.get(0))
+            .unwrap();
+        let transfer_count: i64 = connection
+            .query_row("SELECT count(*) FROM transfers", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!((income_count, transfer_count), (0, 0));
+    }
+
+    #[test]
+    fn save_savings_interest_accrual_can_clear_the_reference_date() {
+        let (_directory, connection, savings_id, _, _) =
+            savings_interest_fixture(Some(Currency::Rub));
+
+        let result = save_savings_interest_accrual(
+            &connection,
+            savings_id,
+            None,
+            InterestDestination::Other,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result, None);
+        let (stored_date, destination): (Option<String>, String) = connection
+            .query_row(
+                "SELECT interest_accrual_date, interest_destination FROM savings WHERE id = ?1",
+                [savings_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored_date, None);
+        assert_eq!(destination, "other");
+    }
+
+    #[test]
+    fn save_savings_interest_accrual_creates_income_without_card() {
+        let (_directory, connection, savings_id, category_id, debit_card_id) =
+            savings_interest_fixture(Some(Currency::Rub));
+        let income_date = NaiveDate::from_ymd_opt(2026, 11, 24).unwrap();
+
+        let income_id = save_savings_interest_accrual(
+            &connection,
+            savings_id,
+            Some(NaiveDate::from_ymd_opt(2026, 11, 25).unwrap()),
+            InterestDestination::Withdraw,
+            Some(savings_interest_income(
+                income_date,
+                category_id,
+                SavingsInterestIncomeRecipient::WithoutCard,
+            )),
+        )
+        .unwrap()
+        .unwrap();
+
+        let (stored_date, stored_category, amount, currency, comment, card_id): (
+            String,
+            i64,
+            String,
+            String,
+            String,
+            Option<i64>,
+        ) = connection
+            .query_row(
+                "SELECT date, category_id, amount, currency, comment, payment_document_id
+                 FROM incomes WHERE id = ?1",
+                [income_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                stored_date,
+                stored_category,
+                amount,
+                currency,
+                comment,
+                card_id
+            ),
+            (
+                "2026-11-24".to_owned(),
+                category_id,
+                "12.34".to_owned(),
+                "RUB".to_owned(),
+                "Проценты за период".to_owned(),
+                None
+            )
+        );
+        assert_eq!(savings_balance(&connection, savings_id), "500.75");
+        assert_eq!(card_balance(&connection, debit_card_id), "1000");
+        let transfer_count: i64 = connection
+            .query_row("SELECT count(*) FROM transfers", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(transfer_count, 0);
+    }
+
+    #[test]
+    fn save_savings_interest_accrual_credits_selected_debit_card() {
+        let (_directory, connection, savings_id, category_id, debit_card_id) =
+            savings_interest_fixture(Some(Currency::Rub));
+
+        let income_id = save_savings_interest_accrual(
+            &connection,
+            savings_id,
+            Some(NaiveDate::from_ymd_opt(2026, 11, 25).unwrap()),
+            InterestDestination::Withdraw,
+            Some(savings_interest_income(
+                NaiveDate::from_ymd_opt(2026, 11, 24).unwrap(),
+                category_id,
+                SavingsInterestIncomeRecipient::PaymentDocument(debit_card_id),
+            )),
+        )
+        .unwrap()
+        .unwrap();
+
+        let stored_card_id: Option<i64> = connection
+            .query_row(
+                "SELECT payment_document_id FROM incomes WHERE id = ?1",
+                [income_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_card_id, Some(debit_card_id));
+        assert_eq!(card_balance(&connection, debit_card_id), "1012.34");
+        assert_eq!(savings_balance(&connection, savings_id), "500.75");
+        let transfer_count: i64 = connection
+            .query_row("SELECT count(*) FROM transfers", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(transfer_count, 0);
+    }
+
+    #[test]
+    fn save_savings_interest_accrual_creates_income_and_top_up_for_savings() {
+        let (_directory, connection, savings_id, category_id, debit_card_id) =
+            savings_interest_fixture(Some(Currency::Rub));
+        let income_date = NaiveDate::from_ymd_opt(2026, 11, 24).unwrap();
+
+        let income_id = save_savings_interest_accrual(
+            &connection,
+            savings_id,
+            Some(NaiveDate::from_ymd_opt(2026, 11, 25).unwrap()),
+            InterestDestination::Withdraw,
+            Some(savings_interest_income(
+                income_date,
+                category_id,
+                SavingsInterestIncomeRecipient::Savings,
+            )),
+        )
+        .unwrap()
+        .unwrap();
+
+        let income_date_text: String = connection
+            .query_row(
+                "SELECT date FROM incomes WHERE id = ?1",
+                [income_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(income_date_text, "2026-11-24");
+        let transfer: (String, String, String, String, i64, String, String) = connection
+            .query_row(
+                "SELECT operation_date, operation_type, source_kind, destination_kind,
+                        destination_savings_id, amount, currency
+                 FROM transfers",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            transfer,
+            (
+                "2026-11-24".to_owned(),
+                "top_up".to_owned(),
+                "external".to_owned(),
+                "savings".to_owned(),
+                savings_id,
+                "12.34".to_owned(),
+                "RUB".to_owned()
+            )
+        );
+        assert_eq!(savings_balance(&connection, savings_id), "513.09");
+        assert_eq!(card_balance(&connection, debit_card_id), "1000");
+    }
+
+    #[test]
+    fn save_savings_interest_accrual_rejects_savings_without_currency_atomically() {
+        let (_directory, connection, savings_id, category_id, _) = savings_interest_fixture(None);
+
+        let result = save_savings_interest_accrual(
+            &connection,
+            savings_id,
+            Some(NaiveDate::from_ymd_opt(2026, 11, 25).unwrap()),
+            InterestDestination::Other,
+            Some(savings_interest_income(
+                NaiveDate::from_ymd_opt(2026, 11, 24).unwrap(),
+                category_id,
+                SavingsInterestIncomeRecipient::Savings,
+            )),
+        );
+
+        assert!(matches!(
+            result,
+            Err(DbError::Domain(DomainError::TransferAccountCurrencyMissing))
+        ));
+        let (stored_date, destination): (String, String) = connection
+            .query_row(
+                "SELECT interest_accrual_date, interest_destination FROM savings WHERE id = ?1",
+                [savings_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (stored_date, destination),
+            ("2026-10-10".into(), "reinvest".into())
+        );
+        assert_eq!(savings_balance(&connection, savings_id), "500.75");
+        let (income_count, transfer_count): (i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT count(*) FROM incomes), (SELECT count(*) FROM transfers)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((income_count, transfer_count), (0, 0));
+    }
+
+    #[test]
+    fn save_savings_interest_accrual_rejects_currency_mismatch_atomically() {
+        let (_directory, connection, savings_id, category_id, _) =
+            savings_interest_fixture(Some(Currency::Usd));
+
+        let result = save_savings_interest_accrual(
+            &connection,
+            savings_id,
+            Some(NaiveDate::from_ymd_opt(2026, 11, 25).unwrap()),
+            InterestDestination::Other,
+            Some(savings_interest_income(
+                NaiveDate::from_ymd_opt(2026, 11, 24).unwrap(),
+                category_id,
+                SavingsInterestIncomeRecipient::Savings,
+            )),
+        );
+
+        assert!(matches!(
+            result,
+            Err(DbError::Domain(DomainError::TransferCurrencyMismatch))
+        ));
+        let (stored_date, destination): (String, String) = connection
+            .query_row(
+                "SELECT interest_accrual_date, interest_destination FROM savings WHERE id = ?1",
+                [savings_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (stored_date, destination),
+            ("2026-10-10".into(), "reinvest".into())
+        );
+        assert_eq!(savings_balance(&connection, savings_id), "500.75");
+        let (income_count, transfer_count): (i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT count(*) FROM incomes), (SELECT count(*) FROM transfers)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((income_count, transfer_count), (0, 0));
+    }
+
+    #[test]
+    fn save_savings_interest_accrual_rolls_back_income_and_transfer_if_balance_update_fails() {
+        let (_directory, connection, savings_id, category_id, _) =
+            savings_interest_fixture(Some(Currency::Rub));
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_savings_interest_balance
+                 BEFORE UPDATE OF amount ON savings
+                 BEGIN SELECT RAISE(ABORT, 'test failure'); END;",
+            )
+            .unwrap();
+
+        let result = save_savings_interest_accrual(
+            &connection,
+            savings_id,
+            Some(NaiveDate::from_ymd_opt(2026, 11, 25).unwrap()),
+            InterestDestination::Other,
+            Some(savings_interest_income(
+                NaiveDate::from_ymd_opt(2026, 11, 24).unwrap(),
+                category_id,
+                SavingsInterestIncomeRecipient::Savings,
+            )),
+        );
+
+        assert!(matches!(result, Err(DbError::Sqlite(_))));
+        let (stored_date, destination): (String, String) = connection
+            .query_row(
+                "SELECT interest_accrual_date, interest_destination FROM savings WHERE id = ?1",
+                [savings_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (stored_date, destination),
+            ("2026-10-10".into(), "reinvest".into())
+        );
+        assert_eq!(savings_balance(&connection, savings_id), "500.75");
+        let (income_count, transfer_count): (i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT count(*) FROM incomes), (SELECT count(*) FROM transfers)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((income_count, transfer_count), (0, 0));
     }
 
     #[test]

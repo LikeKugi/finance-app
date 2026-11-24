@@ -1046,6 +1046,26 @@ pub fn validate_savings(
     }
 }
 
+/// Calculates a default interest amount from a balance and a selected percentage rate.
+pub fn calculate_interest_amount(
+    balance: Decimal,
+    rate_percent: Decimal,
+) -> Result<Decimal, DomainError> {
+    if balance < Decimal::ZERO {
+        return Err(DomainError::InvalidSavingsAmount);
+    }
+    if rate_percent < Decimal::ZERO {
+        return Err(DomainError::InvalidSavingsRate);
+    }
+
+    let amount = balance
+        .checked_mul(rate_percent)
+        .and_then(|amount| amount.checked_div(Decimal::ONE_HUNDRED))
+        .ok_or(DomainError::AmountOverflow)?;
+
+    Ok(amount.round_dp_with_strategy(2, RoundingStrategy::MidpointAwayFromZero))
+}
+
 /// Parses a positive amount without passing through binary floating point.
 ///
 /// A comma is accepted as the decimal separator only when a dot is absent;
@@ -1429,9 +1449,9 @@ mod tests {
     use std::str::FromStr;
 
     use super::{
-        canonical_amount, parse_amount, parse_amount_expression, parse_non_negative_decimal,
-        rebase_exchange_rate, validate_currency_code, validate_exchange_rate,
-        validate_payment_document, validate_price, validate_savings,
+        calculate_interest_amount, canonical_amount, parse_amount, parse_amount_expression,
+        parse_non_negative_decimal, rebase_exchange_rate, validate_currency_code,
+        validate_exchange_rate, validate_payment_document, validate_price, validate_savings,
         validate_transfer_account_currency, validate_transfer_card_type,
         validate_transfer_savings_active, Currency, DomainError, InterestDestination,
         PaymentCardType, PaymentDocumentDetails, PaymentSystem, PriceFilter, SavingsTerm,
@@ -1498,6 +1518,58 @@ mod tests {
     fn parse_amount_rejects_zero_and_negative_values() {
         assert_eq!(parse_amount("0"), Err(DomainError::InvalidAmount));
         assert_eq!(parse_amount("-1"), Err(DomainError::InvalidAmountFormat));
+    }
+
+    #[test]
+    fn calculate_interest_amount_applies_base_rate_to_balance() {
+        assert_eq!(
+            calculate_interest_amount(Decimal::from(1_000), Decimal::new(55, 1)),
+            Ok(Decimal::from(55))
+        );
+    }
+
+    #[test]
+    fn calculate_interest_amount_applies_higher_rate_to_balance() {
+        assert_eq!(
+            calculate_interest_amount(Decimal::from(1_000), Decimal::new(725, 2)),
+            Ok(Decimal::new(725, 1))
+        );
+    }
+
+    #[test]
+    fn calculate_interest_amount_rounds_only_the_final_value_to_hundredths() {
+        assert_eq!(
+            calculate_interest_amount(Decimal::new(1_111, 3), Decimal::from(3)),
+            Ok(Decimal::new(3, 2))
+        );
+    }
+
+    #[test]
+    fn calculate_interest_amount_rounds_half_a_kopeck_away_from_zero() {
+        assert_eq!(
+            calculate_interest_amount(Decimal::ONE, Decimal::new(5, 1)),
+            Ok(Decimal::new(1, 2))
+        );
+    }
+
+    #[test]
+    fn calculate_interest_amount_rejects_negative_balance_or_rate() {
+        assert_eq!(
+            calculate_interest_amount(Decimal::NEGATIVE_ONE, Decimal::ONE),
+            Err(DomainError::InvalidSavingsAmount)
+        );
+        assert_eq!(
+            calculate_interest_amount(Decimal::ONE, Decimal::NEGATIVE_ONE),
+            Err(DomainError::InvalidSavingsRate)
+        );
+    }
+
+    #[test]
+    fn calculate_interest_amount_reports_overflow() {
+        assert_eq!(
+            calculate_interest_amount(Decimal::MAX, Decimal::from(2)),
+            Err(DomainError::AmountOverflow)
+        );
     }
 
     #[test]
