@@ -31,8 +31,9 @@ use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
-use super::helpers::{format_currency, format_date};
 use super::helpers::DATE_FORMAT;
+use super::helpers::{format_currency, format_date};
+use super::selectable::{selectable_message, selectable_text};
 use super::support::{
     card_label, category_tree_labels, collect_category_descendants, eligible_cards,
     expense_place_label, expense_place_tooltip, text_suggestions, DIVISION_ROUNDING_WARNING,
@@ -1642,14 +1643,18 @@ impl TransactionsPage {
             }))
             .child(Select::new(&form.card_select));
         if card_missing_currency {
-            card_field = card_field.child(div().text_color(danger).child(match kind {
-                TransactionKind::Income => {
-                    "Выберите карту в валюте дохода или отмените выбор карты"
-                }
-                TransactionKind::Expense => {
-                    "Выберите карту в валюте расхода или отмените выбор карты"
-                }
-            }));
+            card_field = card_field.child(selectable_message(
+                "transaction-card-currency-error",
+                match kind {
+                    TransactionKind::Income => {
+                        "Выберите карту в валюте дохода или отмените выбор карты"
+                    }
+                    TransactionKind::Expense => {
+                        "Выберите карту в валюте расхода или отмените выбор карты"
+                    }
+                },
+                danger,
+            ));
         }
         let expense_place_field = field(
             EXPENSE_PLACE_LABEL,
@@ -1700,9 +1705,14 @@ impl TransactionsPage {
             );
         match kind {
             TransactionKind::Income => {
-                fields = fields.child(div().text_xs().text_color(muted).child(
-                    "Доступны дебетовые карты с указанной валютой. Для ранее созданных карт сначала укажите валюту в разделе «Платёжные карты».",
-                ));
+                fields = fields.child(
+                    selectable_message(
+                        "transaction-income-card-hint",
+                        "Доступны дебетовые карты с указанной валютой. Для ранее созданных карт сначала укажите валюту в разделе «Платёжные карты».",
+                        muted,
+                    )
+                    .text_xs(),
+                );
             }
             TransactionKind::Expense => {
                 let enabled = rate_eligible || form.affects_deposit_rate;
@@ -1720,17 +1730,32 @@ impl TransactionsPage {
                             })),
                     )
                     .when(!rate_eligible, |f| {
-                        f.child(div().text_xs().text_color(muted).child(
-                            "Для учёта выберите карту с совпадающей валютой и включённым влиянием на ставку.",
-                        ))
+                        f.child(
+                            selectable_message(
+                                "transaction-rate-hint",
+                                "Для учёта выберите карту с совпадающей валютой и включённым влиянием на ставку.",
+                                muted,
+                            )
+                            .text_xs(),
+                        )
                     })
-                    .child(div().text_xs().text_color(muted).child(
-                        "Расход с дебетовой карты списывается с её баланса; кредитный лимит не меняется. Оценка процентов пока не рассчитывается.",
-                    ))
+                    .child(
+                        selectable_message(
+                            "transaction-debit-hint",
+                            "Расход с дебетовой карты списывается с её баланса; кредитный лимит не меняется. Оценка процентов пока не рассчитывается.",
+                            muted,
+                        )
+                        .text_xs(),
+                    )
                     .when(legacy_debit_expense, |f| {
-                        f.child(div().text_xs().text_color(warning).child(
-                            "Этот расход ранее не списывался с баланса. При сохранении будет списана его текущая сумма.",
-                        ))
+                        f.child(
+                            selectable_message(
+                                "transaction-legacy-debit-hint",
+                                "Этот расход ранее не списывался с баланса. При сохранении будет списана его текущая сумма.",
+                                warning,
+                            )
+                            .text_xs(),
+                        )
                     });
             }
         }
@@ -1767,21 +1792,32 @@ impl TransactionsPage {
         }
         if amount_text.contains('/') {
             fields = fields.child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(DIVISION_ROUNDING_WARNING),
+                selectable_message(
+                    "transaction-division-warning",
+                    DIVISION_ROUNDING_WARNING,
+                    muted,
+                )
+                .text_xs(),
             );
         }
 
         let mut panel = div().flex().flex_col().gap_3().p_4().child(fields);
         if let Some((message, true)) = &self.message {
-            panel = panel.child(div().text_color(danger).child(message.clone()));
+            panel = panel.child(selectable_message(
+                "transaction-form-error",
+                message.clone(),
+                danger,
+            ));
         }
         panel = panel
             .child(match total {
-                Some(Ok(total)) => div().child(format!("Итого: {total}")),
-                Some(Err(error)) => div().text_color(danger).child(error),
+                Some(Ok(total)) => div().child(selectable_text(
+                    "transaction-form-total",
+                    format!("Итого: {total}"),
+                )),
+                Some(Err(error)) => {
+                    selectable_message("transaction-form-total-error", error, danger)
+                }
                 None => div(),
             })
             .child(
@@ -1831,39 +1867,49 @@ impl TransactionsPage {
         match (&self.balances, self.balance_period) {
             (Some(balances), Some((from, to))) => match self.primary_currency() {
                 None => {
-                    footer =
-                        footer.child(div().text_color(danger).child(
-                            "Сальдо не отображается: не удалось определить основную валюту.",
-                        ));
+                    footer = footer.child(selectable_message(
+                        "transactions-balance-currency-error",
+                        "Сальдо не отображается: не удалось определить основную валюту.",
+                        danger,
+                    ));
                 }
                 Some(primary) => match balances.iter().find(|b| b.currency.code() == primary) {
                     None => {
-                        footer = footer.child(div().text_color(danger).child(format!(
+                        footer = footer.child(selectable_message(
+                            "transactions-balance-unsupported",
+                            format!(
                                 "Сальдо не отображается: основная валюта {primary} не поддерживается для операций (доступны RUB и USD)."
-                            )));
+                            ),
+                            danger,
+                        ));
                     }
                     Some(b) => {
                         let code = b.currency.code();
                         footer = footer
-                                .child(div().font_weight(FontWeight::BOLD).child(format!(
-                                    "{}: Доходы: {} {code} − Расходы: {} {code} = Сальдо: {} {code}",
-                                    period_label(from, to),
-                                    format_currency(&b.income, 2),
-                                    format_currency(&b.expenses, 2),
-                                    format_currency(&b.balance, 2),
+                                .child(div().font_weight(FontWeight::BOLD).child(selectable_text(
+                                    "transactions-balance-summary",
+                                    format!(
+                                        "{}: Доходы: {} {code} − Расходы: {} {code} = Сальдо: {} {code}",
+                                        period_label(from, to),
+                                        format_currency(&b.income, 2),
+                                        format_currency(&b.expenses, 2),
+                                        format_currency(&b.balance, 2),
+                                    ),
                                 )))
-                                .child(div().text_color(muted).child(
+                                .child(selectable_message(
+                                    "transactions-balance-note",
                                     "Сальдо операций не включает начальные остатки и переводы и не подтверждает сумму денег на руках.",
+                                    muted,
                                 ));
                     }
                 },
             },
             _ => {
-                footer = footer.child(
-                    div()
-                        .text_color(danger)
-                        .child("Сальдо не рассчитано: обновите список после устранения ошибки."),
-                );
+                footer = footer.child(selectable_message(
+                    "transactions-balance-stale",
+                    "Сальдо не рассчитано: обновите список после устранения ошибки.",
+                    danger,
+                ));
             }
         }
         footer.child(self.list_total(danger))
@@ -1872,13 +1918,17 @@ impl TransactionsPage {
     fn list_total(&self, danger: Hsla) -> Div {
         let count = self.transactions.len();
         let Some(primary) = self.primary_currency() else {
-            return div().child(format!(
-                "Записей: {count}   Итого недоступно: основная валюта не определена"
+            return div().child(selectable_text(
+                "transactions-list-total",
+                format!("Записей: {count}   Итого недоступно: основная валюта не определена"),
             ));
         };
         let Some(currency) = Currency::ALL.into_iter().find(|c| c.code() == primary) else {
-            return div().child(format!(
-                "Записей: {count}   Итого недоступно: основная валюта {primary} не поддерживается для операций"
+            return div().child(selectable_text(
+                "transactions-list-total",
+                format!(
+                    "Записей: {count}   Итого недоступно: основная валюта {primary} не поддерживается для операций"
+                ),
             ));
         };
         let total = self
@@ -1887,10 +1937,18 @@ impl TransactionsPage {
             .filter(|t| t.currency == currency)
             .try_fold(Decimal::ZERO, |sum, t| sum.checked_add(t.amount));
         match total {
-            Some(total) => div().child(format!("Записей: {count}   Итого: {} {primary}", format_currency(&total, 2))),
-            None => div()
-                .text_color(danger)
-                .child("Не удалось рассчитать итог: сумма слишком велика"),
+            Some(total) => div().child(selectable_text(
+                "transactions-list-total",
+                format!(
+                    "Записей: {count}   Итого: {} {primary}",
+                    format_currency(&total, 2)
+                ),
+            )),
+            None => selectable_message(
+                "transactions-list-total",
+                "Не удалось рассчитать итог: сумма слишком велика",
+                danger,
+            ),
         }
     }
 }
@@ -2247,7 +2305,10 @@ impl TableDelegate for TransactionsTable {
                                         .max_h(px(420.0))
                                         .overflow_y_scroll()
                                         .overflow_x_scroll()
-                                        .child(comment.clone()),
+                                        .child(selectable_text(
+                                            ("transaction-comment-body", id as usize),
+                                            comment.clone(),
+                                        )),
                                 )
                             });
                         })
@@ -2374,11 +2435,18 @@ impl Render for TransactionsPage {
         root = root.child(self.render_filters(cx));
         if self.form.is_none() {
             if let Some((message, true)) = &self.message {
-                root = root.child(div().text_color(danger).child(message.clone()));
+                root = root.child(selectable_message(
+                    "transactions-page-error",
+                    message.clone(),
+                    danger,
+                ));
             }
         }
         if !has_active_category {
-            root = root.child("Сначала добавьте категорию в разделе «Справочники».");
+            root = root.child(selectable_text(
+                "transactions-missing-category",
+                "Сначала добавьте категорию в разделе «Справочники».",
+            ));
         }
         root.child(self.render_table())
             .child(self.render_footer(cx))

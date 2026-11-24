@@ -29,8 +29,9 @@ use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
-use super::helpers::{format_currency, format_date};
 use super::helpers::DATE_FORMAT;
+use super::helpers::{format_currency, format_date};
+use super::selectable::{selectable_message, selectable_text};
 
 const ALL_LABEL: &str = "Все";
 const EXTERNAL_LABEL: &str = "Внешние средства";
@@ -1511,15 +1512,21 @@ impl TransfersPage {
             TransferOperationType::Transfer => None,
         };
         if let Some(warning) = operation_warning {
-            panel = panel.child(div().text_color(warning_color).child(warning));
+            panel = panel.child(selectable_message(
+                "transfers-operation-warning",
+                warning,
+                warning_color,
+            ));
         }
         if early_withdrawal {
-            panel = panel.child(div().text_color(warning_color).child(
+            panel = panel.child(selectable_message(
+                "transfers-early-withdrawal-warning",
                 "Досрочное изъятие со срочного вклада: банк может применить другие условия.",
+                warning_color,
             ));
         }
         if let Some(error) = form.error.clone() {
-            panel = panel.child(div().text_color(danger).child(error));
+            panel = panel.child(selectable_message("transfers-form-error", error, danger));
         }
         panel
             .child(
@@ -1577,7 +1584,7 @@ impl TransfersPage {
             .gap_1()
             .font_weight(FontWeight::BOLD)
             .child("Остатки:")
-            .child(text)
+            .child(selectable_text("transfers-balance-summary", text))
     }
 
     fn render_table(&mut self, _: &mut Context<Self>) -> impl IntoElement {
@@ -1806,7 +1813,10 @@ impl TableDelegate for TransfersTable {
             .flex()
             .items_center()
             .justify_center()
-            .child("Переводов по выбранным условиям нет.")
+            .child(selectable_text(
+                "transfers-empty",
+                "Переводов по выбранным условиям нет.",
+            ))
     }
 
     fn render_td(
@@ -1937,21 +1947,31 @@ impl Render for TransfersPage {
         );
         root = root.child(self.render_filters(cx));
         if !has_accounts {
-            root = root.child(div().text_color(warning).child(
+            root = root.child(selectable_message(
+                "transfers-missing-accounts",
                 "Сначала добавьте дебетовую карту или накопление с указанной валютой в разделе «Справочники» и «Платёжные карты».",
+                warning,
             ));
         }
         if let Some((message, is_error)) = &self.message {
-            root = root.child(
-                div()
-                    .text_color(if *is_error { danger } else { success })
-                    .child(message.clone()),
-            );
+            root = root.child(selectable_message(
+                "transfers-page-message",
+                message.clone(),
+                if *is_error { danger } else { success },
+            ));
         }
         root = root.child(self.render_table(cx));
         root.child(self.render_summary(cx))
-            .child(div().text_color(muted).child(FOOTER_NOTE))
-            .child(div().text_color(warning).child(FOOTER_WARNING))
+            .child(selectable_message(
+                "transfers-footer-note",
+                FOOTER_NOTE,
+                muted,
+            ))
+            .child(selectable_message(
+                "transfers-footer-warning",
+                FOOTER_WARNING,
+                warning,
+            ))
     }
 }
 

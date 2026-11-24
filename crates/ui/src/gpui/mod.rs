@@ -8,6 +8,7 @@ mod payment_documents;
 mod prices;
 mod quick_forms;
 mod savings;
+mod selectable;
 mod settings;
 mod shell;
 mod support;

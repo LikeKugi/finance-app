@@ -31,8 +31,9 @@ use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
-use super::helpers::{format_currency, format_date};
 use super::helpers::DATE_FORMAT;
+use super::helpers::{format_currency, format_date};
+use super::selectable::{selectable_message, selectable_text};
 use super::support::{
     card_label, category_tree_labels, eligible_cards, expense_place_label, text_suggestions,
 };
@@ -1796,9 +1797,13 @@ impl PaymentDocumentsPage {
                                     .child("Связанные накопления этого же банка"),
                             )
                             .child(if form.available_savings.is_empty() {
-                                div().text_xs().text_color(muted).child(
+                                selectable_message(
+                                    "card-savings-empty-hint",
                                     "Нет накоплений этого банка. Добавьте накопление, чтобы задать условие.",
-                                ).into_any_element()
+                                    muted,
+                                )
+                                .text_xs()
+                                .into_any_element()
                             } else {
                                 let mut list =
                                     div().id("card-savings-options").flex().flex_col().gap_1();
@@ -1828,12 +1833,13 @@ impl PaymentDocumentsPage {
                             }),
                     ),
             );
-            fields = fields.child(div().text_xs().text_color(warning).child(RATE_WARNING));
+            fields = fields
+                .child(selectable_message("card-rate-warning", RATE_WARNING, warning).text_xs());
         }
 
         let mut panel = div().flex().flex_col().gap_3().p_4().child(fields);
         if let Some(error) = &form.error {
-            panel = panel.child(div().text_color(danger).child(error.clone()));
+            panel = panel.child(selectable_message("card-form-error", error.clone(), danger));
         }
         panel
             .child(
@@ -2117,7 +2123,10 @@ impl TableDelegate for CardsTable {
             .flex()
             .items_center()
             .justify_center()
-            .child("Платёжных карт по выбранным условиям нет.")
+            .child(selectable_text(
+                "cards-empty",
+                "Платёжных карт по выбранным условиям нет.",
+            ))
     }
 
     fn render_td(
@@ -2305,17 +2314,18 @@ impl Render for PaymentDocumentsPage {
             .p_3()
             .child(header);
         if self.banks.is_empty() {
-            root = root.child(
+            root = root.child(selectable_text(
+                "cards-missing-bank",
                 "Сначала добавьте банк в разделе «Справочники», чтобы создать платёжную карту.",
-            );
+            ));
         }
         root = root.child(self.render_filters(cx));
         if let Some((message, is_error)) = self.message.clone() {
-            root = root.child(
-                div()
-                    .text_color(if is_error { danger } else { success })
-                    .child(message),
-            );
+            root = root.child(selectable_message(
+                "cards-page-message",
+                message,
+                if is_error { danger } else { success },
+            ));
         }
         root.child(self.render_table(cx))
     }

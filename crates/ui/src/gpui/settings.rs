@@ -14,6 +14,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use rfd::FileDialog;
 
+use super::selectable::{selectable_message, selectable_text};
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum ThemePreference {
     #[default]
@@ -281,7 +283,10 @@ impl Render for SettingsPage {
                 panel()
                     .child(heading("Резервная копия данных"))
                     .child(
-                        "Экспорт и импорт выполняются для всей базы FinanceApp в формате SQLite (.db).",
+                        selectable_text(
+                            "settings-backup-description",
+                            "Экспорт и импорт выполняются для всей базы FinanceApp в формате SQLite (.db).",
+                        ),
                     )
                     .child(
                         div()
@@ -302,15 +307,20 @@ impl Render for SettingsPage {
                                     })),
                             ),
                     )
-                    .when_some(self.operation_message.clone(), |p, text| p.child(text)),
+                    .when_some(self.operation_message.clone(), |p, text| {
+                        p.child(selectable_text("settings-operation-message", text))
+                    }),
             )
             .when_some(self.message.clone(), |root, (text, is_error)| {
-                root.child(div().text_color(if is_error {
-                    cx.theme().danger
-                } else {
-                    cx.theme().success
-                })
-                .child(text))
+                root.child(selectable_message(
+                    "settings-message",
+                    text,
+                    if is_error {
+                        cx.theme().danger
+                    } else {
+                        cx.theme().success
+                    },
+                ))
             })
             .child(div().flex_1().min_h_0())
             .child(
@@ -318,7 +328,10 @@ impl Render for SettingsPage {
                     .pt_2()
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .child(format!("Версия приложения: {}", self.app_version)),
+                    .child(selectable_text(
+                        "settings-version",
+                        format!("Версия приложения: {}", self.app_version),
+                    )),
             )
     }
 }

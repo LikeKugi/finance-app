@@ -23,12 +23,13 @@ use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
+use super::helpers::DATE_FORMAT;
 use super::prices::PricesSection;
+use super::selectable::{selectable_message, selectable_text};
 use super::support::category_tree_labels;
 use super::support::category_tree_rows;
 use super::support::collect_category_descendants;
 use super::support::currency_rate_label;
-use super::helpers::DATE_FORMAT;
 use super::transactions::comment_preview;
 
 const NO_PARENT_LABEL: &str = "Нет";
@@ -898,7 +899,7 @@ impl DirectoriesPage {
             .p_4()
             .child(fields)
             .when_some(error, |body, (message, _)| {
-                body.child(div().text_color(danger).child(message))
+                body.child(selectable_message("directory-form-error", message, danger))
             })
             .child(
                 div()
@@ -1009,11 +1010,15 @@ impl DirectoriesPage {
                             .accessibility_label("Валюты"),
                     ),
             )
-            .child(div().text_color(muted).child(
+            .child(selectable_message(
+                "currencies-rate-note",
                 "Курс означает количество единиц основной валюты за 1 единицу выбранной валюты.",
+                muted,
             ))
-            .child(div().text_color(muted).child(
+            .child(selectable_message(
+                "currencies-limitation-note",
                 "Дополнительные валюты пока нельзя выбирать в формах доходов и расходов (поддерживаются RUB и USD).",
+                muted,
             ))
     }
 }
@@ -1044,7 +1049,7 @@ impl TableDelegate for CategoriesTable {
             .flex()
             .items_center()
             .justify_center()
-            .child("Категории не найдены.")
+            .child(selectable_text("categories-empty", "Категории не найдены."))
     }
 
     fn render_td(
@@ -1149,7 +1154,7 @@ impl TableDelegate for BanksTable {
             .flex()
             .items_center()
             .justify_center()
-            .child("Банки не найдены.")
+            .child(selectable_text("banks-empty", "Банки не найдены."))
     }
 
     fn render_td(
@@ -1245,7 +1250,10 @@ impl TableDelegate for ExpensePlacesTable {
             .flex()
             .items_center()
             .justify_center()
-            .child("Места покупок не найдены.")
+            .child(selectable_text(
+                "expense-places-empty",
+                "Места покупок не найдены.",
+            ))
     }
 
     fn render_td(
@@ -1375,7 +1383,7 @@ impl TableDelegate for CurrenciesTable {
             .flex()
             .items_center()
             .justify_center()
-            .child("Валюты не найдены.")
+            .child(selectable_text("currencies-empty", "Валюты не найдены."))
     }
 
     fn render_td(
@@ -1572,7 +1580,11 @@ impl Render for DirectoriesPage {
                     ),
             )
             .when_some(self.message.clone(), |root, (message, _)| {
-                root.child(div().text_color(danger).child(message))
+                root.child(selectable_message(
+                    "directories-page-error",
+                    message,
+                    danger,
+                ))
             })
             .child(
                 div()

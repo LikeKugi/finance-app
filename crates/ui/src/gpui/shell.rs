@@ -10,6 +10,7 @@ use super::home::{all_page_links, described_sections, home_action_tab, HomeActio
 use super::payment_documents::PaymentDocumentsPage;
 use super::quick_forms::QuickTransactionForm;
 use super::savings::SavingsPage;
+use super::selectable::selectable_text;
 use super::settings::SettingsPage;
 use super::transactions::TransactionsPage;
 use super::transfers::TransfersPage;
@@ -145,7 +146,10 @@ impl AppShell {
                         div()
                             .text_size(px(13.0))
                             .text_color(description_color)
-                            .child(link.description),
+                            .child(selectable_text(
+                                format!("home-section-description-{}", link.title),
+                                link.description,
+                            )),
                     )
             })))
             .into_any_element()
@@ -188,7 +192,10 @@ impl AppShell {
                         div()
                             .text_size(px(13.0))
                             .text_color(description_color)
-                            .child(link.description),
+                            .child(selectable_text(
+                                format!("home-page-description-{}", link.title),
+                                link.description,
+                            )),
                     )
             })))
             .into_any_element()

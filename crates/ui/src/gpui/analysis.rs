@@ -29,6 +29,7 @@ use gpui_kit::*;
 use rust_decimal::prelude::ToPrimitive;
 
 use super::helpers::{format_currency, DATE_FORMAT};
+use super::selectable::{selectable_message, selectable_text};
 
 const NONE_LABEL: &str = "Все";
 const ROW_HEIGHT: f32 = 30.0;
@@ -308,7 +309,13 @@ impl TableDelegate for AnalysisTable {
             .flex()
             .items_center()
             .justify_center()
-            .child("Операций по выбранным условиям нет.")
+            .child(selectable_text(
+                (
+                    "analysis-empty",
+                    analysis_table_index(self.kind, self.currency),
+                ),
+                "Операций по выбранным условиям нет.",
+            ))
     }
 
     fn render_td(
@@ -1081,7 +1088,10 @@ impl AnalysisPage {
     ) -> impl IntoElement {
         if summary.totals.is_empty() {
             return div()
-                .child("За выбранный период операций нет.")
+                .child(selectable_text(
+                    "analysis-empty-period",
+                    "За выбранный период операций нет.",
+                ))
                 .into_any_element();
         }
         div()
@@ -1140,14 +1150,16 @@ impl AnalysisPage {
                             currency.code()
                         ));
                         let Some(slices) = pie_chart_slices(summary, kind, currency) else {
-                            column = column.child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(heading)
-                                    .child("Не удалось построить диаграмму для этих данных."),
-                            );
+                            column =
+                                column.child(div().flex().flex_col().gap_1().child(heading).child(
+                                    selectable_text(
+                                        (
+                                            "analysis-chart-error",
+                                            analysis_table_index(kind, currency),
+                                        ),
+                                        "Не удалось построить диаграмму для этих данных.",
+                                    ),
+                                ));
                             continue;
                         };
                         if slices.is_empty() {
@@ -1282,11 +1294,14 @@ impl AnalysisPage {
             .flex()
             .flex_col()
             .gap_1()
-            .child(
+            .child(selectable_text(
+                "analysis-shares-note",
                 "Доли считаются отдельно для доходов и расходов и только внутри одной валюты. RUB и USD не пересчитываются.",
-            )
-            .child(div().text_color(cx.theme().warning).child(
+            ))
+            .child(selectable_message(
+                "analysis-forecast-note",
                 "Прогноз и оценка процентов не рассчитываются: методика и необходимые исходные данные не согласованы.",
+                cx.theme().warning,
             ));
         div()
             .flex()
@@ -1332,13 +1347,17 @@ impl Render for AnalysisPage {
         root = root.child(header);
         root = root.child(self.render_filters(cx));
         if let Some(message) = &self.message {
-            root = root.child(div().text_color(danger).child(message.clone()));
+            root = root.child(selectable_message(
+                "analysis-page-error",
+                message.clone(),
+                danger,
+            ));
         }
         let body = if let Some(error) = self.tracker.current_error() {
             div()
                 .flex_1()
                 .text_color(danger)
-                .child(error.to_owned())
+                .child(selectable_text("analysis-load-error", error.to_owned()))
                 .into_any_element()
         } else if let Some(summary) = self.tracker.current_report() {
             div()
@@ -1407,10 +1426,14 @@ fn render_balance_summary(summary: &AnalysisSummary, danger: Hsla) -> Div {
             .flex()
             .flex_col()
             .gap_1()
-            .children(lines.into_iter().map(|line| div().child(line))),
-        Err(error) => div()
-            .text_color(danger)
-            .child(format!("Не удалось рассчитать сальдо: {error}")),
+            .children(lines.into_iter().enumerate().map(|(index, line)| {
+                div().child(selectable_text(("analysis-balance-line", index), line))
+            })),
+        Err(error) => selectable_message(
+            "analysis-balance-error",
+            format!("Не удалось рассчитать сальдо: {error}"),
+            danger,
+        ),
     }
 }
 

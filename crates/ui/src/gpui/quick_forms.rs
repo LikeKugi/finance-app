@@ -17,6 +17,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::*;
 
+use super::selectable::{selectable_message, selectable_text};
 use super::support::{
     card_label, category_tree_labels, eligible_cards, expense_place_label, quick_form_date_caption,
     DIVISION_ROUNDING_WARNING,
@@ -439,12 +440,10 @@ impl Render for QuickTransactionForm {
 
         root = root
             .child(Input::new(&self.amount).large().w_full().into_any_element())
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(quick_form_date_caption(Local::now().date_naive())),
-            )
+            .child(div().text_xs().text_color(muted).child(selectable_text(
+                "quick-form-date",
+                quick_form_date_caption(Local::now().date_naive()),
+            )))
             .child(
                 Button::new("quick-add")
                     .large()
@@ -520,31 +519,42 @@ impl Render for QuickTransactionForm {
 
         if !has_category {
             root = root.child(
-                div()
-                    .text_xs()
-                    .text_color(danger)
-                    .child("Сначала добавьте категорию в разделе «Справочники»."),
+                selectable_message(
+                    "quick-form-missing-category",
+                    "Сначала добавьте категорию в разделе «Справочники».",
+                    danger,
+                )
+                .text_xs(),
             );
         }
         if amount_text.contains('/') {
             root = root.child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(DIVISION_ROUNDING_WARNING),
+                selectable_message(
+                    "quick-form-division-warning",
+                    DIVISION_ROUNDING_WARNING,
+                    muted,
+                )
+                .text_xs(),
             );
         }
         if let Some(total) = &total {
             root = root.child(match total {
-                Ok(total) => div().child(format!("Итого: {total}")),
-                Err(error) => div().text_color(danger).child(error.clone()),
+                Ok(total) => div().child(selectable_text(
+                    "quick-form-total",
+                    format!("Итого: {total}"),
+                )),
+                Err(error) => selectable_message("quick-form-total-error", error.clone(), danger),
             });
         }
         if let Some(error) = &self.error {
-            root = root.child(div().text_color(danger).child(error.clone()));
+            root = root.child(selectable_message(
+                "quick-form-error",
+                error.clone(),
+                danger,
+            ));
         }
         if let Some(saved) = &self.saved {
-            root = root.child(div().text_color(muted).child(saved.clone()));
+            root = root.child(selectable_message("quick-form-saved", saved.clone(), muted));
         }
         root.into_any_element()
     }

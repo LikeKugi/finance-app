@@ -29,8 +29,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 
-use super::helpers::{format_currency, format_date};
 use super::helpers::DATE_FORMAT;
+use super::helpers::{format_currency, format_date};
+use super::selectable::{selectable_message, selectable_text};
 
 const ALL_LABEL: &str = "Все";
 const ALL_BANKS_LABEL: &str = "Все банки";
@@ -1237,7 +1238,7 @@ impl SavingsPage {
 
         let mut panel = div().flex().flex_col().gap_3().p_4().child(fields);
         if let Some(error) = form.error.clone() {
-            panel = panel.child(div().text_color(danger).child(error));
+            panel = panel.child(selectable_message("savings-form-error", error, danger));
         }
         panel
             .child(
@@ -1503,7 +1504,10 @@ impl TableDelegate for SavingsTable {
             .flex()
             .items_center()
             .justify_center()
-            .child("Накоплений по выбранным условиям нет.")
+            .child(selectable_text(
+                "savings-empty",
+                "Накоплений по выбранным условиям нет.",
+            ))
     }
 
     fn render_td(
@@ -1655,19 +1659,29 @@ impl Render for SavingsPage {
         );
         root = root.child(self.render_filters(cx));
         if self.banks.is_empty() {
-            root = root
-                .child("Сначала добавьте банк в разделе «Справочники», чтобы создать накопление.");
+            root = root.child(selectable_text(
+                "savings-missing-bank",
+                "Сначала добавьте банк в разделе «Справочники», чтобы создать накопление.",
+            ));
         }
         if let Some((message, is_error)) = &self.message {
-            root = root.child(
-                div()
-                    .text_color(if *is_error { danger } else { success })
-                    .child(message.clone()),
-            );
+            root = root.child(selectable_message(
+                "savings-page-message",
+                message.clone(),
+                if *is_error { danger } else { success },
+            ));
         }
         root = root.child(self.render_table(cx));
-        root.child(div().text_color(muted).child(FOOTER_NOTE))
-            .child(div().text_color(warning).child(FOOTER_WARNING))
+        root.child(selectable_message(
+            "savings-footer-note",
+            FOOTER_NOTE,
+            muted,
+        ))
+        .child(selectable_message(
+            "savings-footer-warning",
+            FOOTER_WARNING,
+            warning,
+        ))
     }
 }
 

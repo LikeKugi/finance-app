@@ -24,8 +24,9 @@ use gpui_kit::prelude::{FluentBuilder as _, StatefulInteractiveElement};
 use gpui_kit::*;
 use rust_decimal::Decimal;
 
-use super::helpers::{format_currency, format_date};
 use super::helpers::DATE_FORMAT;
+use super::helpers::{format_currency, format_date};
+use super::selectable::{selectable_message, selectable_text};
 use super::support::{
     date_period_range, expense_place_tooltip, text_suggestions, DatePeriod, DatePeriodRange,
 };
@@ -706,7 +707,11 @@ impl PricesSection {
                     }),
             )
             .when_some(self.message.clone(), |body, message| {
-                body.child(div().text_color(cx.theme().danger).child(message))
+                body.child(selectable_message(
+                    "price-form-error",
+                    message,
+                    cx.theme().danger,
+                ))
             })
             .child(
                 div()
@@ -843,7 +848,10 @@ impl TableDelegate for PricesTable {
             .flex()
             .items_center()
             .justify_center()
-            .child("Цены по выбранным условиям не найдены.")
+            .child(selectable_text(
+                "prices-empty",
+                "Цены по выбранным условиям не найдены.",
+            ))
     }
     fn render_td(
         &mut self,
@@ -1052,7 +1060,11 @@ impl Render for PricesSection {
             )
             .child(self.render_filters(cx))
             .when_some(message, |body, message| {
-                body.child(div().text_color(cx.theme().danger).child(message))
+                body.child(selectable_message(
+                    "prices-page-error",
+                    message,
+                    cx.theme().danger,
+                ))
             })
             .child(
                 div()
