@@ -55,6 +55,24 @@ const CURRENCY_PRIMARY_COLUMN_WIDTH: f32 =
 const CURRENCY_ACTIONS_WIDTH: f32 = 160.0;
 const MAKE_PRIMARY_BUTTON_LABEL: &str = "Назначить основной";
 const EDIT_CURRENCY_BUTTON_LABEL: &str = "Изменить";
+/// Категории расходов выбраны при первом открытии страницы.
+const DEFAULT_CATEGORY_KIND: TransactionKind = TransactionKind::Expense;
+/// Порядок переключателя видов категорий на странице «Справочники».
+const CATEGORY_KINDS: [TransactionKind; 2] = [DEFAULT_CATEGORY_KIND, TransactionKind::Income];
+
+fn category_kind_toggle_id(kind: TransactionKind) -> &'static str {
+    match kind {
+        TransactionKind::Income => "kind-income",
+        TransactionKind::Expense => "kind-expense",
+    }
+}
+
+fn category_kind_toggle_label(kind: TransactionKind) -> &'static str {
+    match kind {
+        TransactionKind::Income => "Категории доходов",
+        TransactionKind::Expense => "Категории расходов",
+    }
+}
 
 type ParentChoice = Entity<SelectState<Vec<ParentCategoryItem>>>;
 
@@ -122,11 +140,32 @@ struct CurrenciesTable {
     rows: Vec<CurrencyRow>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RightTab {
     Banks,
-    Currencies,
     ExpensePlaces,
+    Currencies,
+}
+
+impl RightTab {
+    /// Порядок переключателя справочников в правой половине страницы.
+    const ALL: [Self; 3] = [Self::Banks, Self::ExpensePlaces, Self::Currencies];
+
+    const fn toggle_id(self) -> &'static str {
+        match self {
+            Self::Banks => "tab-banks",
+            Self::ExpensePlaces => "tab-expense-places",
+            Self::Currencies => "tab-currencies",
+        }
+    }
+
+    const fn title(self) -> &'static str {
+        match self {
+            Self::Banks => "Банки",
+            Self::ExpensePlaces => "Места покупок",
+            Self::Currencies => "Валюты",
+        }
+    }
 }
 
 struct CategoryForm {
@@ -358,7 +397,7 @@ impl DirectoriesPage {
         let mut page = Self {
             database,
             prices,
-            kind: TransactionKind::Income,
+            kind: DEFAULT_CATEGORY_KIND,
             right_tab: RightTab::Banks,
             categories: Vec::new(),
             banks: Vec::new(),
@@ -1685,30 +1724,18 @@ impl Render for DirectoriesPage {
                                 div()
                                     .flex()
                                     .gap_2()
-                                    .child(
+                                    .children(CATEGORY_KINDS.into_iter().map(|item_kind| {
                                         toggle(
-                                            "kind-income",
-                                            "Категории доходов",
-                                            kind == TransactionKind::Income,
+                                            category_kind_toggle_id(item_kind),
+                                            category_kind_toggle_label(item_kind),
+                                            item_kind == kind,
                                         )
                                         .on_click(
-                                            cx.listener(|page, _, window, cx| {
-                                                page.set_kind(TransactionKind::Income, window, cx)
+                                            cx.listener(move |page, _, window, cx| {
+                                                page.set_kind(item_kind, window, cx)
                                             }),
-                                        ),
-                                    )
-                                    .child(
-                                        toggle(
-                                            "kind-expense",
-                                            "Категории расходов",
-                                            kind == TransactionKind::Expense,
                                         )
-                                        .on_click(
-                                            cx.listener(|page, _, window, cx| {
-                                                page.set_kind(TransactionKind::Expense, window, cx)
-                                            }),
-                                        ),
-                                    ),
+                                    })),
                             )
                             .child(self.render_categories(cx)),
                     )
@@ -1718,54 +1745,26 @@ impl Render for DirectoriesPage {
                             .flex()
                             .flex_col()
                             .gap_2()
+                            .child(div().flex().items_center().gap_2().children(
+                                RightTab::ALL.into_iter().map(|item| {
+                                    toggle(item.toggle_id(), item.title(), item == tab).on_click(
+                                        cx.listener(move |page, _, _, cx| {
+                                            page.set_right_tab(item, cx)
+                                        }),
+                                    )
+                                }),
+                            ))
                             .child(
                                 div()
                                     .flex()
                                     .items_center()
                                     .gap_2()
                                     .child(
-                                        toggle("tab-banks", "Банки", tab == RightTab::Banks)
-                                            .on_click(cx.listener(|page, _, _, cx| {
-                                                page.set_right_tab(RightTab::Banks, cx)
-                                            })),
+                                        div()
+                                            .flex_1()
+                                            .font_weight(FontWeight::BOLD)
+                                            .child(tab.title()),
                                     )
-                                    .child(
-                                        toggle(
-                                            "tab-currencies",
-                                            "Валюты",
-                                            tab == RightTab::Currencies,
-                                        )
-                                        .on_click(
-                                            cx.listener(|page, _, _, cx| {
-                                                page.set_right_tab(RightTab::Currencies, cx)
-                                            }),
-                                        ),
-                                    )
-                                    .child(
-                                        toggle(
-                                            "tab-expense-places",
-                                            "Места покупок",
-                                            tab == RightTab::ExpensePlaces,
-                                        )
-                                        .on_click(
-                                            cx.listener(|page, _, _, cx| {
-                                                page.set_right_tab(RightTab::ExpensePlaces, cx)
-                                            }),
-                                        ),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(div().flex_1().font_weight(FontWeight::BOLD).child(
-                                        match tab {
-                                            RightTab::Banks => "Банки",
-                                            RightTab::Currencies => "Валюты",
-                                            RightTab::ExpensePlaces => "Места покупок",
-                                        },
-                                    ))
                                     .child(add_right),
                             )
                             .child(right),
@@ -1779,10 +1778,12 @@ impl Render for DirectoriesPage {
 mod tests {
     use super::{
         currency_cell_label, currency_column_widths, directory_column, parent_category_options,
-        Category, ACTIONS_WIDTH, BANK_NAME_COLUMN_WIDTH, EDIT_CURRENCY_BUTTON_LABEL,
-        MAKE_PRIMARY_BUTTON_LABEL, TABLE_HEIGHT, TABLE_ROW_HEIGHT, VISIBLE_TABLE_ROWS,
+        Category, RightTab, ACTIONS_WIDTH, BANK_NAME_COLUMN_WIDTH, CATEGORY_KINDS,
+        DEFAULT_CATEGORY_KIND, EDIT_CURRENCY_BUTTON_LABEL, MAKE_PRIMARY_BUTTON_LABEL, TABLE_HEIGHT,
+        TABLE_ROW_HEIGHT, VISIBLE_TABLE_ROWS,
     };
     use finance_core::CurrencyDefinition;
+    use finance_core::TransactionKind;
     use gpui_kit::component::table::ColumnFixed;
 
     fn category(id: i64, parent_id: Option<i64>, name: &str) -> Category {
@@ -1893,5 +1894,28 @@ mod tests {
         let name = directory_column("name", "Название", BANK_NAME_COLUMN_WIDTH, false);
         assert_eq!(name.fixed, None);
         assert!(name.selectable);
+    }
+
+    #[test]
+    fn expenses_are_the_first_and_default_category_section() {
+        assert_eq!(DEFAULT_CATEGORY_KIND, TransactionKind::Expense);
+        assert_eq!(
+            CATEGORY_KINDS,
+            [TransactionKind::Expense, TransactionKind::Income]
+        );
+    }
+
+    #[test]
+    fn right_directory_tabs_keep_places_before_currencies() {
+        assert_eq!(
+            RightTab::ALL,
+            [
+                RightTab::Banks,
+                RightTab::ExpensePlaces,
+                RightTab::Currencies
+            ]
+        );
+        let titles: Vec<_> = RightTab::ALL.iter().map(|tab| tab.title()).collect();
+        assert_eq!(titles, ["Банки", "Места покупок", "Валюты"]);
     }
 }
