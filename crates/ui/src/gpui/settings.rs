@@ -19,10 +19,15 @@ use rfd::FileDialog;
 
 use super::selectable::{selectable_message, selectable_text};
 
+const LIGHT_THEME_NAME: &str = "FinanceApp Light";
 const DARK_THEME_NAME: &str = "FinanceApp Dark";
+const LIGHT_THEME_CONFIG: &str = include_str!("../../../../assets/themes/financeapp-light.json");
 const DARK_THEME_CONFIG: &str = include_str!("../../../../assets/themes/financeapp-dark.json");
 
-pub(crate) fn register_dark_theme(cx: &mut App) {
+pub(crate) fn register_project_themes(cx: &mut App) {
+    if let Err(error) = ThemeRegistry::global_mut(cx).load_themes_from_str(LIGHT_THEME_CONFIG) {
+        tracing::error!("Не удалось загрузить палитру светлой темы FinanceApp: {error}");
+    }
     if let Err(error) = ThemeRegistry::global_mut(cx).load_themes_from_str(DARK_THEME_CONFIG) {
         tracing::error!("Не удалось загрузить палитру тёмной темы FinanceApp: {error}");
     }
@@ -61,12 +66,19 @@ impl ThemePreference {
     }
 
     fn apply(self, window: &mut Window, cx: &mut App) {
-        if let Some(theme) = ThemeRegistry::global(cx)
-            .themes()
-            .get(DARK_THEME_NAME)
-            .cloned()
-        {
-            Theme::global_mut(cx).dark_theme = theme;
+        let (light_theme, dark_theme) = {
+            let themes = ThemeRegistry::global(cx).themes();
+            (
+                themes.get(LIGHT_THEME_NAME).cloned(),
+                themes.get(DARK_THEME_NAME).cloned(),
+            )
+        };
+        let theme = Theme::global_mut(cx);
+        if let Some(light_theme) = light_theme {
+            theme.light_theme = light_theme;
+        }
+        if let Some(dark_theme) = dark_theme {
+            theme.dark_theme = dark_theme;
         }
 
         match self {
@@ -454,6 +466,8 @@ mod tests {
     use gpui_kit::component::{ThemeMode, ThemeSet};
 
     const DARK_THEME_CONFIG: &str = include_str!("../../../../assets/themes/financeapp-dark.json");
+    const LIGHT_THEME_CONFIG: &str =
+        include_str!("../../../../assets/themes/financeapp-light.json");
 
     #[test]
     fn theme_setting_values_map_to_supported_preferences() {
@@ -515,6 +529,42 @@ mod tests {
         assert_eq!(
             highlight["syntax"]["string"]["color"].as_str(),
             Some("#97c79f")
+        );
+    }
+
+    #[test]
+    fn project_light_theme_config_contains_palette_and_editor_colors() {
+        let value = serde_json::from_str::<serde_json::Value>(LIGHT_THEME_CONFIG)
+            .expect("project light theme config should be valid JSON");
+        let themes = serde_json::from_value::<ThemeSet>(value.clone())
+            .expect("project light theme config should parse");
+        let theme = themes
+            .themes
+            .first()
+            .expect("project light theme config should define a theme");
+
+        assert_eq!(theme.name.as_ref(), "FinanceApp Light");
+        assert_eq!(theme.mode, ThemeMode::Light);
+        assert_eq!(theme.colors.background.as_deref(), Some("#f7f7fa"));
+        assert_eq!(theme.colors.foreground.as_deref(), Some("#1e1e1e"));
+        assert_eq!(
+            theme.colors.description_list_label.as_deref(),
+            Some("#eeeef4")
+        );
+        assert_eq!(theme.colors.link.as_deref(), Some("#2659a0"));
+        assert_eq!(theme.colors.drag_border.as_deref(), Some("#3867ba"));
+        assert_eq!(theme.colors.progress_bar.as_deref(), Some("#45456a"));
+        assert_eq!(theme.colors.slider_bar.as_deref(), Some("#45456a"));
+        assert_eq!(theme.colors.scrollbar.as_deref(), Some("#efeff500"));
+        assert_eq!(theme.colors.table_row_border.as_deref(), Some("#cbcbdbb3"));
+        assert!(theme.highlight.is_some());
+
+        let highlight = &value["themes"][0]["highlight"];
+        assert_eq!(highlight["editor.foreground"].as_str(), Some("#1e1e1e"));
+        assert_eq!(highlight["editor.invisible"].as_str(), Some("#66667a66"));
+        assert_eq!(
+            highlight["syntax"]["string"]["color"].as_str(),
+            Some("#2b663d")
         );
     }
 
