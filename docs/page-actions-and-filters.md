@@ -75,7 +75,7 @@ Shared compact DatePicker controls retain previous/next-month arrow navigation a
 - A start date later than the end date is reported without replacing the displayed report with an empty result. Dates are selected through the calendar rather than entered as free-form text.
 - The page refresh action reloads the categories and applies the values currently in the controls.
 - Expense and income tables and pie charts are displayed expense first, then income.
-- Each transaction-type/currency table keeps its ordinary total row. Expense category rows have a sortable «Регулярные» column with «Да» or «Нет» from the current category flag. Expense tables add «Итого в регулярных расходах» below it with the operation count, exact amount, and share of the expense total in the same currency; income tables do not show this row or the regular column. No regular-expense slice is added to the pie chart, because those categories are already present as ordinary slices.
+- Each transaction-type/currency table keeps its ordinary total row. Expense category rows have a sortable «Регулярные» column with «Да» or «Нет» from the current category flag. Expense tables add «Регулярные» below it with the operation count, exact amount, and share of the expense total in the same currency; income tables do not show this row or the regular column. No regular-expense slice is added to the pie chart, because those categories are already present as ordinary slices.
 
 ### Savings
 

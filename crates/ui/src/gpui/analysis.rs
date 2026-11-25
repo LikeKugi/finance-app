@@ -293,7 +293,7 @@ fn regular_summary_values(kind: TransactionKind, total: &AnalysisTotal) -> Optio
     }
     let regular = total.regular.as_ref()?;
     Some([
-        "Итого в регулярных расходах".to_owned(),
+        "Регулярные".to_owned(),
         regular.transaction_count.to_string(),
         format_currency(&regular.amount, 2),
         format!("{}%", regular.share_percent.round_dp(2)),
@@ -2180,7 +2180,7 @@ mod tests {
         assert_eq!(
             regular_summary_values(TransactionKind::Expense, &zero_total),
             Some([
-                "Итого в регулярных расходах".to_owned(),
+                "Регулярные".to_owned(),
                 "0".to_owned(),
                 "0.00".to_owned(),
                 "0%".to_owned(),
@@ -2202,7 +2202,7 @@ mod tests {
         assert_eq!(
             regular_summary_values(TransactionKind::Expense, &positive_total),
             Some([
-                "Итого в регулярных расходах".to_owned(),
+                "Регулярные".to_owned(),
                 "2".to_owned(),
                 "50.00".to_owned(),
                 "25%".to_owned(),
