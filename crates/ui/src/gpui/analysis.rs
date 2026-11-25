@@ -15,6 +15,7 @@ use finance_core::{
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::calendar::Date;
+use gpui_kit::component::chart::PieChart;
 use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use gpui_kit::component::dialog::Dialog;
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -183,9 +184,11 @@ impl RequestTracker {
 }
 
 #[derive(Clone)]
-struct PieChartSlice<'a> {
-    category: &'a AnalysisCategoryTotal,
+struct PieChartSlice {
+    category_id: i64,
+    category_name: String,
     share: f32,
+    share_percent: rust_decimal::Decimal,
 }
 
 struct AnalysisTable {
@@ -430,7 +433,7 @@ fn pie_chart_slices(
     summary: &AnalysisSummary,
     kind: TransactionKind,
     currency: Currency,
-) -> Option<Vec<PieChartSlice<'_>>> {
+) -> Option<Vec<PieChartSlice>> {
     summary
         .categories
         .iter()
@@ -440,7 +443,12 @@ fn pie_chart_slices(
             if !share.is_finite() || share < 0.0 {
                 return None;
             }
-            Some(PieChartSlice { category, share })
+            Some(PieChartSlice {
+                category_id: category.category_id,
+                category_name: category.category_name.clone(),
+                share,
+                share_percent: category.share_percent,
+            })
         })
         .collect()
 }
@@ -455,69 +463,20 @@ fn pie_chart_color(category_id: i64, is_dark: bool) -> Hsla {
     Hsla::from(rgb(colors[index]))
 }
 
-/// Вершины сектора: центр и дуга, координаты относительно левого верхнего угла.
-fn pie_slice_points(
-    center: (f32, f32),
-    radius: f32,
-    start_angle: f32,
-    end_angle: f32,
-) -> Vec<(f32, f32)> {
-    let segments = ((end_angle - start_angle).abs() * 16.0).ceil().max(1.0) as usize;
-    let mut points = Vec::with_capacity(segments + 2);
-    points.push(center);
-    for segment in 0..=segments {
-        let fraction = segment as f32 / segments as f32;
-        let angle = start_angle + (end_angle - start_angle) * fraction;
-        points.push((
-            center.0 + angle.cos() * radius,
-            center.1 + angle.sin() * radius,
-        ));
-    }
-    points
-}
-
-fn pie_chart(slices: Vec<(i64, f32)>, is_dark: bool) -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _| {
-            let total: f32 = slices.iter().map(|(_, share)| share).sum();
-            if !total.is_finite() || total <= 0.0 {
-                return;
-            }
-            let side = bounds.size.width.min(bounds.size.height).as_f32();
-            let center = (side / 2.0, side / 2.0);
-            let radius = side / 2.0 - 2.0;
-            let mut start = -std::f32::consts::FRAC_PI_2;
-            for (category_id, share) in &slices {
-                if *share <= 0.0 {
-                    continue;
-                }
-                let end = start + std::f32::consts::TAU * share / total;
-                let mut builder = PathBuilder::fill();
-                for (index, (x, y)) in pie_slice_points(center, radius, start, end)
-                    .into_iter()
-                    .enumerate()
-                {
-                    let position = point(bounds.origin.x + px(x), bounds.origin.y + px(y));
-                    if index == 0 {
-                        builder.move_to(position);
-                    } else {
-                        builder.line_to(position);
-                    }
-                }
-                builder.close();
-                // Построение выпуклого многоугольника из конечных точек не должно
-                // завершаться ошибкой; при сбое сектор не рисуется, а таблица
-                // и легенда остаются источником данных.
-                if let Ok(path) = builder.build() {
-                    window.paint_path(path, pie_chart_color(*category_id, is_dark));
-                }
-                start = end;
-            }
-        },
+fn pie_chart(
+    slices: Vec<PieChartSlice>,
+    is_dark: bool,
+    chart_id: impl Into<ElementId>,
+) -> impl IntoElement {
+    div().size(px(PIE_CHART_DIAMETER)).flex_none().child(
+        PieChart::new(slices)
+            .id(chart_id)
+            .outer_radius(58.0)
+            .value(|slice| slice.share)
+            .color(move |slice| pie_chart_color(slice.category_id, is_dark))
+            .tooltip_name(|slice| slice.category_name.clone().into())
+            .tooltip_value(|slice, _, _| format!("{}%", slice.share_percent.round_dp(2)).into()),
     )
-    .size(px(PIE_CHART_DIAMETER))
-    .flex_none()
 }
 
 /// Выбор категории с фиксированным списком «Все» + дерево категорий.
@@ -1244,7 +1203,6 @@ impl AnalysisPage {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        const LEGEND_VISIBLE_MAX: usize = 4;
         let is_dark = cx.theme().is_dark();
         div().flex().gap_4().children(
             [TransactionKind::Expense, TransactionKind::Income]
@@ -1287,121 +1245,68 @@ impl AnalysisPage {
                         if slices.is_empty() {
                             continue;
                         }
-                        let geometry: Vec<(i64, f32)> = slices
-                            .iter()
-                            .map(|slice| (slice.category.category_id, slice.share))
-                            .collect();
-                        let visible: Vec<_> =
-                            slices[..LEGEND_VISIBLE_MAX.min(slices.len())].to_vec();
-                        let hidden: Vec<_> =
-                            slices[LEGEND_VISIBLE_MAX.min(slices.len())..].to_vec();
-                        let legend_item =
-                            |slice: &PieChartSlice| {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div().size(px(12.0)).flex_none().rounded_sm().bg(
-                                            pie_chart_color(slice.category.category_id, is_dark),
-                                        ),
-                                    )
-                                    .child(format!(
-                                        "{} — {}%",
-                                        slice.category.category_name,
-                                        slice.category.share_percent.round_dp(2)
-                                    ))
-                            };
-                        // Соберём данные скрытых элементов как owned-значения для замыкания on_click.
-                        let hidden_data: Vec<(i64, String, f64)> = hidden
-                            .iter()
-                            .map(|slice| {
-                                (
-                                    slice.category.category_id,
-                                    slice.category.category_name.clone(),
-                                    slice.category.share_percent.to_f64().unwrap_or(0.0),
-                                )
-                            })
-                            .collect();
                         let kind_title = kind.title().to_owned();
                         let currency_code = currency.code().to_owned();
-                        let legend = div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .min_w_0()
-                            .child(div().font_weight(FontWeight::BOLD).child("Категории"))
-                            .children(visible.iter().map(legend_item))
-                            .when(!hidden_data.is_empty(), |legend| {
-                                let hidden = hidden_data.clone();
-                                let more_label = format!("Ещё {}…", hidden.len());
-                                let kind_t = kind_title.clone();
-                                let curr_c = currency_code.clone();
-                                legend.child(
-                                    div()
-                                        .id((
-                                            "legend-more",
-                                            (kind as usize) << 8 | currency as usize,
-                                        ))
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .cursor_pointer()
-                                        .text_color(cx.theme().accent_foreground)
-                                        .underline()
-                                        .child(more_label)
-                                        .on_click(move |_, window, cx| {
-                                            let hidden = hidden.clone();
-                                            let kind_t = kind_t.clone();
-                                            let curr_c = curr_c.clone();
-                                            window.open_dialog(cx, move |dialog: Dialog, _, _| {
-                                                let items: Vec<_> = hidden
-                                                    .iter()
-                                                    .map(|(cat_id, name, share)| {
-                                                        div()
-                                                            .flex()
-                                                            .items_center()
-                                                            .gap_2()
-                                                            .child(
-                                                                div()
-                                                                    .size(px(12.0))
-                                                                    .flex_none()
-                                                                    .rounded_sm()
-                                                                    .bg(pie_chart_color(
-                                                                        *cat_id, is_dark,
-                                                                    )),
-                                                            )
-                                                            .child(format!(
-                                                                "{} — {:.2}%",
-                                                                name, share
-                                                            ))
-                                                            .into_any_element()
-                                                    })
-                                                    .collect();
-                                                dialog
-                                                    .title(format!(
-                                                        "Категории — {}, {}",
-                                                        kind_t, curr_c
-                                                    ))
-                                                    .centered()
-                                                    .child(
-                                                        div()
-                                                            .flex()
-                                                            .flex_col()
-                                                            .gap_1()
-                                                            .children(items),
-                                                    )
-                                            });
-                                        }),
-                                )
+                        let legend_data = slices.clone();
+                        let dialog_title = format!("Легенда — {}, {}", kind_title, currency_code);
+                        let chart_index = analysis_table_index(kind, currency);
+                        let legend_button = Button::new(("analysis-pie-legend", chart_index))
+                            .secondary()
+                            .label(format!("Легенда ({})", slices.len()))
+                            .on_click(move |_, window, cx| {
+                                let legend_data = legend_data.clone();
+                                let dialog_title = dialog_title.clone();
+                                window.open_dialog(cx, move |dialog: Dialog, _, _| {
+                                    let items: Vec<_> = legend_data
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(index, slice)| {
+                                            div()
+                                                .id(("analysis-legend-item", index))
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .size(px(12.0))
+                                                        .flex_none()
+                                                        .rounded_sm()
+                                                        .bg(pie_chart_color(
+                                                            slice.category_id,
+                                                            is_dark,
+                                                        )),
+                                                )
+                                                .child(format!(
+                                                    "{} — {}%",
+                                                    slice.category_name,
+                                                    slice.share_percent.round_dp(2)
+                                                ))
+                                                .into_any_element()
+                                        })
+                                        .collect();
+                                    dialog.title(dialog_title.clone()).centered().child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .max_h(px(520.0))
+                                            .overflow_y_scrollbar()
+                                            .children(items),
+                                    )
+                                });
                             });
                         column = column.child(
                             div().flex().flex_col().gap_1().child(heading).child(
                                 div()
                                     .flex()
+                                    .items_center()
                                     .gap_3()
-                                    .child(pie_chart(geometry, is_dark))
-                                    .child(legend),
+                                    .child(pie_chart(
+                                        slices,
+                                        is_dark,
+                                        ("analysis-pie-chart", chart_index),
+                                    ))
+                                    .child(legend_button),
                             ),
                         );
                     }
@@ -1565,7 +1470,7 @@ mod tests {
     // Глоб-импорт `gpui_kit::*` затеняет атрибут `#[test]`, поэтому имена импортируются явно.
     use super::{
         analysis_balance_lines, analysis_column_headers, analysis_table_width, parse_filters,
-        pie_chart_color, pie_chart_slices, pie_slice_points, regular_label, regular_summary_values,
+        pie_chart_color, pie_chart_slices, regular_label, regular_summary_values,
         sort_analysis_categories, AnalysisFilters, AnalysisTable, CategoryFilterItem,
         CategoryPicker, RequestTracker, COLUMN_WIDTHS, COL_AMOUNT, COL_CATEGORY, COL_REGULAR,
         COL_SHARE, COL_TRANSACTION_COUNT, EXPENSE_CATEGORY_FILTER_ITEM_ID, EXPENSE_COLUMN_HEADERS,
@@ -1828,14 +1733,14 @@ mod tests {
         assert_eq!(
             income_rub
                 .iter()
-                .map(|slice| slice.category.category_name.as_str())
+                .map(|slice| slice.category_name.as_str())
                 .collect::<Vec<_>>(),
             ["Зарплата", "Премия"]
         );
         assert_eq!(
             expense_usd
                 .iter()
-                .map(|slice| slice.category.category_name.as_str())
+                .map(|slice| slice.category_name.as_str())
                 .collect::<Vec<_>>(),
             ["Расход USD", "Платеж USD"]
         );
@@ -1866,7 +1771,7 @@ mod tests {
         assert_eq!(
             slices
                 .iter()
-                .map(|slice| slice.category.category_name.as_str())
+                .map(|slice| slice.category_name.as_str())
                 .collect::<Vec<_>>(),
             ["Зарплата", "Премии", "Годовая премия"]
         );
@@ -2046,16 +1951,6 @@ mod tests {
             table.total.as_ref().map(|total| total.amount),
             Some(Decimal::from(13))
         );
-    }
-
-    #[test]
-    fn pie_slice_points_start_at_center_and_follow_the_arc() {
-        let points = pie_slice_points((10.0, 10.0), 5.0, 0.0, std::f32::consts::FRAC_PI_2);
-        assert_eq!(points[0], (10.0, 10.0));
-        let first = points[1];
-        let last = points[points.len() - 1];
-        assert!((first.0 - 15.0).abs() < 1e-4 && (first.1 - 10.0).abs() < 1e-4);
-        assert!((last.0 - 10.0).abs() < 1e-4 && (last.1 - 15.0).abs() < 1e-4);
     }
 
     #[test]
@@ -2314,7 +2209,7 @@ mod tests {
         assert_eq!(
             slices
                 .iter()
-                .map(|slice| slice.category.category_name.as_str())
+                .map(|slice| slice.category_name.as_str())
                 .collect::<Vec<_>>(),
             ["Аренда", "Питание"]
         );
