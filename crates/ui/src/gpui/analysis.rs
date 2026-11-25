@@ -39,8 +39,8 @@ const ROW_HEIGHT: f32 = 30.0;
 const PIE_CHART_DIAMETER: f32 = 120.0;
 const INCOME_COLUMN_HEADERS: [&str; 4] = ["Категория", "Операций", "Сумма", "Доля"];
 const EXPENSE_COLUMN_HEADERS: [&str; 5] = ["Категория", "Операций", "Сумма", "Доля", "Регулярные"];
-const COLUMN_WIDTHS: [f32; 5] = [205.0, 95.0, 135.0, 70.0, 95.0];
-const MIN_COLUMN_WIDTHS: [f32; 5] = [140.0, 90.0, 115.0, 65.0, 90.0];
+const COLUMN_WIDTHS: [f32; 5] = [205.0, 95.0, 135.0, 70.0, 145.0];
+const MIN_COLUMN_WIDTHS: [f32; 5] = [140.0, 90.0, 115.0, 65.0, 120.0];
 const COL_CATEGORY: usize = 0;
 const COL_TRANSACTION_COUNT: usize = 1;
 const COL_AMOUNT: usize = 2;
@@ -1567,10 +1567,10 @@ mod tests {
         analysis_balance_lines, analysis_column_headers, analysis_table_width, parse_filters,
         pie_chart_color, pie_chart_slices, pie_slice_points, regular_label, regular_summary_values,
         sort_analysis_categories, AnalysisFilters, AnalysisTable, CategoryFilterItem,
-        CategoryPicker, RequestTracker, COL_AMOUNT, COL_CATEGORY, COL_REGULAR, COL_SHARE,
-        COL_TRANSACTION_COUNT, EXPENSE_CATEGORY_FILTER_ITEM_ID, EXPENSE_COLUMN_HEADERS,
-        INCOME_CATEGORY_FILTER_ITEM_ID, INCOME_COLUMN_HEADERS, PIE_CHART_COLORS_DARK,
-        PIE_CHART_COLORS_LIGHT,
+        CategoryPicker, RequestTracker, COLUMN_WIDTHS, COL_AMOUNT, COL_CATEGORY, COL_REGULAR,
+        COL_SHARE, COL_TRANSACTION_COUNT, EXPENSE_CATEGORY_FILTER_ITEM_ID, EXPENSE_COLUMN_HEADERS,
+        INCOME_CATEGORY_FILTER_ITEM_ID, INCOME_COLUMN_HEADERS, MIN_COLUMN_WIDTHS,
+        PIE_CHART_COLORS_DARK, PIE_CHART_COLORS_LIGHT,
     };
     use chrono::NaiveDate;
     use finance_core::{
@@ -2139,8 +2139,10 @@ mod tests {
             analysis_column_headers(TransactionKind::Income),
             INCOME_COLUMN_HEADERS
         );
-        assert_eq!(analysis_table_width(TransactionKind::Expense), 600.0);
+        assert_eq!(analysis_table_width(TransactionKind::Expense), 650.0);
         assert_eq!(analysis_table_width(TransactionKind::Income), 505.0);
+        assert_eq!(COLUMN_WIDTHS[COL_REGULAR], 145.0);
+        assert_eq!(MIN_COLUMN_WIDTHS[COL_REGULAR], 120.0);
     }
 
     #[test]
