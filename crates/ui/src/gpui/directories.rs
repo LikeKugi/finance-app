@@ -13,7 +13,9 @@ use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::{AlertDialog, Dialog};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
-use gpui_kit::component::table::{Column, ColumnFixed, DataTable, TableDelegate, TableState};
+use gpui_kit::component::table::{
+    Column, ColumnFixed, DataTable, TableDelegate, TableEvent, TableState,
+};
 use gpui_kit::component::tooltip::Tooltip as ComponentTooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, IndexPath, Sizable as _, WindowExt as _,
@@ -346,7 +348,7 @@ impl DirectoriesPage {
             .sortable(false)
             .col_movable(false)
             .col_resizable(false)
-            .row_selectable(false)
+            .row_selectable(true)
             .col_selectable(false)
         });
         let banks_table = cx.new(|cx| {
@@ -361,7 +363,7 @@ impl DirectoriesPage {
             .sortable(false)
             .col_movable(false)
             .col_resizable(false)
-            .row_selectable(false)
+            .row_selectable(true)
             .col_selectable(false)
         });
         let expense_places_table = cx.new(|cx| {
@@ -376,7 +378,7 @@ impl DirectoriesPage {
             .sortable(false)
             .col_movable(false)
             .col_resizable(false)
-            .row_selectable(false)
+            .row_selectable(true)
             .col_selectable(false)
         });
         let currencies_table = cx.new(|cx| {
@@ -391,9 +393,93 @@ impl DirectoriesPage {
             .sortable(false)
             .col_movable(false)
             .col_resizable(false)
-            .row_selectable(false)
+            .row_selectable(true)
             .col_selectable(false)
         });
+        let subscriptions = vec![
+            cx.subscribe_in(
+                &categories_table,
+                window,
+                |page: &mut Self, _, event: &TableEvent, window, cx| {
+                    let TableEvent::DoubleClickedRow(row_ix) = event else {
+                        return;
+                    };
+                    let Some(category) = page
+                        .categories_table
+                        .read(cx)
+                        .delegate()
+                        .rows
+                        .get(*row_ix)
+                        .map(|row| row.category.clone())
+                    else {
+                        return;
+                    };
+                    page.open_category_form(Some(&category), window, cx);
+                },
+            ),
+            cx.subscribe_in(
+                &banks_table,
+                window,
+                |page: &mut Self, _, event: &TableEvent, window, cx| {
+                    let TableEvent::DoubleClickedRow(row_ix) = event else {
+                        return;
+                    };
+                    let Some(bank) = page
+                        .banks_table
+                        .read(cx)
+                        .delegate()
+                        .rows
+                        .get(*row_ix)
+                        .cloned()
+                    else {
+                        return;
+                    };
+                    page.open_bank_form(Some(&bank), window, cx);
+                },
+            ),
+            cx.subscribe_in(
+                &expense_places_table,
+                window,
+                |page: &mut Self, _, event: &TableEvent, window, cx| {
+                    let TableEvent::DoubleClickedRow(row_ix) = event else {
+                        return;
+                    };
+                    let Some(place) = page
+                        .expense_places_table
+                        .read(cx)
+                        .delegate()
+                        .rows
+                        .get(*row_ix)
+                        .cloned()
+                    else {
+                        return;
+                    };
+                    page.open_expense_place_form(Some(&place), window, cx);
+                },
+            ),
+            cx.subscribe_in(
+                &currencies_table,
+                window,
+                |page: &mut Self, _, event: &TableEvent, window, cx| {
+                    let TableEvent::DoubleClickedRow(row_ix) = event else {
+                        return;
+                    };
+                    let Some(currency) = page
+                        .currencies_table
+                        .read(cx)
+                        .delegate()
+                        .rows
+                        .get(*row_ix)
+                        .map(|row| row.currency.clone())
+                    else {
+                        return;
+                    };
+                    if !currency.is_primary {
+                        page.open_currency_form(Some(&currency), window, cx);
+                    }
+                },
+            ),
+        ];
         let mut page = Self {
             database,
             prices,
@@ -413,7 +499,7 @@ impl DirectoriesPage {
             banks_table,
             expense_places_table,
             currencies_table,
-            _subscriptions: Vec::new(),
+            _subscriptions: subscriptions,
         };
         page.reload(window, cx);
         page

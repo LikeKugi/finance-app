@@ -564,13 +564,22 @@ impl TransfersPage {
         let widths = load_column_widths(&database);
         let table_delegate = TransfersTable::new(cx.entity().downgrade(), widths);
         let table = cx.new(|cx| TableState::new(table_delegate, window, cx).col_movable(false));
-        subscriptions.push(
-            cx.subscribe(&table, |this: &mut Self, _, event: &TableEvent, cx| {
-                if let TableEvent::ColumnWidthsChanged(widths) = event {
-                    this.save_column_widths(widths, cx);
+        subscriptions.push(cx.subscribe_in(
+            &table,
+            window,
+            |this: &mut Self, _, event: &TableEvent, window, cx| match event {
+                TableEvent::ColumnWidthsChanged(widths) => this.save_column_widths(widths, cx),
+                TableEvent::DoubleClickedRow(row_ix) => {
+                    let Some(id) =
+                        transfer_id_at_row(&this.table.read(cx).delegate().rows, *row_ix)
+                    else {
+                        return;
+                    };
+                    this.begin_edit(id, window, cx);
                 }
-            }),
-        );
+                _ => {}
+            },
+        ));
         let mut page = Self {
             database,
             cards: Vec::new(),
@@ -1698,6 +1707,10 @@ struct TransferRow {
     comment: String,
 }
 
+fn transfer_id_at_row(rows: &[TransferRow], row_ix: usize) -> Option<i64> {
+    rows.get(row_ix).map(|row| row.record.id)
+}
+
 struct TransfersTable {
     page: WeakEntity<TransfersPage>,
     rows: Vec<TransferRow>,
@@ -2066,6 +2079,39 @@ mod tests {
             interest_destination: InterestDestination::Reinvest,
             is_active,
         }
+    }
+
+    fn transfer_row(id: i64, amount: &str) -> TransferRow {
+        TransferRow {
+            record: TransferRecord {
+                id,
+                operation_date: NaiveDate::from_ymd_opt(2026, 11, 21).unwrap(),
+                operation_type: TransferOperationType::Transfer,
+                source: TransferEndpoint::Cash,
+                destination: TransferEndpoint::External,
+                amount: Decimal::from_str(amount).unwrap(),
+                currency: Currency::Rub,
+                comment: None,
+            },
+            source_label: CASH_LABEL.to_owned(),
+            destination_label: EXTERNAL_LABEL.to_owned(),
+            comment: String::new(),
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn transfer_id_at_row_uses_sorted_delegate_order() {
+        let mut rows = vec![transfer_row(2, "20"), transfer_row(1, "10")];
+        sort_transfers(&mut rows, Some((4, ColumnSort::Ascending)));
+
+        assert_eq!(transfer_id_at_row(&rows, 0), Some(1));
+    }
+
+    #[::core::prelude::v1::test]
+    fn transfer_id_at_row_returns_none_for_invalid_index() {
+        let rows = vec![transfer_row(1, "10")];
+
+        assert_eq!(transfer_id_at_row(&rows, 1), None);
     }
 
     #[::core::prelude::v1::test]

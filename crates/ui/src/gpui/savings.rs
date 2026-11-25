@@ -681,13 +681,27 @@ impl SavingsPage {
         let widths = load_column_widths(&database);
         let table_delegate = SavingsTable::new(cx.entity().downgrade(), widths);
         let table = cx.new(|cx| TableState::new(table_delegate, window, cx).col_movable(false));
-        subscriptions.push(
-            cx.subscribe(&table, |this: &mut Self, _, event: &TableEvent, cx| {
-                if let TableEvent::ColumnWidthsChanged(widths) = event {
-                    this.save_column_widths(widths, cx);
+        subscriptions.push(cx.subscribe_in(
+            &table,
+            window,
+            |this: &mut Self, _, event: &TableEvent, window, cx| match event {
+                TableEvent::ColumnWidthsChanged(widths) => this.save_column_widths(widths, cx),
+                TableEvent::DoubleClickedRow(row_ix) => {
+                    let Some(id) = this
+                        .table
+                        .read(cx)
+                        .delegate()
+                        .rows
+                        .get(*row_ix)
+                        .map(|account| account.id)
+                    else {
+                        return;
+                    };
+                    this.begin_edit(id, window, cx);
                 }
-            }),
-        );
+                _ => {}
+            },
+        ));
 
         let mut page = Self {
             database,

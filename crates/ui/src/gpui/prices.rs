@@ -387,13 +387,21 @@ impl PricesSection {
                 }
             },
         ));
-        subscriptions.push(
-            cx.subscribe(&table, |page: &mut Self, _, event: &TableEvent, cx| {
-                if let TableEvent::ColumnWidthsChanged(widths) = event {
-                    page.save_widths(widths, cx);
+        subscriptions.push(cx.subscribe_in(
+            &table,
+            window,
+            |page: &mut Self, _, event: &TableEvent, window, cx| match event {
+                TableEvent::ColumnWidthsChanged(widths) => page.save_widths(widths, cx),
+                TableEvent::DoubleClickedRow(row_ix) => {
+                    let Some(record) = page.table.read(cx).delegate().rows.get(*row_ix).cloned()
+                    else {
+                        return;
+                    };
+                    page.open_form(Some(&record), window, cx);
                 }
-            }),
-        );
+                _ => {}
+            },
+        ));
         let mut page = Self {
             database,
             places: Vec::new(),
