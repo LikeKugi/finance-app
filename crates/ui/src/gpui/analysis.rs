@@ -37,6 +37,7 @@ use super::selectable::{
 
 const NONE_LABEL: &str = "Все";
 const ROW_HEIGHT: f32 = 30.0;
+const PIE_CHART_WIDTH: f32 = 220.0;
 const PIE_CHART_DIAMETER: f32 = 120.0;
 const INCOME_COLUMN_HEADERS: [&str; 4] = ["Категория", "Операций", "Сумма", "Доля"];
 const EXPENSE_COLUMN_HEADERS: [&str; 5] = ["Категория", "Операций", "Сумма", "Доля", "Регулярные"];
@@ -468,15 +469,21 @@ fn pie_chart(
     is_dark: bool,
     chart_id: impl Into<ElementId>,
 ) -> impl IntoElement {
-    div().size(px(PIE_CHART_DIAMETER)).flex_none().child(
-        PieChart::new(slices)
-            .id(chart_id)
-            .outer_radius(58.0)
-            .value(|slice| slice.share)
-            .color(move |slice| pie_chart_color(slice.category_id, is_dark))
-            .tooltip_name(|slice| slice.category_name.clone().into())
-            .tooltip_value(|slice, _, _| format!("{}%", slice.share_percent.round_dp(2)).into()),
-    )
+    div()
+        .w(px(PIE_CHART_WIDTH))
+        .h(px(PIE_CHART_DIAMETER))
+        .flex_none()
+        .child(
+            PieChart::new(slices)
+                .id(chart_id)
+                .outer_radius(58.0)
+                .value(|slice| slice.share)
+                .color(move |slice| pie_chart_color(slice.category_id, is_dark))
+                .tooltip_name(|slice| slice.category_name.clone().into())
+                .tooltip_value(|slice, _, _| {
+                    format!("{}%", slice.share_percent.round_dp(2)).into()
+                }),
+        )
 }
 
 /// Выбор категории с фиксированным списком «Все» + дерево категорий.
