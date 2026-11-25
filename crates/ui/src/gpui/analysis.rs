@@ -205,7 +205,7 @@ impl AnalysisTable {
             rows: Vec::new(),
             total: None,
             regular_total: None,
-            sort: None,
+            sort: Some((COL_AMOUNT, ColumnSort::Descending)),
         }
     }
 
@@ -1902,6 +1902,60 @@ mod tests {
             assert_eq!(
                 rows.iter().map(|row| row.category_id).collect::<Vec<_>>(),
                 descending
+            );
+        }
+    }
+
+    #[test]
+    fn analysis_tables_default_to_descending_amount_order() {
+        let branches = [
+            (TransactionKind::Income, Currency::Rub),
+            (TransactionKind::Income, Currency::Usd),
+            (TransactionKind::Expense, Currency::Rub),
+            (TransactionKind::Expense, Currency::Usd),
+        ];
+        let categories = branches
+            .into_iter()
+            .enumerate()
+            .flat_map(|(index, (kind, currency))| {
+                [
+                    (index as i64 * 2 + 1, "Меньше", Decimal::from(10)),
+                    (index as i64 * 2 + 2, "Больше", Decimal::from(100)),
+                ]
+                .into_iter()
+                .map(
+                    move |(category_id, category_name, amount)| AnalysisCategoryTotal {
+                        kind,
+                        category_id,
+                        category_name: category_name.to_owned(),
+                        currency,
+                        amount,
+                        transaction_count: 1,
+                        share_percent: Decimal::from(50),
+                        is_regular: false,
+                    },
+                )
+            })
+            .collect();
+        let summary = AnalysisSummary {
+            categories,
+            totals: Vec::new(),
+        };
+
+        for (kind, currency) in branches {
+            let mut table = AnalysisTable::new(kind, currency);
+            assert_eq!(
+                table.sort,
+                Some((COL_AMOUNT, super::ColumnSort::Descending))
+            );
+            table.set_summary(&summary);
+            assert_eq!(
+                table
+                    .rows
+                    .iter()
+                    .map(|row| row.category_name.as_str())
+                    .collect::<Vec<_>>(),
+                ["Больше", "Меньше"]
             );
         }
     }
