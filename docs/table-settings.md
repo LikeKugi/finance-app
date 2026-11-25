@@ -8,6 +8,8 @@
 
 - Both tables have an outer border and internal vertical and horizontal borders for every column and row, including the headers.
 - The pinned `Действия` column is 160 logical pixels wide on both pages.
+- The Expenses table has an additional resizable `Регулярные` column between `Комментарии` and `Действия`, with a default width of 110 logical pixels. It shows `Да` or `Нет` from the current expense-category flag and can be sorted.
+- Existing saved expense widths are migrated in memory: six legacy values gain `Место покупки`, seven earlier values gain `Регулярные`, and all previously saved widths keep their order. The fixed Actions width is applied after either migration.
 - The `Изменить` and `Удалить` buttons are centered together in the column, leaving equal horizontal space on each side and keeping both buttons on one line.
 - This width overrides any previously saved width for the Actions column; saved widths for other columns are preserved.
 

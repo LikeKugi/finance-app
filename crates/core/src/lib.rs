@@ -43,6 +43,32 @@ impl PaymentDocumentFilter {
     }
 }
 
+/// Фильтр расходов по признаку регулярности категории.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RegularExpenseFilter {
+    /// Все операции, независимо от признака категории.
+    #[default]
+    All,
+    /// Только операции по регулярным категориям расходов.
+    Regular,
+    /// Только операции по нерегулярным категориям расходов.
+    NotRegular,
+}
+
+impl RegularExpenseFilter {
+    pub const fn is_active(self) -> bool {
+        !matches!(self, Self::All)
+    }
+
+    pub const fn matches(self, is_regular: bool) -> bool {
+        match self {
+            Self::All => true,
+            Self::Regular => is_regular,
+            Self::NotRegular => !is_regular,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Currency {
     Rub,
@@ -276,6 +302,8 @@ pub struct FinancialTransaction {
     pub date: NaiveDate,
     pub category_id: i64,
     pub category_name: String,
+    /// Текущий признак регулярности категории; для доходов всегда `false`.
+    pub is_regular: bool,
     pub amount: Decimal,
     pub currency: Currency,
     pub comment: String,
@@ -1696,8 +1724,9 @@ mod tests {
         validate_exchange_rate, validate_payment_document, validate_price, validate_savings,
         validate_transfer_account_currency, validate_transfer_card_type,
         validate_transfer_savings_active, Currency, DomainError, InterestDestination,
-        PaymentCardType, PaymentDocumentDetails, PaymentSystem, PriceFilter, SavingsTerm,
-        TransferDetails, TransferEndpoint, TransferOperationType, MAX_TRANSFER_COMMENT_LENGTH,
+        PaymentCardType, PaymentDocumentDetails, PaymentSystem, PriceFilter, RegularExpenseFilter,
+        SavingsTerm, TransferDetails, TransferEndpoint, TransferOperationType,
+        MAX_TRANSFER_COMMENT_LENGTH,
     };
 
     #[test]
@@ -2308,5 +2337,19 @@ mod tests {
             .allows(&TransferEndpoint::Savings(1), &TransferEndpoint::Cash));
         assert!(!TransferOperationType::Withdrawal
             .allows(&TransferEndpoint::Savings(1), &TransferEndpoint::Card(2)));
+    }
+
+    #[test]
+    fn regular_expense_filter_matches_only_selected_categories() {
+        assert_eq!(RegularExpenseFilter::default(), RegularExpenseFilter::All);
+        assert!(!RegularExpenseFilter::All.is_active());
+        assert!(RegularExpenseFilter::Regular.is_active());
+        assert!(RegularExpenseFilter::NotRegular.is_active());
+        assert!(RegularExpenseFilter::All.matches(true));
+        assert!(RegularExpenseFilter::All.matches(false));
+        assert!(RegularExpenseFilter::Regular.matches(true));
+        assert!(!RegularExpenseFilter::Regular.matches(false));
+        assert!(!RegularExpenseFilter::NotRegular.matches(true));
+        assert!(RegularExpenseFilter::NotRegular.matches(false));
     }
 }

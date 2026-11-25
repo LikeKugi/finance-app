@@ -9,9 +9,9 @@ use finance_core::{
     canonical_amount, rebase_exchange_rate, validate_currency_code, validate_exchange_rate,
     AnalysisTransaction, Bank, Category, Currency, CurrencyDefinition, ExpensePlace,
     FinancialTransaction, InterestDestination, LinkedSavingsAccount, PaymentCardType,
-    PaymentDocument, PaymentDocumentDetails, PaymentDocumentFilter, PaymentSystem, SavingsAccount,
-    SavingsDetails, SavingsTerm, TransactionAmount, TransactionKind, TransferDetails,
-    TransferEndpoint, TransferOperationType, TransferRecord,
+    PaymentDocument, PaymentDocumentDetails, PaymentDocumentFilter, PaymentSystem,
+    RegularExpenseFilter, SavingsAccount, SavingsDetails, SavingsTerm, TransactionAmount,
+    TransactionKind, TransferDetails, TransferEndpoint, TransferOperationType, TransferRecord,
 };
 use rusqlite::backup::Backup;
 use rusqlite::{
@@ -851,6 +851,39 @@ pub fn list_transactions_filtered_by_place(
     payment_document_filter: PaymentDocumentFilter,
     expense_place_id: Option<i64>,
 ) -> Result<Vec<FinancialTransaction>, DbError> {
+    list_transactions_filtered_by_regular(
+        connection,
+        kind,
+        from,
+        to,
+        category_ids,
+        currency,
+        search,
+        bank_id,
+        payment_document_filter,
+        expense_place_id,
+        RegularExpenseFilter::All,
+    )
+}
+
+/// Returns transactions filtered by the existing criteria, their place, and the regular flag.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Extends the established transaction-list filters without changing the existing API"
+)]
+pub fn list_transactions_filtered_by_regular(
+    connection: &Connection,
+    kind: TransactionKind,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+    category_ids: Option<Vec<i64>>,
+    currency: Option<Currency>,
+    search: &str,
+    bank_id: Option<i64>,
+    payment_document_filter: PaymentDocumentFilter,
+    expense_place_id: Option<i64>,
+    regular_filter: RegularExpenseFilter,
+) -> Result<Vec<FinancialTransaction>, DbError> {
     let (table, categories) = transaction_tables(kind);
     let (card_column, rate_effect_column, balance_applied_column) = match kind {
         TransactionKind::Income => ("t.payment_document_id", "0", "0"),
@@ -886,6 +919,22 @@ pub fn list_transactions_filtered_by_place(
         PaymentDocumentFilter::Card(_) => card_param + 1,
         _ => card_param,
     };
+    let regular_param = place_param + 1;
+    let (regular_column, regular_filter_sql) = match (kind, regular_filter) {
+        (TransactionKind::Expense, RegularExpenseFilter::Regular) => {
+            ("c.is_regular", format!("c.is_regular = ?{regular_param}"))
+        }
+        (TransactionKind::Expense, RegularExpenseFilter::NotRegular) => {
+            ("c.is_regular", format!("c.is_regular = ?{regular_param}"))
+        }
+        (TransactionKind::Expense, RegularExpenseFilter::All) => ("c.is_regular", "1=1".to_owned()),
+        (TransactionKind::Income, _) => ("0", "1=1".to_owned()),
+    };
+    let regular_flag = match regular_filter {
+        RegularExpenseFilter::Regular => Some(true),
+        RegularExpenseFilter::NotRegular => Some(false),
+        RegularExpenseFilter::All => None,
+    };
     let place_filter_sql = match kind {
         TransactionKind::Income => "1=1".to_owned(),
         TransactionKind::Expense => {
@@ -900,7 +949,7 @@ pub fn list_transactions_filtered_by_place(
     let sql = format!(
         "SELECT t.id, t.date, t.category_id, c.name, t.amount, t.currency, t.comment,
                 {place_id_column}, {place_name_column}, {card_column},
-                {rate_effect_column}, {balance_applied_column}
+                {rate_effect_column}, {balance_applied_column}, {regular_column}
          FROM {table} t JOIN {categories} c ON c.id = t.category_id
          {place_join}
          WHERE (?1 IS NULL OR t.date >= ?1)
@@ -913,6 +962,7 @@ pub fn list_transactions_filtered_by_place(
            ))
            AND ({card_filter_sql})
            AND ({place_filter_sql})
+           AND ({regular_filter_sql})
          ORDER BY t.date DESC, t.id DESC"
     );
     let from_str = from.map(|date| date.format("%Y-%m-%d").to_string());
@@ -932,6 +982,9 @@ pub fn list_transactions_filtered_by_place(
     }
     if matches!(kind, TransactionKind::Expense) {
         params.push(&expense_place_id);
+        if regular_filter.is_active() {
+            params.push(&regular_flag);
+        }
     }
     let mut statement = connection.prepare(&sql)?;
     let transactions = statement
@@ -953,6 +1006,7 @@ pub fn list_transactions_filtered_by_place(
                 date,
                 category_id: row.get(2)?,
                 category_name: row.get(3)?,
+                is_regular: row.get(12)?,
                 amount,
                 currency,
                 comment: row.get(6)?,
@@ -3298,8 +3352,8 @@ mod tests {
     use finance_core::{
         summarize_analysis, Currency, CurrencyDefinition, DomainError, ExpensePlace,
         InterestDestination, PaymentCardType, PaymentDocumentDetails, PaymentDocumentFilter,
-        PaymentSystem, PriceFilter, SavingsDetails, SavingsTerm, TransactionKind, TransferDetails,
-        TransferEndpoint, TransferOperationType,
+        PaymentSystem, PriceFilter, RegularExpenseFilter, SavingsDetails, SavingsTerm,
+        TransactionKind, TransferDetails, TransferEndpoint, TransferOperationType,
     };
     use rusqlite::{params, Connection, OpenFlags};
     use rust_decimal::Decimal;
@@ -3313,7 +3367,7 @@ mod tests {
         list_payment_documents_filtered, list_price_names, list_prices, list_savings,
         list_savings_filtered, list_transaction_amounts, list_transaction_comments,
         list_transactions, list_transactions_filtered, list_transactions_filtered_by_place,
-        list_transfers_filtered, load_analysis_transactions,
+        list_transactions_filtered_by_regular, list_transfers_filtered, load_analysis_transactions,
         load_analysis_transactions_by_category, restore_pending_database_import, save_bank,
         save_category, save_expense_place, save_next_payment, save_payment_document, save_price,
         save_savings, save_savings_interest_accrual, save_transaction, save_transaction_with_card,
@@ -9225,5 +9279,232 @@ mod tests {
             usd.regular.as_ref().unwrap().share_percent,
             Decimal::from(100)
         );
+    }
+
+    #[test]
+    fn transaction_list_regular_filter_uses_current_category_flag() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let regular_category = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Аренда",
+            None,
+            true,
+            Some(true),
+        )
+        .unwrap();
+        let ordinary_category = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Питание",
+            None,
+            true,
+            Some(false),
+        )
+        .unwrap();
+        let income_category = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Зарплата",
+            None,
+            true,
+            None,
+        )
+        .unwrap();
+        let date = NaiveDate::from_ymd_opt(2027, 2, 10).unwrap();
+        let regular_id = save_transaction(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            date,
+            regular_category,
+            Decimal::from(10),
+            Currency::Rub,
+            "",
+        )
+        .unwrap();
+        let ordinary_id = save_transaction(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            date,
+            ordinary_category,
+            Decimal::from(20),
+            Currency::Rub,
+            "",
+        )
+        .unwrap();
+        let income_id = save_transaction(
+            &connection,
+            TransactionKind::Income,
+            None,
+            date,
+            income_category,
+            Decimal::from(30),
+            Currency::Rub,
+            "",
+        )
+        .unwrap();
+
+        let all = list_transactions_filtered_by_regular(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            None,
+            None,
+            None,
+            "",
+            None,
+            PaymentDocumentFilter::All,
+            None,
+            RegularExpenseFilter::All,
+        )
+        .unwrap();
+        assert_eq!(
+            all.iter().map(|row| row.id).collect::<Vec<_>>(),
+            [ordinary_id, regular_id]
+        );
+        assert!(
+            all.iter()
+                .find(|row| row.id == regular_id)
+                .unwrap()
+                .is_regular
+        );
+        assert!(
+            !all.iter()
+                .find(|row| row.id == ordinary_id)
+                .unwrap()
+                .is_regular
+        );
+
+        let regular = list_transactions_filtered_by_regular(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            None,
+            None,
+            None,
+            "",
+            None,
+            PaymentDocumentFilter::All,
+            None,
+            RegularExpenseFilter::Regular,
+        )
+        .unwrap();
+        assert_eq!(
+            regular.iter().map(|row| row.id).collect::<Vec<_>>(),
+            [regular_id]
+        );
+
+        let not_regular = list_transactions_filtered_by_regular(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            None,
+            None,
+            None,
+            "",
+            None,
+            PaymentDocumentFilter::All,
+            None,
+            RegularExpenseFilter::NotRegular,
+        )
+        .unwrap();
+        assert_eq!(
+            not_regular.iter().map(|row| row.id).collect::<Vec<_>>(),
+            [ordinary_id]
+        );
+
+        let incomes = list_transactions_filtered_by_regular(
+            &connection,
+            TransactionKind::Income,
+            None,
+            None,
+            None,
+            None,
+            "",
+            None,
+            PaymentDocumentFilter::All,
+            None,
+            RegularExpenseFilter::Regular,
+        )
+        .unwrap();
+        assert_eq!(
+            incomes.iter().map(|row| row.id).collect::<Vec<_>>(),
+            [income_id]
+        );
+        assert!(!incomes[0].is_regular);
+    }
+
+    #[test]
+    fn regular_filter_combines_with_category_card_and_place_filters() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let bank_id = save_bank(&connection, None, "Банк", "").unwrap();
+        let mut card_details = payment_document_details(bank_id);
+        card_details.currency = Some(Currency::Rub);
+        let card_id = save_payment_document(&connection, None, &card_details).unwrap();
+        let place_id = save_expense_place(&connection, None, "Магазин", None).unwrap();
+        let regular_category = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Регулярное",
+            None,
+            true,
+            Some(true),
+        )
+        .unwrap();
+        let ordinary_category = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Обычное",
+            None,
+            true,
+            Some(false),
+        )
+        .unwrap();
+        let date = NaiveDate::from_ymd_opt(2027, 3, 5).unwrap();
+        for (category_id, comment) in [(regular_category, "нужное"), (ordinary_category, "другое")]
+        {
+            save_transaction_with_card_and_rate_effect_and_place(
+                &connection,
+                TransactionKind::Expense,
+                None,
+                date,
+                category_id,
+                Decimal::ONE,
+                Currency::Rub,
+                comment,
+                Some(card_id),
+                false,
+                Some(place_id),
+            )
+            .unwrap();
+        }
+
+        let filtered = list_transactions_filtered_by_regular(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            None,
+            Some(vec![regular_category]),
+            Some(Currency::Rub),
+            "",
+            Some(bank_id),
+            PaymentDocumentFilter::Card(card_id),
+            Some(place_id),
+            RegularExpenseFilter::Regular,
+        )
+        .unwrap();
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].category_id, regular_category);
+        assert!(filtered[0].is_regular);
     }
 }

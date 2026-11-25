@@ -9,7 +9,7 @@ use chrono::{Local, NaiveDate};
 use finance_core::{
     parse_amount_expression, summarize_transaction_balance, Bank, Category, Currency,
     CurrencyDefinition, ExpensePlace, FinancialTransaction, PaymentCardType, PaymentDocument,
-    PaymentDocumentFilter, TransactionBalance, TransactionKind,
+    PaymentDocumentFilter, RegularExpenseFilter, TransactionBalance, TransactionKind,
 };
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -47,6 +47,8 @@ const EXPENSE_PLACE_LABEL: &str = "Место покупки";
 const EXPENSE_PLACE_FILTER_ITEM_ID: &str = "expense-place-filter-item";
 const INCOME_PAYMENT_FILTER_LABEL: &str = "Способ получения";
 const PAYMENT_FILTER_LABEL: &str = "Способ оплаты";
+const REGULAR_EXPENSE_FILTER_LABEL: &str = "Регулярные расходы";
+const REGULAR_EXPENSE_FILTER_OPTIONS: [&str; 3] = ["Все", "Регулярные", "Не регулярные"];
 
 type Choice = Entity<SelectState<Vec<SharedString>>>;
 type CategoryChoice = Entity<SelectState<Vec<CategoryFilterItem>>>;
@@ -316,6 +318,14 @@ fn payment_filter_label(kind: TransactionKind) -> &'static str {
     }
 }
 
+fn regular_filter_from_index(index: usize) -> RegularExpenseFilter {
+    match index {
+        1 => RegularExpenseFilter::Regular,
+        2 => RegularExpenseFilter::NotRegular,
+        _ => RegularExpenseFilter::All,
+    }
+}
+
 struct Form {
     id: Option<i64>,
     date: Entity<DatePickerState>,
@@ -386,6 +396,8 @@ pub(crate) struct TransactionsPage {
     card_filter: PaymentDocumentFilter,
     card_filter_ids: Vec<i64>,
     card_filter_select: CardChoice,
+    regular_filter: RegularExpenseFilter,
+    regular_filter_select: Choice,
     currency_filter: Option<Currency>,
     currency_filter_select: Choice,
     period_select: Choice,
@@ -409,6 +421,15 @@ impl TransactionsPage {
         let bank_filter_select = bank_choice(vec![NONE_LABEL.to_owned()], 0, window, cx);
         let card_filter_select = card_choice(
             vec![NONE_LABEL.to_owned(), NO_CARD_LABEL.to_owned()],
+            0,
+            window,
+            cx,
+        );
+        let regular_filter_select = choice(
+            REGULAR_EXPENSE_FILTER_OPTIONS
+                .iter()
+                .map(|label| (*label).to_owned())
+                .collect(),
             0,
             window,
             cx,
@@ -507,6 +528,22 @@ impl TransactionsPage {
             },
         ));
         subscriptions.push(cx.subscribe_in(
+            &regular_filter_select,
+            window,
+            |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
+                let SelectEvent::Confirm(value) = event;
+                let selected = value.as_deref().and_then(|label| {
+                    REGULAR_EXPENSE_FILTER_OPTIONS
+                        .iter()
+                        .position(|option| *option == label)
+                });
+                this.regular_filter = selected.map_or(RegularExpenseFilter::All, |index| {
+                    regular_filter_from_index(index)
+                });
+                this.refresh(cx);
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
             &currency_filter_select,
             window,
             |this: &mut Self, _, event: &SelectEvent<Vec<SharedString>>, _, cx| {
@@ -585,6 +622,8 @@ impl TransactionsPage {
             card_filter: PaymentDocumentFilter::All,
             card_filter_ids: Vec::new(),
             card_filter_select,
+            regular_filter: RegularExpenseFilter::All,
+            regular_filter_select,
             currency_filter: None,
             currency_filter_select,
             period_select,
@@ -837,7 +876,7 @@ impl TransactionsPage {
         let category_ids = self
             .category_filter
             .map(|id| collect_category_descendants(&self.categories, id));
-        match finance_db::list_transactions_filtered_by_place(
+        match finance_db::list_transactions_filtered_by_regular(
             &self.database,
             self.kind,
             from,
@@ -848,6 +887,7 @@ impl TransactionsPage {
             self.bank_filter,
             self.card_filter,
             self.expense_place_filter,
+            self.regular_filter,
         ) {
             Ok(transactions) => {
                 self.table.update(cx, |table, cx| {
@@ -898,6 +938,7 @@ impl TransactionsPage {
             || self.bank_filter.is_some()
             || self.card_filter.is_active()
             || self.currency_filter.is_some()
+            || (self.kind == TransactionKind::Expense && self.regular_filter.is_active())
     }
 
     fn reset_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -913,6 +954,7 @@ impl TransactionsPage {
         self.bank_filter = None;
         self.card_filter = PaymentDocumentFilter::All;
         self.currency_filter = None;
+        self.regular_filter = RegularExpenseFilter::All;
         self.sync_card_filter_options(window, cx);
         self.category_filter_select.update(cx, |state, cx| {
             state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
@@ -929,6 +971,9 @@ impl TransactionsPage {
             state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
         });
         self.card_filter_select.update(cx, |state, cx| {
+            state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
+        });
+        self.regular_filter_select.update(cx, |state, cx| {
             state.set_selected_index(Some(IndexPath::default().row(0)), window, cx)
         });
         self.refresh(cx);
@@ -1564,23 +1609,32 @@ impl TransactionsPage {
                             .into_any_element(),
                     ))
                     .when(self.kind == TransactionKind::Expense, |filters| {
-                        filters.child(filter(
-                            EXPENSE_PLACE_LABEL,
-                            220.0,
-                            div()
-                                .id("expense-place-filter-select")
-                                .child(
-                                    Select::new(&self.expense_place_filter_select)
-                                        .placeholder(EXPENSE_PLACE_LABEL)
-                                        .small(),
-                                )
-                                .when_some(place_tooltip.clone(), |el, tooltip| {
-                                    el.tooltip(move |window, cx| {
-                                        ComponentTooltip::new(tooltip.clone()).build(window, cx)
+                        filters
+                            .child(filter(
+                                EXPENSE_PLACE_LABEL,
+                                220.0,
+                                div()
+                                    .id("expense-place-filter-select")
+                                    .child(
+                                        Select::new(&self.expense_place_filter_select)
+                                            .placeholder(EXPENSE_PLACE_LABEL)
+                                            .small(),
+                                    )
+                                    .when_some(place_tooltip.clone(), |el, tooltip| {
+                                        el.tooltip(move |window, cx| {
+                                            ComponentTooltip::new(tooltip.clone()).build(window, cx)
+                                        })
                                     })
-                                })
-                                .into_any_element(),
-                        ))
+                                    .into_any_element(),
+                            ))
+                            .child(filter(
+                                REGULAR_EXPENSE_FILTER_LABEL,
+                                200.0,
+                                Select::new(&self.regular_filter_select)
+                                    .placeholder(REGULAR_EXPENSE_FILTER_LABEL)
+                                    .small()
+                                    .into_any_element(),
+                            ))
                     }),
             )
             .child(
@@ -1971,26 +2025,29 @@ const INCOME_COLUMN_TITLES: [&str; 6] = [
     "Комментарии",
     "Действия",
 ];
-const EXPENSE_COLUMN_TITLES: [&str; 7] = [
+const EXPENSE_COLUMN_TITLES: [&str; 8] = [
     "Дата",
     "Категория",
     "Сумма",
     "Валюта",
     EXPENSE_PLACE_LABEL,
     "Комментарии",
+    "Регулярные",
     "Действия",
 ];
 const ACTIONS_COLUMN_WIDTH: f32 = 160.0;
 const EXPENSE_PLACE_COLUMN_WIDTH: f32 = 180.0;
+const REGULAR_COLUMN_WIDTH: f32 = 110.0;
 const DEFAULT_INCOME_COLUMN_WIDTHS: [f32; 6] =
     [115.0, 220.0, 135.0, 90.0, 320.0, ACTIONS_COLUMN_WIDTH];
-const DEFAULT_EXPENSE_COLUMN_WIDTHS: [f32; 7] = [
+const DEFAULT_EXPENSE_COLUMN_WIDTHS: [f32; 8] = [
     115.0,
     220.0,
     135.0,
     90.0,
     EXPENSE_PLACE_COLUMN_WIDTH,
     320.0,
+    REGULAR_COLUMN_WIDTH,
     ACTIONS_COLUMN_WIDTH,
 ];
 const MIN_COLUMN_WIDTH: f32 = 60.0;
@@ -2003,7 +2060,8 @@ const COL_INCOME_COMMENT: usize = 4;
 const COL_INCOME_ACTIONS: usize = 5;
 const COL_EXPENSE_PLACE: usize = 4;
 const COL_EXPENSE_COMMENT: usize = 5;
-const COL_EXPENSE_ACTIONS: usize = 6;
+const COL_EXPENSE_REGULAR: usize = 6;
+const COL_EXPENSE_ACTIONS: usize = 7;
 
 fn column_titles(kind: TransactionKind) -> &'static [&'static str] {
     match kind {
@@ -2048,6 +2106,17 @@ fn format_column_widths(widths: &[f32]) -> String {
         .join(",")
 }
 
+/// Добавляет в сохранённые ширины расходы новые колонки, сохраняя прежние значения.
+fn migrate_expense_column_widths(mut widths: Vec<f32>) -> Vec<f32> {
+    if widths.len() == INCOME_COLUMN_TITLES.len() {
+        widths.insert(COL_EXPENSE_PLACE, EXPENSE_PLACE_COLUMN_WIDTH);
+    }
+    if widths.len() == EXPENSE_COLUMN_TITLES.len() - 1 {
+        widths.insert(COL_EXPENSE_REGULAR, REGULAR_COLUMN_WIDTH);
+    }
+    widths
+}
+
 /// Разбирает сохранённые ширины; повреждённое значение отклоняется целиком.
 fn parse_column_widths(value: &str, kind: TransactionKind) -> Option<Vec<f32>> {
     let mut widths = value
@@ -2063,13 +2132,9 @@ fn parse_column_widths(value: &str, kind: TransactionKind) -> Option<Vec<f32>> {
     match kind {
         TransactionKind::Income if widths.len() == INCOME_COLUMN_TITLES.len() => Some(widths),
         TransactionKind::Expense if widths.len() == EXPENSE_COLUMN_TITLES.len() => Some(widths),
-        TransactionKind::Expense if widths.len() == INCOME_COLUMN_TITLES.len() => {
-            let comment_width = widths[COL_INCOME_COMMENT];
-            let actions_width = widths[COL_INCOME_ACTIONS];
-            widths.insert(COL_EXPENSE_PLACE, EXPENSE_PLACE_COLUMN_WIDTH);
-            widths[COL_EXPENSE_COMMENT] = comment_width;
-            widths[COL_EXPENSE_ACTIONS] = actions_width;
-            Some(widths)
+        TransactionKind::Expense => {
+            widths = migrate_expense_column_widths(widths);
+            (widths.len() == EXPENSE_COLUMN_TITLES.len()).then_some(widths)
         }
         _ => None,
     }
@@ -2105,6 +2170,14 @@ fn default_order(a: &FinancialTransaction, b: &FinancialTransaction) -> std::cmp
     b.date.cmp(&a.date).then(b.id.cmp(&a.id))
 }
 
+fn regular_label(is_regular: bool) -> &'static str {
+    if is_regular {
+        "Да"
+    } else {
+        "Нет"
+    }
+}
+
 /// Сортирует полный набор строк; суммы сравниваются как `Decimal`, а не как текст.
 fn sort_transactions(rows: &mut [FinancialTransaction], sort: Option<(usize, ColumnSort)>) {
     let Some((column, direction)) = sort else {
@@ -2122,6 +2195,7 @@ fn sort_transactions(rows: &mut [FinancialTransaction], sort: Option<(usize, Col
                 .amount
                 .cmp(&b.amount)
                 .then_with(|| a.currency.code().cmp(b.currency.code())),
+            COL_EXPENSE_REGULAR => a.is_regular.cmp(&b.is_regular),
             _ => std::cmp::Ordering::Equal,
         };
         let ordering = if direction == ColumnSort::Descending {
@@ -2214,15 +2288,16 @@ impl TableDelegate for TransactionsTable {
         } else {
             column
         };
-        let column = match col_ix {
-            COL_DATE | COL_CATEGORY | COL_AMOUNT => {
-                let direction = match self.sort {
-                    Some((sorted, direction)) if sorted == col_ix => direction,
-                    _ => ColumnSort::Default,
-                };
-                column.sort(direction)
-            }
-            _ => column,
+        let sortable = matches!(col_ix, COL_DATE | COL_CATEGORY | COL_AMOUNT)
+            || (self.kind == TransactionKind::Expense && col_ix == COL_EXPENSE_REGULAR);
+        let column = if sortable {
+            let direction = match self.sort {
+                Some((sorted, direction)) if sorted == col_ix => direction,
+                _ => ColumnSort::Default,
+            };
+            column.sort(direction)
+        } else {
+            column
         };
         if col_ix == COL_AMOUNT {
             column.text_right()
@@ -2354,6 +2429,14 @@ impl TableDelegate for TransactionsTable {
                         .into_any_element()
                 }
             }
+            COL_EXPENSE_REGULAR if self.kind == TransactionKind::Expense => div()
+                .child(selectable_table_cell(
+                    "transactions",
+                    id,
+                    col_ix,
+                    regular_label(transaction.is_regular),
+                ))
+                .into_any_element(),
             column if column == actions_column(self.kind) => {
                 let edit_page = self.page.clone();
                 let delete_page = self.page.clone();
@@ -2497,17 +2580,20 @@ mod tests {
     use super::{
         card_filter_from_index, card_filter_index, cards_for_bank,
         column_widths_with_fixed_actions, comment_preview, format_column_widths,
-        parse_column_widths, payment_filter_label, payment_filter_labels, sort_transactions,
+        migrate_expense_column_widths, parse_column_widths, payment_filter_label,
+        payment_filter_labels, regular_filter_from_index, regular_label, sort_transactions,
         update_bank_filter_selection, BankFilterItem, FormValues, PlaceFilterItem,
-        ACTIONS_COLUMN_WIDTH, COL_INCOME_ACTIONS, EXPENSE_COLUMN_TITLES, EXPENSE_PLACE_LABEL,
+        ACTIONS_COLUMN_WIDTH, COL_EXPENSE_ACTIONS, COL_EXPENSE_COMMENT, COL_EXPENSE_REGULAR,
+        COL_INCOME_ACTIONS, EXPENSE_COLUMN_TITLES, EXPENSE_PLACE_LABEL,
         INCOME_PAYMENT_FILTER_LABEL, NONE_LABEL, NO_CARD_LABEL, PAYMENT_FILTER_LABEL,
+        REGULAR_COLUMN_WIDTH, REGULAR_EXPENSE_FILTER_LABEL, REGULAR_EXPENSE_FILTER_OPTIONS,
     };
     use crate::gpui::helpers::card_label;
     use chrono::NaiveDate;
     use finance_core::FinancialTransaction;
     use finance_core::{
         Currency, PaymentCardType, PaymentDocument, PaymentDocumentFilter, PaymentSystem,
-        TransactionKind,
+        RegularExpenseFilter, TransactionKind,
     };
     use gpui_kit::component::select::SelectItem as _;
     use gpui_kit::component::table::ColumnSort;
@@ -2869,6 +2955,7 @@ mod tests {
             date: NaiveDate::from_ymd_opt(2024, 2, day).unwrap(),
             category_id: 1,
             category_name: category.to_owned(),
+            is_regular: false,
             amount: amount.parse().unwrap(),
             currency: Currency::Rub,
             comment: String::new(),
@@ -2882,6 +2969,18 @@ mod tests {
 
     fn ids(rows: &[FinancialTransaction]) -> Vec<i64> {
         rows.iter().map(|row| row.id).collect()
+    }
+
+    fn transaction_with_regular(
+        id: i64,
+        day: u32,
+        category: &str,
+        amount: &str,
+        is_regular: bool,
+    ) -> FinancialTransaction {
+        let mut row = transaction(id, day, category, amount);
+        row.is_regular = is_regular;
+        row
     }
 
     #[test]
@@ -2944,7 +3043,84 @@ mod tests {
         )
         .expect("legacy expense column widths should migrate");
 
-        assert_eq!(migrated, [100.0, 200.0, 130.0, 90.0, 180.0, 300.0, 180.0]);
+        assert_eq!(
+            migrated,
+            [
+                100.0,
+                200.0,
+                130.0,
+                90.0,
+                180.0,
+                300.0,
+                REGULAR_COLUMN_WIDTH,
+                180.0
+            ]
+        );
+    }
+
+    #[test]
+    fn recent_expense_widths_gain_regular_column_before_actions() {
+        let saved_widths = [100.0, 200.0, 130.0, 90.0, 180.0, 300.0, 190.0];
+        let migrated = migrate_expense_column_widths(saved_widths.to_vec());
+
+        assert_eq!(
+            migrated,
+            [
+                100.0,
+                200.0,
+                130.0,
+                90.0,
+                180.0,
+                300.0,
+                REGULAR_COLUMN_WIDTH,
+                190.0
+            ]
+        );
+    }
+
+    #[test]
+    fn regular_column_is_between_comment_and_actions() {
+        assert_eq!(EXPENSE_COLUMN_TITLES.len(), 8);
+        assert_eq!(EXPENSE_COLUMN_TITLES[COL_EXPENSE_COMMENT], "Комментарии");
+        assert_eq!(EXPENSE_COLUMN_TITLES[COL_EXPENSE_REGULAR], "Регулярные");
+        assert_eq!(EXPENSE_COLUMN_TITLES[COL_EXPENSE_ACTIONS], "Действия");
+    }
+
+    #[test]
+    fn regular_filter_options_map_all_three_states() {
+        assert_eq!(REGULAR_EXPENSE_FILTER_LABEL, "Регулярные расходы");
+        assert_eq!(
+            REGULAR_EXPENSE_FILTER_OPTIONS,
+            ["Все", "Регулярные", "Не регулярные"]
+        );
+        assert_eq!(regular_filter_from_index(0), RegularExpenseFilter::All);
+        assert_eq!(regular_filter_from_index(1), RegularExpenseFilter::Regular);
+        assert_eq!(
+            regular_filter_from_index(2),
+            RegularExpenseFilter::NotRegular
+        );
+        assert_eq!(regular_label(true), "Да");
+        assert_eq!(regular_label(false), "Нет");
+    }
+
+    #[test]
+    fn regular_column_sort_orders_expenses_by_flag() {
+        let mut rows = vec![
+            transaction(1, 1, "А", "1"),
+            transaction_with_regular(2, 2, "Б", "1", true),
+            transaction(3, 3, "В", "1"),
+        ];
+
+        sort_transactions(
+            &mut rows,
+            Some((COL_EXPENSE_REGULAR, ColumnSort::Ascending)),
+        );
+        assert_eq!(ids(&rows), [3, 1, 2]);
+        sort_transactions(
+            &mut rows,
+            Some((COL_EXPENSE_REGULAR, ColumnSort::Descending)),
+        );
+        assert_eq!(ids(&rows), [2, 3, 1]);
     }
 
     #[test]
