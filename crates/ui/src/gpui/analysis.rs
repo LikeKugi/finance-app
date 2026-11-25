@@ -37,15 +37,15 @@ use super::selectable::{
 const NONE_LABEL: &str = "Все";
 const ROW_HEIGHT: f32 = 30.0;
 const PIE_CHART_DIAMETER: f32 = 120.0;
-const COLUMN_HEADERS: [&str; 4] = ["Категория", "Операций", "Сумма", "Доля"];
-const COLUMN_WIDTHS: [f32; 4] = [235.0, 110.0, 155.0, 80.0];
-const ANALYSIS_TABLE_WIDTH: f32 =
-    COLUMN_WIDTHS[0] + COLUMN_WIDTHS[1] + COLUMN_WIDTHS[2] + COLUMN_WIDTHS[3];
-const MIN_COLUMN_WIDTHS: [f32; 4] = [140.0, 110.0, 120.0, 72.0];
+const INCOME_COLUMN_HEADERS: [&str; 4] = ["Категория", "Операций", "Сумма", "Доля"];
+const EXPENSE_COLUMN_HEADERS: [&str; 5] = ["Категория", "Операций", "Сумма", "Доля", "Регулярные"];
+const COLUMN_WIDTHS: [f32; 5] = [205.0, 95.0, 135.0, 70.0, 95.0];
+const MIN_COLUMN_WIDTHS: [f32; 5] = [140.0, 90.0, 115.0, 65.0, 90.0];
 const COL_CATEGORY: usize = 0;
 const COL_TRANSACTION_COUNT: usize = 1;
 const COL_AMOUNT: usize = 2;
 const COL_SHARE: usize = 3;
+const COL_REGULAR: usize = 4;
 const PIE_CHART_COLORS_DARK: [u32; 8] = [
     0x4e7db1, 0xcd6e5c, 0x379291, 0xcfb171, 0x7b5da0, 0xd79669, 0x61855b, 0xad5d76,
 ];
@@ -250,6 +250,7 @@ fn sort_analysis_categories(rows: &mut [AnalysisCategoryTotal], sort: Option<(us
             COL_TRANSACTION_COUNT => a.transaction_count.cmp(&b.transaction_count),
             COL_AMOUNT => a.amount.cmp(&b.amount),
             COL_SHARE => a.share_percent.cmp(&b.share_percent),
+            COL_REGULAR => a.is_regular.cmp(&b.is_regular),
             _ => std::cmp::Ordering::Equal,
         };
         let ordering = if direction == ColumnSort::Descending {
@@ -270,8 +271,23 @@ fn analysis_table_index(kind: TransactionKind, currency: Currency) -> usize {
     }
 }
 
+fn analysis_column_headers(kind: TransactionKind) -> &'static [&'static str] {
+    match kind {
+        TransactionKind::Income => &INCOME_COLUMN_HEADERS,
+        TransactionKind::Expense => &EXPENSE_COLUMN_HEADERS,
+    }
+}
+
+fn analysis_table_width(kind: TransactionKind) -> f32 {
+    analysis_column_headers(kind)
+        .iter()
+        .enumerate()
+        .map(|(index, _)| COLUMN_WIDTHS[index])
+        .sum()
+}
+
 /// Values for the second footer row; income tables never show it.
-fn regular_summary_values(kind: TransactionKind, total: &AnalysisTotal) -> Option<[String; 4]> {
+fn regular_summary_values(kind: TransactionKind, total: &AnalysisTotal) -> Option<[String; 5]> {
     if kind != TransactionKind::Expense {
         return None;
     }
@@ -281,12 +297,21 @@ fn regular_summary_values(kind: TransactionKind, total: &AnalysisTotal) -> Optio
         regular.transaction_count.to_string(),
         format_currency(&regular.amount, 2),
         format!("{}%", regular.share_percent.round_dp(2)),
+        "—".to_owned(),
     ])
+}
+
+fn regular_label(is_regular: bool) -> &'static str {
+    if is_regular {
+        "Да"
+    } else {
+        "Нет"
+    }
 }
 
 impl TableDelegate for AnalysisTable {
     fn columns_count(&self, _: &App) -> usize {
-        COLUMN_HEADERS.len()
+        analysis_column_headers(self.kind).len()
     }
 
     fn rows_count(&self, _: &App) -> usize {
@@ -298,13 +323,14 @@ impl TableDelegate for AnalysisTable {
             .sort
             .filter(|(sorted, _)| *sorted == col_ix)
             .map_or(ColumnSort::Default, |(_, direction)| direction);
-        let column = Column::new(COLUMN_HEADERS[col_ix], COLUMN_HEADERS[col_ix])
+        let headers = analysis_column_headers(self.kind);
+        let column = Column::new(headers[col_ix], headers[col_ix])
             .width(px(COLUMN_WIDTHS[col_ix]))
             .min_width(px(MIN_COLUMN_WIDTHS[col_ix]))
             .resizable(false)
             .movable(false)
             .sort(direction);
-        if col_ix == COL_CATEGORY {
+        if col_ix == COL_CATEGORY || col_ix == COL_REGULAR {
             column
         } else {
             column.text_right()
@@ -386,6 +412,13 @@ impl TableDelegate for AnalysisTable {
                 &row_id,
                 col_ix,
                 format!("{}%", category.share_percent.round_dp(2)),
+            )
+            .into_any_element(),
+            COL_REGULAR => selectable_table_cell(
+                "analysis",
+                &row_id,
+                col_ix,
+                regular_label(category.is_regular),
             )
             .into_any_element(),
             _ => div().into_any_element(),
@@ -1025,7 +1058,8 @@ impl AnalysisPage {
     }
 
     fn summary_row(
-        values: [String; 4],
+        kind: TransactionKind,
+        values: &[String],
         strong: bool,
         header: bool,
         stripe: Option<Hsla>,
@@ -1035,7 +1069,7 @@ impl AnalysisPage {
         div()
             .flex()
             .items_center()
-            .w(px(ANALYSIS_TABLE_WIDTH))
+            .w(px(analysis_table_width(kind)))
             .h(px(ROW_HEIGHT))
             .border_l_1()
             .border_r_1()
@@ -1044,7 +1078,8 @@ impl AnalysisPage {
             .border_color(border)
             .when(strong, |row| row.font_weight(FontWeight::BOLD))
             .when_some(stripe, |row, color| row.bg(color))
-            .children(values.into_iter().enumerate().map(|(index, value)| {
+            .children(values.iter().enumerate().map(|(index, source)| {
+                let value = source.clone();
                 let cell = div()
                     .w(px(COLUMN_WIDTHS[index]))
                     .h_full()
@@ -1090,13 +1125,25 @@ impl AnalysisPage {
             } else {
                 "Итого"
             };
-            let mut footer = vec![Self::summary_row(
-                [
+            let total_values = if kind == TransactionKind::Expense {
+                vec![
+                    "Итого по расходам".to_owned(),
+                    total.transaction_count.to_string(),
+                    format_currency(&total.amount, 2),
+                    "100%".to_owned(),
+                    "—".to_owned(),
+                ]
+            } else {
+                vec![
                     total_label.to_owned(),
                     total.transaction_count.to_string(),
                     format_currency(&total.amount, 2),
                     "100%".to_owned(),
-                ],
+                ]
+            };
+            let mut footer = vec![Self::summary_row(
+                kind,
+                &total_values,
                 true,
                 false,
                 None,
@@ -1105,7 +1152,8 @@ impl AnalysisPage {
             )];
             if let Some(values) = regular_summary_values(kind, total) {
                 footer.push(Self::summary_row(
-                    values,
+                    kind,
+                    &values,
                     false,
                     false,
                     None,
@@ -1114,7 +1162,7 @@ impl AnalysisPage {
                 ));
             }
             let table_content = div()
-                .w(px(ANALYSIS_TABLE_WIDTH))
+                .w(px(analysis_table_width(kind)))
                 .h_full()
                 .min_h_0()
                 .flex()
@@ -1516,11 +1564,13 @@ fn render_balance_summary(summary: &AnalysisSummary, danger: Hsla) -> Div {
 mod tests {
     // Глоб-импорт `gpui_kit::*` затеняет атрибут `#[test]`, поэтому имена импортируются явно.
     use super::{
-        analysis_balance_lines, parse_filters, pie_chart_color, pie_chart_slices, pie_slice_points,
-        regular_summary_values, sort_analysis_categories, AnalysisFilters, AnalysisTable,
-        CategoryFilterItem, CategoryPicker, RequestTracker, COL_AMOUNT, COL_CATEGORY, COL_SHARE,
-        COL_TRANSACTION_COUNT, EXPENSE_CATEGORY_FILTER_ITEM_ID, INCOME_CATEGORY_FILTER_ITEM_ID,
-        PIE_CHART_COLORS_DARK, PIE_CHART_COLORS_LIGHT,
+        analysis_balance_lines, analysis_column_headers, analysis_table_width, parse_filters,
+        pie_chart_color, pie_chart_slices, pie_slice_points, regular_label, regular_summary_values,
+        sort_analysis_categories, AnalysisFilters, AnalysisTable, CategoryFilterItem,
+        CategoryPicker, RequestTracker, COL_AMOUNT, COL_CATEGORY, COL_REGULAR, COL_SHARE,
+        COL_TRANSACTION_COUNT, EXPENSE_CATEGORY_FILTER_ITEM_ID, EXPENSE_COLUMN_HEADERS,
+        INCOME_CATEGORY_FILTER_ITEM_ID, INCOME_COLUMN_HEADERS, PIE_CHART_COLORS_DARK,
+        PIE_CHART_COLORS_LIGHT,
     };
     use chrono::NaiveDate;
     use finance_core::{
@@ -1555,6 +1605,7 @@ mod tests {
             amount: Decimal::ONE,
             transaction_count: 1,
             share_percent: Decimal::new(50, 0),
+            is_regular: false,
         })
         .collect();
         let totals = [
@@ -1581,6 +1632,7 @@ mod tests {
         amount: Decimal,
         transaction_count: usize,
         share_percent: Decimal,
+        is_regular: bool,
     ) -> AnalysisCategoryTotal {
         AnalysisCategoryTotal {
             kind: TransactionKind::Income,
@@ -1590,14 +1642,29 @@ mod tests {
             amount,
             transaction_count,
             share_percent,
+            is_regular,
         }
     }
 
     fn sortable_categories() -> Vec<AnalysisCategoryTotal> {
         vec![
-            category_total(1, "Бета", Decimal::new(95, 1), 2, Decimal::new(1225, 2)),
-            category_total(2, "Альфа", Decimal::from(100), 10, Decimal::from(50)),
-            category_total(3, "Гамма", Decimal::from(20), 5, Decimal::new(3775, 2)),
+            category_total(
+                1,
+                "Бета",
+                Decimal::new(95, 1),
+                2,
+                Decimal::new(1225, 2),
+                true,
+            ),
+            category_total(2, "Альфа", Decimal::from(100), 10, Decimal::from(50), false),
+            category_total(
+                3,
+                "Гамма",
+                Decimal::from(20),
+                5,
+                Decimal::new(3775, 2),
+                false,
+            ),
         ]
     }
 
@@ -1820,6 +1887,7 @@ mod tests {
             (COL_TRANSACTION_COUNT, [1, 3, 2], [2, 3, 1]),
             (COL_AMOUNT, [1, 3, 2], [2, 3, 1]),
             (COL_SHARE, [1, 3, 2], [2, 3, 1]),
+            (COL_REGULAR, [2, 3, 1], [1, 2, 3]),
         ];
 
         for (column, ascending, descending) in cases {
@@ -1889,8 +1957,22 @@ mod tests {
         ));
         let refreshed = summary_with_categories(
             vec![
-                category_total(4, "Новая Бета", Decimal::from(10), 1, Decimal::from(25)),
-                category_total(5, "Новая Альфа", Decimal::from(3), 2, Decimal::from(75)),
+                category_total(
+                    4,
+                    "Новая Бета",
+                    Decimal::from(10),
+                    1,
+                    Decimal::from(25),
+                    false,
+                ),
+                category_total(
+                    5,
+                    "Новая Альфа",
+                    Decimal::from(3),
+                    2,
+                    Decimal::from(75),
+                    false,
+                ),
             ],
             Decimal::from(13),
             3,
@@ -2048,6 +2130,26 @@ mod tests {
         assert_ne!(income.item_id, expense.item_id);
     }
     #[test]
+    fn only_expense_analysis_tables_have_the_regular_column() {
+        assert_eq!(
+            analysis_column_headers(TransactionKind::Expense),
+            EXPENSE_COLUMN_HEADERS
+        );
+        assert_eq!(
+            analysis_column_headers(TransactionKind::Income),
+            INCOME_COLUMN_HEADERS
+        );
+        assert_eq!(analysis_table_width(TransactionKind::Expense), 600.0);
+        assert_eq!(analysis_table_width(TransactionKind::Income), 505.0);
+    }
+
+    #[test]
+    fn regular_column_uses_explicit_yes_and_no_labels() {
+        assert_eq!(regular_label(true), "Да");
+        assert_eq!(regular_label(false), "Нет");
+    }
+
+    #[test]
     fn regular_footer_row_is_only_shown_for_expenses() {
         let income_total = AnalysisTotal {
             kind: TransactionKind::Income,
@@ -2080,6 +2182,7 @@ mod tests {
                 "0".to_owned(),
                 "0.00".to_owned(),
                 "0%".to_owned(),
+                "—".to_owned(),
             ])
         );
 
@@ -2101,6 +2204,7 @@ mod tests {
                 "2".to_owned(),
                 "50.00".to_owned(),
                 "25%".to_owned(),
+                "—".to_owned(),
             ])
         );
     }

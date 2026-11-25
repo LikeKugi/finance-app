@@ -322,6 +322,8 @@ pub struct AnalysisCategoryTotal {
     pub amount: Decimal,
     pub transaction_count: usize,
     pub share_percent: Decimal,
+    /// Признак регулярности категории расходов; для доходов всегда `false`.
+    pub is_regular: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -401,6 +403,7 @@ pub fn summarize_analysis(
                 amount: Decimal::ZERO,
                 transaction_count: 0,
                 share_percent: Decimal::ZERO,
+                is_regular: transaction.kind == TransactionKind::Expense && transaction.is_regular,
             });
         category.amount = category
             .amount
@@ -713,6 +716,50 @@ mod analysis_tests {
             .unwrap()
             .regular
             .is_none());
+    }
+
+    #[test]
+    fn category_totals_keep_the_expense_regular_flag() {
+        let transactions = [
+            AnalysisTransaction {
+                kind: TransactionKind::Expense,
+                category_id: 1,
+                category_name: "Жильё".to_owned(),
+                amount: Decimal::from(30),
+                currency: Currency::Rub,
+                is_regular: true,
+            },
+            AnalysisTransaction {
+                kind: TransactionKind::Expense,
+                category_id: 2,
+                category_name: "Питание".to_owned(),
+                amount: Decimal::from(10),
+                currency: Currency::Rub,
+                is_regular: false,
+            },
+            AnalysisTransaction {
+                kind: TransactionKind::Income,
+                category_id: 3,
+                category_name: "Зарплата".to_owned(),
+                amount: Decimal::from(100),
+                currency: Currency::Rub,
+                is_regular: true,
+            },
+        ];
+
+        let summary = summarize_analysis(&transactions).unwrap();
+
+        let find = |id| {
+            summary
+                .categories
+                .iter()
+                .find(|category| category.category_id == id)
+                .unwrap()
+                .is_regular
+        };
+        assert!(find(1));
+        assert!(!find(2));
+        assert!(!find(3));
     }
 
     #[test]
