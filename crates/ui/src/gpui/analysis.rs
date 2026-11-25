@@ -1174,8 +1174,8 @@ impl AnalysisPage {
             .gap_4()
             .children(
                 [
-                    (TransactionKind::Income, "analysis-income-scroll"),
                     (TransactionKind::Expense, "analysis-expense-scroll"),
+                    (TransactionKind::Income, "analysis-income-scroll"),
                 ]
                 .into_iter()
                 .map(|(kind, id)| {
@@ -1199,7 +1199,7 @@ impl AnalysisPage {
         const LEGEND_VISIBLE_MAX: usize = 4;
         let is_dark = cx.theme().is_dark();
         div().flex().gap_4().children(
-            [TransactionKind::Income, TransactionKind::Expense]
+            [TransactionKind::Expense, TransactionKind::Income]
                 .into_iter()
                 .map(|kind| {
                     let mut column = div()

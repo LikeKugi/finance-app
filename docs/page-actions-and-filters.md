@@ -74,6 +74,7 @@ Shared compact DatePicker controls retain previous/next-month arrow navigation a
 - `Сбросить фильтры` clears all filters, returns the period selector to `Весь период`, and immediately reloads the report without conditions; it is disabled when no filters are active.
 - A start date later than the end date is reported without replacing the displayed report with an empty result. Dates are selected through the calendar rather than entered as free-form text.
 - The page refresh action reloads the categories and applies the values currently in the controls.
+- Expense and income tables and pie charts are displayed expense first, then income.
 - Each transaction-type/currency table keeps its ordinary total row. Expense tables add «Итого в регулярных расходах» below it with the operation count, exact amount, and share of the expense total in the same currency; income tables do not show this row. No regular-expense slice is added to the pie chart, because those categories are already present as ordinary slices.
 
 ### Savings
