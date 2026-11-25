@@ -410,6 +410,7 @@ mod tests {
             name: format!("Категория {id}"),
             parent_id,
             is_active,
+            is_regular: None,
         }
     }
 

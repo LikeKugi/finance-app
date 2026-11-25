@@ -61,6 +61,21 @@ const EDIT_CURRENCY_BUTTON_LABEL: &str = "Изменить";
 const DEFAULT_CATEGORY_KIND: TransactionKind = TransactionKind::Expense;
 /// Порядок переключателя видов категорий на странице «Справочники».
 const CATEGORY_KINDS: [TransactionKind; 2] = [DEFAULT_CATEGORY_KIND, TransactionKind::Income];
+const CATEGORY_REGULAR_COLUMN_WIDTH: f32 = 100.0;
+const REGULAR_LABEL: &str = "Да";
+const NOT_REGULAR_LABEL: &str = "—";
+
+fn category_regular_value(kind: TransactionKind, checked: bool) -> Option<bool> {
+    (kind == TransactionKind::Expense).then_some(checked)
+}
+
+fn category_regular_label(category: &Category) -> &'static str {
+    if category.is_regular == Some(true) {
+        REGULAR_LABEL
+    } else {
+        NOT_REGULAR_LABEL
+    }
+}
 
 fn category_kind_toggle_id(kind: TransactionKind) -> &'static str {
     match kind {
@@ -178,6 +193,7 @@ struct CategoryForm {
     parent_id: Option<i64>,
     parent_select: ParentChoice,
     is_active: bool,
+    is_regular: bool,
 }
 
 struct BankForm {
@@ -665,6 +681,7 @@ impl DirectoriesPage {
             parent_id,
             parent_select,
             is_active: existing.is_none_or(|c| c.is_active),
+            is_regular: existing.is_some_and(|c| c.is_regular == Some(true)),
         });
         self.message = None;
         cx.notify();
@@ -683,6 +700,7 @@ impl DirectoriesPage {
             &name,
             form.parent_id,
             form.is_active,
+            category_regular_value(self.kind, form.is_regular),
         );
         match result {
             Ok(_) => {
@@ -982,7 +1000,20 @@ impl DirectoriesPage {
                                 }
                                 cx.notify();
                             })),
-                    );
+                    )
+                    .when(self.kind == TransactionKind::Expense, |fields| {
+                        fields.child(
+                            Checkbox::new("category-regular")
+                                .label("Регулярные расходы")
+                                .checked(form.is_regular)
+                                .on_click(cx.listener(|page, checked: &bool, _, cx| {
+                                    if let Some(form) = page.category_form.as_mut() {
+                                        form.is_regular = *checked;
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                    });
                 (title.to_owned(), fields, "category", "Сохранить категорию")
             }
             FormKind::Bank => {
@@ -1189,7 +1220,7 @@ impl DirectoriesPage {
 
 impl TableDelegate for CategoriesTable {
     fn columns_count(&self, _: &App) -> usize {
-        2
+        3
     }
 
     fn rows_count(&self, _: &App) -> usize {
@@ -1199,6 +1230,12 @@ impl TableDelegate for CategoriesTable {
     fn column(&self, col_ix: usize, _: &App) -> Column {
         match col_ix {
             0 => directory_column("name", "Название", 480.0, false),
+            1 => directory_column(
+                "regular",
+                "Регулярная",
+                CATEGORY_REGULAR_COLUMN_WIDTH,
+                false,
+            ),
             _ => directory_column("actions", "Действия", ACTIONS_WIDTH, true),
         }
     }
@@ -1224,62 +1261,75 @@ impl TableDelegate for CategoriesTable {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let row = self.rows[row_ix].clone();
-        let content = if col_ix == 0 {
-            let prefix = if row.depth == 0 {
-                String::new()
-            } else {
-                format!("{}> ", "  ".repeat(row.depth))
-            };
-            let suffix = if row.category.is_active {
-                ""
-            } else {
-                " (неактивна)"
-            };
-            div()
+        let content = match col_ix {
+            0 => {
+                let prefix = if row.depth == 0 {
+                    String::new()
+                } else {
+                    format!("{}> ", "  ".repeat(row.depth))
+                };
+                let suffix = if row.category.is_active {
+                    ""
+                } else {
+                    " (неактивна)"
+                };
+                div()
+                    .w_full()
+                    .truncate()
+                    .child(selectable_table_cell(
+                        "categories",
+                        row.category.id,
+                        col_ix,
+                        format!("{prefix}{}{suffix}", row.category.name),
+                    ))
+                    .into_any_element()
+            }
+            1 => div()
                 .w_full()
                 .truncate()
                 .child(selectable_table_cell(
                     "categories",
                     row.category.id,
                     col_ix,
-                    format!("{prefix}{}{suffix}", row.category.name),
+                    category_regular_label(&row.category).to_owned(),
                 ))
-                .into_any_element()
-        } else {
-            let id = row.category.id;
-            let edit_page = self.page.clone();
-            let edit = row.category.clone();
-            let delete_page = self.page.clone();
-            let subject = format!("категорию «{}»", row.category.name);
-            div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .gap_1()
-                .child(
-                    Button::new(("category-edit", row_ix))
-                        .xsmall()
-                        .label("Изменить")
-                        .on_click(move |_, window, cx| {
-                            let edit = edit.clone();
-                            let _ = edit_page.update(cx, |page, cx| {
-                                page.open_category_form(Some(&edit), window, cx)
-                            });
-                        }),
-                )
-                .child(
-                    Button::new(("category-delete", row_ix))
-                        .danger()
-                        .xsmall()
-                        .label("Удалить")
-                        .on_click(move |_, window, cx| {
-                            let subject = subject.clone();
-                            let _ = delete_page.update(cx, |page, cx| {
-                                page.confirm_delete(Delete::Category(id), subject, window, cx)
-                            });
-                        }),
-                )
-                .into_any_element()
+                .into_any_element(),
+            _ => {
+                let id = row.category.id;
+                let edit_page = self.page.clone();
+                let edit = row.category.clone();
+                let delete_page = self.page.clone();
+                let subject = format!("категорию «{}»", row.category.name);
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .child(
+                        Button::new(("category-edit", row_ix))
+                            .xsmall()
+                            .label("Изменить")
+                            .on_click(move |_, window, cx| {
+                                let edit = edit.clone();
+                                let _ = edit_page.update(cx, |page, cx| {
+                                    page.open_category_form(Some(&edit), window, cx)
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new(("category-delete", row_ix))
+                            .danger()
+                            .xsmall()
+                            .label("Удалить")
+                            .on_click(move |_, window, cx| {
+                                let subject = subject.clone();
+                                let _ = delete_page.update(cx, |page, cx| {
+                                    page.confirm_delete(Delete::Category(id), subject, window, cx)
+                                });
+                            }),
+                    )
+                    .into_any_element()
+            }
         };
         directory_cell(content, col_ix, cx)
     }
@@ -1287,10 +1337,10 @@ impl TableDelegate for CategoriesTable {
     fn cell_label(&self, row_ix: usize, col_ix: usize, _: &App) -> Option<SharedString> {
         let row = &self.rows[row_ix];
         Some(
-            if col_ix == 0 {
-                row.category.name.clone()
-            } else {
-                "Действия".to_owned()
+            match col_ix {
+                0 => row.category.name.clone(),
+                1 => category_regular_label(&row.category).to_owned(),
+                _ => "Действия".to_owned(),
             }
             .into(),
         )
@@ -1863,10 +1913,11 @@ impl Render for DirectoriesPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        currency_cell_label, currency_column_widths, directory_column, parent_category_options,
-        Category, RightTab, ACTIONS_WIDTH, BANK_NAME_COLUMN_WIDTH, CATEGORY_KINDS,
-        DEFAULT_CATEGORY_KIND, EDIT_CURRENCY_BUTTON_LABEL, MAKE_PRIMARY_BUTTON_LABEL, TABLE_HEIGHT,
-        TABLE_ROW_HEIGHT, VISIBLE_TABLE_ROWS,
+        category_regular_label, category_regular_value, currency_cell_label,
+        currency_column_widths, directory_column, parent_category_options, Category, RightTab,
+        ACTIONS_WIDTH, BANK_NAME_COLUMN_WIDTH, CATEGORY_KINDS, CATEGORY_REGULAR_COLUMN_WIDTH,
+        DEFAULT_CATEGORY_KIND, EDIT_CURRENCY_BUTTON_LABEL, MAKE_PRIMARY_BUTTON_LABEL,
+        NOT_REGULAR_LABEL, REGULAR_LABEL, TABLE_HEIGHT, TABLE_ROW_HEIGHT, VISIBLE_TABLE_ROWS,
     };
     use finance_core::CurrencyDefinition;
     use finance_core::TransactionKind;
@@ -1878,6 +1929,7 @@ mod tests {
             name: name.to_owned(),
             parent_id,
             is_active: true,
+            is_regular: None,
         }
     }
 
@@ -2003,5 +2055,45 @@ mod tests {
         );
         let titles: Vec<_> = RightTab::ALL.iter().map(|tab| tab.title()).collect();
         assert_eq!(titles, ["Банки", "Места покупок", "Валюты"]);
+    }
+    #[test]
+    fn regular_flag_is_saved_only_for_expense_categories() {
+        assert_eq!(category_regular_value(TransactionKind::Income, true), None);
+        assert_eq!(
+            category_regular_value(TransactionKind::Expense, true),
+            Some(true)
+        );
+        assert_eq!(
+            category_regular_value(TransactionKind::Expense, false),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn regular_column_label_is_per_category_and_not_inherited() {
+        let mut parent = category(1, None, "Жильё");
+        parent.is_regular = Some(true);
+        let mut child = category(2, Some(1), "Коммунальные услуги");
+        child.is_regular = Some(false);
+
+        assert_eq!(category_regular_label(&parent), REGULAR_LABEL);
+        assert_eq!(category_regular_label(&child), NOT_REGULAR_LABEL);
+        assert_eq!(
+            category_regular_label(&category(3, None, "Зарплата")),
+            NOT_REGULAR_LABEL
+        );
+    }
+
+    #[test]
+    fn regular_column_is_selectable_and_fits_the_table() {
+        let column = directory_column(
+            "regular",
+            "Регулярная",
+            CATEGORY_REGULAR_COLUMN_WIDTH,
+            false,
+        );
+        assert_eq!(f32::from(column.width), CATEGORY_REGULAR_COLUMN_WIDTH);
+        assert!(column.selectable);
+        assert_eq!(column.fixed, None);
     }
 }

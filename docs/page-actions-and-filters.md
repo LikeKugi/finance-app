@@ -8,7 +8,7 @@ All page-level add buttons use a Plus icon instead of a textual plus and retain 
 
 On Income and Expenses, the page title is on the left side of the header row and `Добавить доход` / `Добавить расход` with the Plus icon is aligned to the right, followed by `Обновить` with the Replace icon. Both actions use the Large button size; Add uses the Primary variant and refresh uses Secondary. Refresh reloads the transaction list with the current filter values and does not reset them.
 
-On Directories, the header has the page title on the left and a Large Secondary `Обновить` button (Replace icon) on the right, which reloads all directories. Below it, the category-kind switch (`Категории расходов` / `Категории доходов`, with expense categories selected by default) sits on the left and the `Банки` / `Места покупок` / `Валюты` switch on the right in the same row. The add buttons for categories, banks, places, and currencies use the Small size and the Plus icon. Category create/edit forms list possible parents in the same `Родитель > Дочка` hierarchy order as the transaction category filter, with full paths in option and selected-value tooltips; a category being edited and its descendants are not offered as parents.
+On Directories, the header has the page title on the left and a Large Secondary `Обновить` button (Replace icon) on the right, which reloads all directories. Below it, the category-kind switch (`Категории расходов` / `Категории доходов`, with expense categories selected by default) sits on the left and the `Банки` / `Места покупок` / `Валюты` switch on the right in the same row. The add buttons for categories, banks, places, and currencies use the Small size and the Plus icon. Category create/edit forms list possible parents in the same `Родитель > Дочка` hierarchy order as the transaction category filter, with full paths in option and selected-value tooltips; a category being edited and its descendants are not offered as parents. Expense-category forms also show the «Регулярные расходы» checkbox; income-category forms do not. The category table shows a separate copyable «Регулярная» column with «Да» or «—» next to each category name.
 
 The Income page keeps Add enabled even if no active categories exist; it shows a notice to add a category instead. Future pages should make missing prerequisites clear and should not allow an action that cannot create a valid record.
 
@@ -74,6 +74,7 @@ Shared compact DatePicker controls retain previous/next-month arrow navigation a
 - `Сбросить фильтры` clears all filters, returns the period selector to `Весь период`, and immediately reloads the report without conditions; it is disabled when no filters are active.
 - A start date later than the end date is reported without replacing the displayed report with an empty result. Dates are selected through the calendar rather than entered as free-form text.
 - The page refresh action reloads the categories and applies the values currently in the controls.
+- Each transaction-type/currency table keeps its ordinary total row. Expense tables add «Итого в регулярных расходах» below it with the operation count, exact amount, and share of the expense total in the same currency; income tables do not show this row. No regular-expense slice is added to the pie chart, because those categories are already present as ordinary slices.
 
 ### Savings
 

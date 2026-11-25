@@ -8,8 +8,9 @@ use std::rc::Rc;
 
 use chrono::{Local, NaiveDate};
 use finance_core::{
-    summarize_analysis, summarize_transaction_balance, AnalysisCategoryTotal, AnalysisSummary,
-    AnalysisTotal, Category, Currency, TransactionAmount, TransactionBalanceError, TransactionKind,
+    summarize_analysis, summarize_transaction_balance, AnalysisCategoryTotal, AnalysisRegularTotal,
+    AnalysisSummary, AnalysisTotal, Category, Currency, TransactionAmount, TransactionBalanceError,
+    TransactionKind,
 };
 use finance_db::Database;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -192,6 +193,7 @@ struct AnalysisTable {
     currency: Currency,
     rows: Vec<AnalysisCategoryTotal>,
     total: Option<AnalysisTotal>,
+    regular_total: Option<AnalysisRegularTotal>,
     sort: Option<(usize, ColumnSort)>,
 }
 
@@ -202,6 +204,7 @@ impl AnalysisTable {
             currency,
             rows: Vec::new(),
             total: None,
+            regular_total: None,
             sort: None,
         }
     }
@@ -218,6 +221,7 @@ impl AnalysisTable {
             .iter()
             .find(|total| total.kind == self.kind && total.currency == self.currency)
             .cloned();
+        self.regular_total = self.total.as_ref().and_then(|total| total.regular.clone());
         sort_analysis_categories(&mut self.rows, self.sort);
     }
 }
@@ -264,6 +268,20 @@ fn analysis_table_index(kind: TransactionKind, currency: Currency) -> usize {
         (TransactionKind::Expense, Currency::Rub) => 2,
         (TransactionKind::Expense, Currency::Usd) => 3,
     }
+}
+
+/// Values for the second footer row; income tables never show it.
+fn regular_summary_values(kind: TransactionKind, total: &AnalysisTotal) -> Option<[String; 4]> {
+    if kind != TransactionKind::Expense {
+        return None;
+    }
+    let regular = total.regular.as_ref()?;
+    Some([
+        "Итого в регулярных расходах".to_owned(),
+        regular.transaction_count.to_string(),
+        format_currency(&regular.amount, 2),
+        format!("{}%", regular.share_percent.round_dp(2)),
+    ])
 }
 
 impl TableDelegate for AnalysisTable {
@@ -1012,7 +1030,8 @@ impl AnalysisPage {
         header: bool,
         stripe: Option<Hsla>,
         border: Hsla,
-    ) -> impl IntoElement {
+        row_id: (&'static str, usize),
+    ) -> AnyElement {
         div()
             .flex()
             .items_center()
@@ -1026,7 +1045,7 @@ impl AnalysisPage {
             .when(strong, |row| row.font_weight(FontWeight::BOLD))
             .when_some(stripe, |row, color| row.bg(color))
             .children(values.into_iter().enumerate().map(|(index, value)| {
-                div()
+                let cell = div()
                     .w(px(COLUMN_WIDTHS[index]))
                     .h_full()
                     .flex_none()
@@ -1037,9 +1056,20 @@ impl AnalysisPage {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .when(index > 0, |cell| cell.justify_end().text_right())
-                    .child(value)
+                    .when(index > 0, |cell| cell.justify_end().text_right());
+                let tooltip = value.clone();
+                if index == 0 {
+                    cell.id(row_id)
+                        .tooltip(move |window, cx| {
+                            ComponentTooltip::new(tooltip.clone()).build(window, cx)
+                        })
+                        .child(value)
+                        .into_any_element()
+                } else {
+                    cell.child(value).into_any_element()
+                }
             }))
+            .into_any_element()
     }
 
     fn render_kind_summary(&self, kind: TransactionKind, border: Hsla, cx: &App) -> Div {
@@ -1055,9 +1085,14 @@ impl AnalysisPage {
             let table = DataTable::new(&self.tables[table_index])
                 .stripe(true)
                 .bordered(true);
-            let table_footer = Self::summary_row(
+            let total_label = if kind == TransactionKind::Expense {
+                "Итого по расходам"
+            } else {
+                "Итого"
+            };
+            let mut footer = vec![Self::summary_row(
                 [
-                    "Итого".to_owned(),
+                    total_label.to_owned(),
                     total.transaction_count.to_string(),
                     format_currency(&total.amount, 2),
                     "100%".to_owned(),
@@ -1066,7 +1101,18 @@ impl AnalysisPage {
                 false,
                 None,
                 border,
-            );
+                ("analysis-total", table_index),
+            )];
+            if let Some(values) = regular_summary_values(kind, total) {
+                footer.push(Self::summary_row(
+                    values,
+                    false,
+                    false,
+                    None,
+                    border,
+                    ("analysis-regular-total", table_index),
+                ));
+            }
             let table_content = div()
                 .w(px(ANALYSIS_TABLE_WIDTH))
                 .h_full()
@@ -1074,7 +1120,7 @@ impl AnalysisPage {
                 .flex()
                 .flex_col()
                 .child(div().flex_1().min_h_0().w_full().child(table))
-                .child(table_footer);
+                .children(footer);
             column = column.child(
                 div()
                     .flex_1()
@@ -1471,15 +1517,16 @@ mod tests {
     // Глоб-импорт `gpui_kit::*` затеняет атрибут `#[test]`, поэтому имена импортируются явно.
     use super::{
         analysis_balance_lines, parse_filters, pie_chart_color, pie_chart_slices, pie_slice_points,
-        sort_analysis_categories, AnalysisFilters, AnalysisTable, CategoryFilterItem,
-        CategoryPicker, RequestTracker, COL_AMOUNT, COL_CATEGORY, COL_SHARE, COL_TRANSACTION_COUNT,
-        EXPENSE_CATEGORY_FILTER_ITEM_ID, INCOME_CATEGORY_FILTER_ITEM_ID, PIE_CHART_COLORS_DARK,
-        PIE_CHART_COLORS_LIGHT,
+        regular_summary_values, sort_analysis_categories, AnalysisFilters, AnalysisTable,
+        CategoryFilterItem, CategoryPicker, RequestTracker, COL_AMOUNT, COL_CATEGORY, COL_SHARE,
+        COL_TRANSACTION_COUNT, EXPENSE_CATEGORY_FILTER_ITEM_ID, INCOME_CATEGORY_FILTER_ITEM_ID,
+        PIE_CHART_COLORS_DARK, PIE_CHART_COLORS_LIGHT,
     };
     use chrono::NaiveDate;
     use finance_core::{
-        summarize_analysis, AnalysisCategoryTotal, AnalysisSummary, AnalysisTotal,
-        AnalysisTransaction, Category, Currency, TransactionBalanceError, TransactionKind,
+        summarize_analysis, AnalysisCategoryTotal, AnalysisRegularTotal, AnalysisSummary,
+        AnalysisTotal, AnalysisTransaction, Category, Currency, TransactionBalanceError,
+        TransactionKind,
     };
     use gpui_kit::component::select::SelectItem as _;
     use rust_decimal::Decimal;
@@ -1522,6 +1569,7 @@ mod tests {
             currency,
             amount: Decimal::new(2, 0),
             transaction_count: 2,
+            regular: None,
         })
         .collect();
         AnalysisSummary { categories, totals }
@@ -1565,6 +1613,7 @@ mod tests {
                 currency: Currency::Rub,
                 amount: total_amount,
                 transaction_count,
+                regular: None,
             }],
         }
     }
@@ -1601,24 +1650,28 @@ mod tests {
                     currency: Currency::Rub,
                     amount: Decimal::new(10_050, 2),
                     transaction_count: 1,
+                    regular: None,
                 },
                 AnalysisTotal {
                     kind: TransactionKind::Expense,
                     currency: Currency::Rub,
                     amount: Decimal::from(125),
                     transaction_count: 1,
+                    regular: None,
                 },
                 AnalysisTotal {
                     kind: TransactionKind::Income,
                     currency: Currency::Usd,
                     amount: Decimal::from(35),
                     transaction_count: 1,
+                    regular: None,
                 },
                 AnalysisTotal {
                     kind: TransactionKind::Expense,
                     currency: Currency::Usd,
                     amount: Decimal::new(1_225, 2),
                     transaction_count: 1,
+                    regular: None,
                 },
             ],
         };
@@ -1642,12 +1695,14 @@ mod tests {
                     currency: Currency::Rub,
                     amount: Decimal::from(17),
                     transaction_count: 1,
+                    regular: None,
                 },
                 AnalysisTotal {
                     kind: TransactionKind::Expense,
                     currency: Currency::Usd,
                     amount: Decimal::from(5),
                     transaction_count: 1,
+                    regular: None,
                 },
             ],
         };
@@ -1676,12 +1731,14 @@ mod tests {
                     currency: Currency::Rub,
                     amount: Decimal::MAX,
                     transaction_count: 1,
+                    regular: None,
                 },
                 AnalysisTotal {
                     kind: TransactionKind::Income,
                     currency: Currency::Rub,
                     amount: Decimal::ONE,
                     transaction_count: 1,
+                    regular: None,
                 },
             ],
         };
@@ -1731,6 +1788,7 @@ mod tests {
             category_name: category_name.to_owned(),
             amount: Decimal::from(amount),
             currency: Currency::Rub,
+            is_regular: false,
         })
         .collect::<Vec<_>>();
         let summary = summarize_analysis(&transactions).unwrap();
@@ -1955,12 +2013,14 @@ mod tests {
                 name: "Зарплата".to_owned(),
                 parent_id: None,
                 is_active: true,
+                is_regular: None,
             },
             Category {
                 id: 9,
                 name: "Премия".to_owned(),
                 parent_id: Some(7),
                 is_active: true,
+                is_regular: None,
             },
         ];
         let (ids, labels) = CategoryPicker::labels_for(&categories);
@@ -1986,5 +2046,117 @@ mod tests {
         assert_eq!(expense.title().to_string(), "Транспорт > Разное > История");
         assert_eq!(expense.value(), "Транспорт > Разное > История");
         assert_ne!(income.item_id, expense.item_id);
+    }
+    #[test]
+    fn regular_footer_row_is_only_shown_for_expenses() {
+        let income_total = AnalysisTotal {
+            kind: TransactionKind::Income,
+            currency: Currency::Rub,
+            amount: Decimal::from(100),
+            transaction_count: 2,
+            regular: Some(AnalysisRegularTotal {
+                amount: Decimal::from(50),
+                transaction_count: 1,
+                share_percent: Decimal::from(50),
+            }),
+        };
+        assert!(regular_summary_values(TransactionKind::Income, &income_total).is_none());
+
+        let zero_total = AnalysisTotal {
+            kind: TransactionKind::Expense,
+            currency: Currency::Rub,
+            amount: Decimal::from(5),
+            transaction_count: 1,
+            regular: Some(AnalysisRegularTotal {
+                amount: Decimal::ZERO,
+                transaction_count: 0,
+                share_percent: Decimal::ZERO,
+            }),
+        };
+        assert_eq!(
+            regular_summary_values(TransactionKind::Expense, &zero_total),
+            Some([
+                "Итого в регулярных расходах".to_owned(),
+                "0".to_owned(),
+                "0.00".to_owned(),
+                "0%".to_owned(),
+            ])
+        );
+
+        let positive_total = AnalysisTotal {
+            kind: TransactionKind::Expense,
+            currency: Currency::Usd,
+            amount: Decimal::from(200),
+            transaction_count: 4,
+            regular: Some(AnalysisRegularTotal {
+                amount: Decimal::from(50),
+                transaction_count: 2,
+                share_percent: Decimal::from(25),
+            }),
+        };
+        assert_eq!(
+            regular_summary_values(TransactionKind::Expense, &positive_total),
+            Some([
+                "Итого в регулярных расходах".to_owned(),
+                "2".to_owned(),
+                "50.00".to_owned(),
+                "25%".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn analysis_table_extracts_regular_total_only_for_expenses() {
+        let mut summary = summary_with_both_kinds_and_currencies();
+        for total in &mut summary.totals {
+            if total.kind == TransactionKind::Expense {
+                total.regular = Some(AnalysisRegularTotal {
+                    amount: Decimal::from(7),
+                    transaction_count: 3,
+                    share_percent: Decimal::from(25),
+                });
+            }
+        }
+        let mut income_table = AnalysisTable::new(TransactionKind::Income, Currency::Rub);
+        let mut expense_table = AnalysisTable::new(TransactionKind::Expense, Currency::Rub);
+        income_table.set_summary(&summary);
+        expense_table.set_summary(&summary);
+
+        assert!(income_table.regular_total.is_none());
+        assert_eq!(
+            expense_table
+                .regular_total
+                .as_ref()
+                .map(|regular| (regular.amount, regular.transaction_count)),
+            Some((Decimal::from(7), 3))
+        );
+    }
+
+    #[test]
+    fn regular_categories_do_not_add_extra_pie_chart_slices() {
+        let transactions = [(1, "Аренда", 30, true), (2, "Питание", 70, false)]
+            .into_iter()
+            .map(
+                |(category_id, category_name, amount, is_regular)| AnalysisTransaction {
+                    kind: TransactionKind::Expense,
+                    category_id,
+                    category_name: category_name.to_owned(),
+                    amount: Decimal::from(amount),
+                    currency: Currency::Rub,
+                    is_regular,
+                },
+            )
+            .collect::<Vec<_>>();
+        let summary = summarize_analysis(&transactions).unwrap();
+
+        let slices = pie_chart_slices(&summary, TransactionKind::Expense, Currency::Rub)
+            .expect("category totals should be representable as chart slices");
+        assert_eq!(
+            slices
+                .iter()
+                .map(|slice| slice.category.category_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Аренда", "Питание"]
+        );
     }
 }

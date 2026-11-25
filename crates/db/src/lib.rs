@@ -81,6 +81,10 @@ const MIGRATIONS: &[Migration] = &[
         version: 15,
         sql: include_str!("../migrations/V15__other_interest_destination.sql"),
     },
+    Migration {
+        version: 16,
+        sql: include_str!("../migrations/V16__expense_categories_regular.sql"),
+    },
 ];
 
 struct Migration {
@@ -119,6 +123,8 @@ pub enum DbError {
     InvalidAmount,
     #[error("Размер следующего платежа не может быть отрицательным")]
     InvalidNextPaymentAmount,
+    #[error("Флаг регулярных расходов можно задать только категории расходов")]
+    InvalidCategoryRegularFlag,
     #[error("Категория не найдена или неактивна")]
     CategoryUnavailable,
     #[error("Место траты не найдено")]
@@ -1097,6 +1103,10 @@ fn load_analysis_transactions_with_filters(
         }
 
         let (table, categories) = transaction_tables(kind);
+        let regular_expression = match kind {
+            TransactionKind::Income => "0",
+            TransactionKind::Expense => "c.is_regular",
+        };
         let category_id_filter = match kind {
             TransactionKind::Income => income_category_id,
             TransactionKind::Expense => expense_category_id,
@@ -1109,7 +1119,7 @@ fn load_analysis_transactions_with_filters(
                  FROM {categories} child
                  JOIN selected_categories parent ON child.parent_id = parent.id
              )
-             SELECT t.category_id, c.name, t.amount, t.currency
+             SELECT t.category_id, c.name, t.amount, t.currency, {regular_expression}
              FROM {table} t JOIN {categories} c ON c.id = t.category_id
              WHERE (?1 IS NULL OR t.date >= ?1)
                AND (?2 IS NULL OR t.date <= ?2)
@@ -1132,6 +1142,7 @@ fn load_analysis_transactions_with_filters(
                 category_name: row.get(1)?,
                 amount,
                 currency,
+                is_regular: kind == TransactionKind::Expense && row.get::<_, bool>(4)?,
             })
         })?;
         entries.extend(rows.collect::<Result<Vec<_>, _>>()?);
@@ -2333,8 +2344,12 @@ pub fn list_categories(
     include_inactive: bool,
 ) -> Result<Vec<Category>, DbError> {
     let table = category_table(kind);
+    let regular_column = match kind {
+        TransactionKind::Expense => "is_regular",
+        TransactionKind::Income => "0 AS is_regular",
+    };
     let mut statement = connection.prepare(&format!(
-        "SELECT id, name, parent_id, is_active FROM {table}
+        "SELECT id, name, parent_id, is_active, {regular_column} FROM {table}
          WHERE (?1 = 1 OR is_active = 1) ORDER BY name COLLATE NOCASE, id"
     ))?;
     let rows = statement.query_map([include_inactive], |row| {
@@ -2343,12 +2358,18 @@ pub fn list_categories(
             name: row.get(1)?,
             parent_id: row.get(2)?,
             is_active: row.get(3)?,
+            is_regular: match kind {
+                TransactionKind::Expense => Some(row.get::<_, bool>(4)?),
+                TransactionKind::Income => None,
+            },
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 /// Creates or updates a category after checking its parent and hierarchy.
+/// `is_regular` is `None` for income categories (the column does not exist);
+/// expense categories store `false` when it is omitted.
 pub fn save_category(
     connection: &Connection,
     kind: TransactionKind,
@@ -2356,11 +2377,16 @@ pub fn save_category(
     name: &str,
     parent_id: Option<i64>,
     is_active: bool,
+    is_regular: Option<bool>,
 ) -> Result<i64, DbError> {
     let name = name.trim();
     if name.is_empty() {
         return Err(DbError::EmptyName);
     }
+    if kind == TransactionKind::Income && is_regular.is_some() {
+        return Err(DbError::InvalidCategoryRegularFlag);
+    }
+    let is_regular = is_regular.unwrap_or(false);
     let table = category_table(kind);
     let existing_parent_id = if let Some(id) = id {
         connection
@@ -2406,14 +2432,35 @@ pub fn save_category(
     }
 
     if let Some(id) = id {
-        let changed = connection.execute(
-            &format!("UPDATE {table} SET name = ?1, parent_id = ?2, is_active = ?3 WHERE id = ?4"),
-            params![name, parent_id, is_active, id],
-        )?;
+        let changed = if kind == TransactionKind::Expense {
+            connection.execute(
+                &format!(
+                    "UPDATE {table} SET name = ?1, parent_id = ?2, is_active = ?3, is_regular = ?4
+                     WHERE id = ?5"
+                ),
+                params![name, parent_id, is_active, is_regular, id],
+            )?
+        } else {
+            connection.execute(
+                &format!(
+                    "UPDATE {table} SET name = ?1, parent_id = ?2, is_active = ?3 WHERE id = ?4"
+                ),
+                params![name, parent_id, is_active, id],
+            )?
+        };
         if changed == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows.into());
         }
         Ok(id)
+    } else if kind == TransactionKind::Expense {
+        connection.execute(
+            &format!(
+                "INSERT INTO {table} (name, parent_id, is_active, is_regular)
+                 VALUES (?1, ?2, ?3, ?4)"
+            ),
+            params![name, parent_id, is_active, is_regular],
+        )?;
+        Ok(connection.last_insert_rowid())
     } else {
         connection.execute(
             &format!("INSERT INTO {table} (name, parent_id, is_active) VALUES (?1, ?2, ?3)"),
@@ -3262,7 +3309,7 @@ mod tests {
         add_currency, delete_bank, delete_category, delete_currency, delete_expense_place,
         delete_payment_document, delete_price, delete_savings, delete_transfer,
         export_database_backup_from_path, get_app_setting, has_pending_database_import, initialize,
-        list_currencies, list_expense_places, list_payment_documents,
+        list_categories, list_currencies, list_expense_places, list_payment_documents,
         list_payment_documents_filtered, list_price_names, list_prices, list_savings,
         list_savings_filtered, list_transaction_amounts, list_transaction_comments,
         list_transactions, list_transactions_filtered, list_transactions_filtered_by_place,
@@ -3435,7 +3482,8 @@ mod tests {
         let connection = initialize(&directory.path().join("data.db")).unwrap();
         let first_bank_id = save_bank(&connection, None, "Банк первый", "").unwrap();
         let second_bank_id = save_bank(&connection, None, "Банк второй", "").unwrap();
-        let category_id = save_category(&connection, kind, None, "Категория", None, true).unwrap();
+        let category_id =
+            save_category(&connection, kind, None, "Категория", None, true, None).unwrap();
 
         let mut first_card_details = payment_document_details(first_bank_id);
         first_card_details.currency = Some(Currency::Rub);
@@ -3483,6 +3531,7 @@ mod tests {
             "Покупки",
             None,
             true,
+            Some(false),
         )
         .unwrap();
         let place_id = save_expense_place(&connection, None, "Магазин у дома", None).unwrap();
@@ -3546,6 +3595,7 @@ mod tests {
             "Проценты",
             None,
             true,
+            None,
         )
         .unwrap();
 
@@ -4153,7 +4203,7 @@ mod tests {
                         )
                         .unwrap();
                 }
-                4..=14 => {}
+                4..=15 => {}
                 _ => unreachable!(),
             }
         }
@@ -4170,7 +4220,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v15-")
+                    .starts_with("data.before-migration-v16-")
             })
             .count()
     }
@@ -4388,6 +4438,7 @@ mod tests {
             "Продукты",
             None,
             true,
+            Some(false),
         )
         .unwrap();
         let expense_id = save_transaction(
@@ -4574,7 +4625,7 @@ mod tests {
                     entry
                         .file_name()
                         .to_string_lossy()
-                        .starts_with("data.before-migration-v15-")
+                        .starts_with("data.before-migration-v16-")
                 })
                 .expect("upgrade should create a backup")
                 .path();
@@ -4934,7 +4985,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v15-")
+                    .starts_with("data.before-migration-v16-")
             })
             .map(|entry| Connection::open(entry.path()).unwrap())
             .map(|backup| {
@@ -5165,7 +5216,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v15-")
+                    .starts_with("data.before-migration-v16-")
             })
             .expect("upgrade from V14 should create a backup")
             .path();
@@ -5639,8 +5690,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = initialize(&dir.path().join("data.db")).unwrap();
         let bank = save_bank(&db, None, "Банк", "").unwrap();
-        let category =
-            save_category(&db, TransactionKind::Income, None, "Доход", None, true).unwrap();
+        let category = save_category(
+            &db,
+            TransactionKind::Income,
+            None,
+            "Доход",
+            None,
+            true,
+            None,
+        )
+        .unwrap();
         let mut details = payment_document_details(bank);
         details.amount = Decimal::ZERO;
         details.currency = Some(Currency::Rub);
@@ -5691,8 +5750,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = initialize(&dir.path().join("data.db")).unwrap();
         let bank = save_bank(&db, None, "Банк", "").unwrap();
-        let category =
-            save_category(&db, TransactionKind::Income, None, "Доход", None, true).unwrap();
+        let category = save_category(
+            &db,
+            TransactionKind::Income,
+            None,
+            "Доход",
+            None,
+            true,
+            None,
+        )
+        .unwrap();
         let mut details = payment_document_details(bank);
         details.amount = Decimal::ZERO;
         details.currency = Some(Currency::Rub);
@@ -5811,6 +5878,7 @@ mod tests {
             "Покупки",
             None,
             true,
+            Some(false),
         )
         .unwrap();
 
@@ -6087,6 +6155,7 @@ mod tests {
             "Покупки",
             None,
             true,
+            Some(false),
         )
         .unwrap();
         let mut first_details = payment_document_details(bank_id);
@@ -6184,6 +6253,7 @@ mod tests {
             "Зарплата",
             None,
             true,
+            None,
         )
         .unwrap();
         let amount = Decimal::from_str("12345678901234567890.1234").unwrap();
@@ -6704,6 +6774,7 @@ mod tests {
             "Продукты",
             None,
             true,
+            Some(false),
         )
         .unwrap();
         save_transaction(
@@ -6744,6 +6815,7 @@ mod tests {
             "Зарплата",
             None,
             true,
+            None,
         )
         .unwrap();
 
@@ -6770,6 +6842,7 @@ mod tests {
             "Продукты",
             None,
             true,
+            Some(false),
         )
         .unwrap();
 
@@ -6796,6 +6869,7 @@ mod tests {
             "Основное",
             None,
             true,
+            None,
         )
         .unwrap();
         let child_id = save_category(
@@ -6805,6 +6879,7 @@ mod tests {
             "Зарплата",
             Some(parent_id),
             true,
+            None,
         )
         .unwrap();
 
@@ -6832,6 +6907,7 @@ mod tests {
             "Подарок",
             None,
             true,
+            None,
         )
         .unwrap();
 
@@ -6860,6 +6936,7 @@ mod tests {
             "Зарплата",
             None,
             true,
+            None,
         )
         .unwrap();
         let other_income_category = save_category(
@@ -6869,6 +6946,7 @@ mod tests {
             "Подарок",
             None,
             true,
+            None,
         )
         .unwrap();
         let expense_category = save_category(
@@ -6878,6 +6956,7 @@ mod tests {
             "Дом",
             None,
             true,
+            Some(false),
         )
         .unwrap();
         save_transaction(
@@ -6956,6 +7035,7 @@ mod tests {
             "Зарплата",
             None,
             true,
+            None,
         )
         .unwrap();
         let expense_category = save_category(
@@ -6965,6 +7045,7 @@ mod tests {
             "Дом",
             None,
             true,
+            Some(false),
         )
         .unwrap();
         let date = NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
@@ -7036,6 +7117,7 @@ mod tests {
             "Зарплата",
             None,
             true,
+            None,
         )
         .unwrap();
 
@@ -7094,6 +7176,7 @@ mod tests {
             "Дом",
             None,
             true,
+            Some(false),
         )
         .unwrap();
         let child_id = save_category(
@@ -7103,6 +7186,7 @@ mod tests {
             "Счета",
             Some(parent_id),
             true,
+            Some(false),
         )
         .unwrap();
 
@@ -7113,6 +7197,7 @@ mod tests {
             "Дом",
             Some(child_id),
             true,
+            Some(false),
         );
 
         assert!(matches!(result, Err(DbError::CategoryCycle)));
@@ -7153,7 +7238,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .contains("before-migration-v15")
+                    .contains("before-migration-v16")
             })
             .count();
 
@@ -7424,7 +7509,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with("data.before-migration-v15-")
+                    .starts_with("data.before-migration-v16-")
             })
             .expect("upgrade from V4 should create a backup")
             .path();
@@ -7708,6 +7793,7 @@ mod tests {
             "Зарплата",
             None,
             true,
+            None,
         )
         .unwrap();
         let expense_category = save_category(
@@ -7717,6 +7803,7 @@ mod tests {
             "Покупки",
             None,
             true,
+            Some(false),
         )
         .unwrap();
         for (kind, category_id, day, amount, currency) in [
@@ -7806,6 +7893,7 @@ mod tests {
             "Доход 1",
             None,
             true,
+            None,
         )
         .unwrap();
         let income_category_two = save_category(
@@ -7815,6 +7903,7 @@ mod tests {
             "Доход 2",
             None,
             true,
+            None,
         )
         .unwrap();
         let expense_category_one = save_category(
@@ -7824,6 +7913,7 @@ mod tests {
             "Расход 1",
             None,
             true,
+            Some(false),
         )
         .unwrap();
         let expense_category_two = save_category(
@@ -7833,6 +7923,7 @@ mod tests {
             "Расход 2",
             None,
             true,
+            Some(false),
         )
         .unwrap();
 
@@ -7910,6 +8001,7 @@ mod tests {
             "Зарплата",
             None,
             true,
+            None,
         )
         .unwrap();
         let income_child = save_category(
@@ -7919,6 +8011,7 @@ mod tests {
             "Премии",
             Some(income_root),
             true,
+            None,
         )
         .unwrap();
         let income_grandchild = save_category(
@@ -7928,6 +8021,7 @@ mod tests {
             "Годовая премия",
             Some(income_child),
             true,
+            None,
         )
         .unwrap();
         let other_income_root = save_category(
@@ -7937,6 +8031,7 @@ mod tests {
             "Пособия",
             None,
             true,
+            None,
         )
         .unwrap();
         let other_income_child = save_category(
@@ -7946,6 +8041,7 @@ mod tests {
             "Пособие по уходу",
             Some(other_income_root),
             true,
+            None,
         )
         .unwrap();
 
@@ -7956,6 +8052,7 @@ mod tests {
             "Жильё",
             None,
             true,
+            Some(false),
         )
         .unwrap();
         let expense_child = save_category(
@@ -7965,6 +8062,7 @@ mod tests {
             "Коммунальные услуги",
             Some(expense_root),
             true,
+            Some(false),
         )
         .unwrap();
         let other_expense_root = save_category(
@@ -7974,6 +8072,7 @@ mod tests {
             "Транспорт",
             None,
             true,
+            Some(false),
         )
         .unwrap();
         let other_expense_child = save_category(
@@ -7983,6 +8082,7 @@ mod tests {
             "Такси",
             Some(other_expense_root),
             true,
+            Some(false),
         )
         .unwrap();
 
@@ -8081,6 +8181,7 @@ mod tests {
             "Зарплата",
             None,
             true,
+            None,
         )
         .unwrap();
         save_transaction(
@@ -8706,5 +8807,423 @@ mod tests {
             load_analysis_transactions(&directory.path().join("data.db"), None, None, None)
                 .unwrap();
         assert!(transactions.is_empty());
+    }
+    #[test]
+    fn v16_creates_regular_column_with_default_and_check() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let version: i64 = connection
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.last().unwrap().version);
+
+        connection
+            .execute(
+                "INSERT INTO expense_categories (name) VALUES ('По умолчанию')",
+                [],
+            )
+            .unwrap();
+        let default: bool = connection
+            .query_row(
+                "SELECT is_regular FROM expense_categories WHERE name = 'По умолчанию'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!default);
+        assert!(connection
+            .execute(
+                "INSERT INTO expense_categories (name, is_regular) VALUES ('Недопустимо', 2)",
+                []
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "INSERT INTO expense_categories (name, is_regular) VALUES ('Недопустимо', -1)",
+                []
+            )
+            .is_err());
+        assert!(connection
+            .prepare("SELECT is_regular FROM income_categories")
+            .is_err());
+    }
+
+    #[test]
+    fn v16_upgrade_from_v1_and_v15_preserves_history_and_data() {
+        for version in [1, 15] {
+            let directory = tempfile::tempdir().unwrap();
+            let database_path = directory.path().join("data.db");
+            drop(create_legacy_database(&database_path, version));
+
+            let connection = initialize(&database_path).unwrap();
+            let max_version: i64 = connection
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            let migration_count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(max_version, 16);
+            assert_eq!(migration_count, MIGRATIONS.len() as i64);
+            assert_eq!(migration_backup_count(directory.path()), 1);
+
+            let income_count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM income_categories", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            let expense_count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM expense_categories", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            let transaction_count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM expenses", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(income_count, if version == 15 { 1 } else { 0 });
+            assert_eq!(expense_count, if version == 15 { 1 } else { 0 });
+            assert_eq!(transaction_count, if version == 15 { 1 } else { 0 });
+
+            if version == 15 {
+                let regular: bool = connection
+                    .query_row(
+                        "SELECT is_regular FROM expense_categories WHERE name = 'Дом'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert!(!regular);
+            }
+        }
+    }
+
+    #[test]
+    fn save_and_list_keeps_regular_flag_personal_to_each_category() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = initialize(&directory.path().join("data.db")).unwrap();
+        let parent = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Жильё",
+            None,
+            true,
+            Some(true),
+        )
+        .unwrap();
+        let child = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Коммунальные услуги",
+            Some(parent),
+            true,
+            Some(false),
+        )
+        .unwrap();
+        save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Зарплата",
+            None,
+            true,
+            None,
+        )
+        .unwrap();
+
+        let expenses = list_categories(&connection, TransactionKind::Expense, true).unwrap();
+        assert_eq!(
+            expenses
+                .iter()
+                .find(|category| category.id == parent)
+                .unwrap()
+                .is_regular,
+            Some(true)
+        );
+        assert_eq!(
+            expenses
+                .iter()
+                .find(|category| category.id == child)
+                .unwrap()
+                .is_regular,
+            Some(false)
+        );
+        let incomes = list_categories(&connection, TransactionKind::Income, true).unwrap();
+        assert!(incomes.iter().all(|category| category.is_regular.is_none()));
+
+        assert!(matches!(
+            save_category(
+                &connection,
+                TransactionKind::Income,
+                None,
+                "Премия",
+                None,
+                true,
+                Some(true),
+            ),
+            Err(DbError::InvalidCategoryRegularFlag)
+        ));
+
+        save_category(
+            &connection,
+            TransactionKind::Expense,
+            Some(parent),
+            "Жильё и ремонт",
+            None,
+            true,
+            Some(false),
+        )
+        .unwrap();
+        let expenses = list_categories(&connection, TransactionKind::Expense, true).unwrap();
+        assert_eq!(
+            expenses
+                .iter()
+                .find(|category| category.id == parent)
+                .unwrap()
+                .is_regular,
+            Some(false)
+        );
+        assert_eq!(
+            expenses
+                .iter()
+                .find(|category| category.id == child)
+                .unwrap()
+                .is_regular,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn load_analysis_transactions_reads_regular_flag_from_each_category() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let connection = initialize(&database_path).unwrap();
+        let regular = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Аренда",
+            None,
+            true,
+            Some(true),
+        )
+        .unwrap();
+        let ordinary = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Питание",
+            None,
+            true,
+            Some(false),
+        )
+        .unwrap();
+        let income = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Зарплата",
+            None,
+            true,
+            None,
+        )
+        .unwrap();
+        let day = NaiveDate::from_ymd_opt(2027, 1, 15).unwrap();
+        for (kind, category_id, amount) in [
+            (TransactionKind::Expense, regular, 10),
+            (TransactionKind::Expense, ordinary, 20),
+            (TransactionKind::Income, income, 30),
+        ] {
+            save_transaction(
+                &connection,
+                kind,
+                None,
+                day,
+                category_id,
+                Decimal::from(amount),
+                Currency::Rub,
+                "",
+            )
+            .unwrap();
+        }
+        drop(connection);
+
+        let transactions = load_analysis_transactions(&database_path, None, None, None).unwrap();
+        assert_eq!(transactions.len(), 3);
+        assert!(transactions
+            .iter()
+            .any(|entry| entry.amount == Decimal::from(10) && entry.is_regular));
+        assert!(transactions
+            .iter()
+            .any(|entry| entry.amount == Decimal::from(20) && !entry.is_regular));
+        assert!(transactions
+            .iter()
+            .any(|entry| entry.kind == TransactionKind::Income && !entry.is_regular));
+    }
+
+    #[test]
+    fn regular_totals_do_not_inherit_parent_flags_and_respect_filters() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let connection = initialize(&database_path).unwrap();
+        let marked_parent = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Жильё",
+            None,
+            true,
+            Some(true),
+        )
+        .unwrap();
+        let unmarked_child = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Коммунальные услуги",
+            Some(marked_parent),
+            true,
+            Some(false),
+        )
+        .unwrap();
+        let unmarked_parent = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Транспорт",
+            None,
+            true,
+            Some(false),
+        )
+        .unwrap();
+        let marked_child = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Такси",
+            Some(unmarked_parent),
+            true,
+            Some(true),
+        )
+        .unwrap();
+        save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Зарплата",
+            None,
+            true,
+            None,
+        )
+        .unwrap();
+
+        let january = |day| NaiveDate::from_ymd_opt(2027, 1, day).unwrap();
+        for (category_id, day, amount, currency) in [
+            (marked_parent, 5, 10, Currency::Rub),
+            (unmarked_child, 10, 20, Currency::Rub),
+            (unmarked_parent, 15, 30, Currency::Rub),
+            (marked_child, 20, 40, Currency::Rub),
+            (marked_parent, 25, 5, Currency::Usd),
+            (marked_child, 26, 7, Currency::Usd),
+        ] {
+            save_transaction(
+                &connection,
+                TransactionKind::Expense,
+                None,
+                january(day),
+                category_id,
+                Decimal::from(amount),
+                currency,
+                "",
+            )
+            .unwrap();
+        }
+        save_transaction(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            NaiveDate::from_ymd_opt(2027, 2, 1).unwrap(),
+            marked_parent,
+            Decimal::from(500),
+            Currency::Rub,
+            "",
+        )
+        .unwrap();
+        drop(connection);
+
+        let from = NaiveDate::from_ymd_opt(2027, 1, 1);
+        let to = NaiveDate::from_ymd_opt(2027, 1, 31);
+
+        let marked_branch = summarize_analysis(
+            &load_analysis_transactions_by_category(
+                &database_path,
+                from,
+                to,
+                None,
+                Some(marked_parent),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let total = marked_branch
+            .totals
+            .iter()
+            .find(|total| total.currency == Currency::Rub)
+            .unwrap();
+        assert_eq!(total.amount, Decimal::from(30));
+        assert_eq!(total.regular.as_ref().unwrap().amount, Decimal::from(10));
+        assert_eq!(total.regular.as_ref().unwrap().transaction_count, 1);
+
+        let unmarked_branch = summarize_analysis(
+            &load_analysis_transactions_by_category(
+                &database_path,
+                from,
+                to,
+                None,
+                Some(unmarked_parent),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let total = unmarked_branch
+            .totals
+            .iter()
+            .find(|total| total.currency == Currency::Rub)
+            .unwrap();
+        assert_eq!(total.amount, Decimal::from(70));
+        assert_eq!(total.regular.as_ref().unwrap().amount, Decimal::from(40));
+
+        let all = summarize_analysis(
+            &load_analysis_transactions(&database_path, from, to, None).unwrap(),
+        )
+        .unwrap();
+        let rub = all
+            .totals
+            .iter()
+            .find(|total| total.kind == TransactionKind::Expense && total.currency == Currency::Rub)
+            .unwrap();
+        assert_eq!(rub.amount, Decimal::from(100));
+        assert_eq!(rub.regular.as_ref().unwrap().amount, Decimal::from(50));
+        assert_eq!(
+            rub.regular.as_ref().unwrap().share_percent,
+            Decimal::from(50)
+        );
+        let usd = all
+            .totals
+            .iter()
+            .find(|total| total.kind == TransactionKind::Expense && total.currency == Currency::Usd)
+            .unwrap();
+        assert_eq!(usd.amount, Decimal::from(12));
+        assert_eq!(usd.regular.as_ref().unwrap().amount, Decimal::from(12));
+        assert_eq!(
+            usd.regular.as_ref().unwrap().share_percent,
+            Decimal::from(100)
+        );
     }
 }

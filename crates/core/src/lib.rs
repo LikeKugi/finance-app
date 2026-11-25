@@ -209,6 +209,8 @@ pub struct Category {
     pub name: String,
     pub parent_id: Option<i64>,
     pub is_active: bool,
+    /// `Some(...)` только для категорий расходов; у доходов флага нет в БД.
+    pub is_regular: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -291,6 +293,24 @@ pub struct AnalysisTransaction {
     pub category_name: String,
     pub amount: Decimal,
     pub currency: Currency,
+    pub is_regular: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisRegularTotal {
+    pub amount: Decimal,
+    pub transaction_count: usize,
+    pub share_percent: Decimal,
+}
+
+impl AnalysisRegularTotal {
+    fn zero() -> Self {
+        Self {
+            amount: Decimal::ZERO,
+            transaction_count: 0,
+            share_percent: Decimal::ZERO,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -310,6 +330,8 @@ pub struct AnalysisTotal {
     pub currency: Currency,
     pub amount: Decimal,
     pub transaction_count: usize,
+    /// `Some` для расходов, включая нулевой итог; `None` для доходов.
+    pub regular: Option<AnalysisRegularTotal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,6 +418,8 @@ pub fn summarize_analysis(
                 currency: transaction.currency,
                 amount: Decimal::ZERO,
                 transaction_count: 0,
+                regular: (transaction.kind == TransactionKind::Expense)
+                    .then(AnalysisRegularTotal::zero),
             });
         total.amount = total
             .amount
@@ -405,6 +429,17 @@ pub fn summarize_analysis(
             .transaction_count
             .checked_add(1)
             .ok_or(AnalysisError::Overflow)?;
+        if transaction.kind == TransactionKind::Expense && transaction.is_regular {
+            let regular = total.regular.get_or_insert_with(AnalysisRegularTotal::zero);
+            regular.amount = regular
+                .amount
+                .checked_add(transaction.amount)
+                .ok_or(AnalysisError::Overflow)?;
+            regular.transaction_count = regular
+                .transaction_count
+                .checked_add(1)
+                .ok_or(AnalysisError::Overflow)?;
+        }
     }
 
     for category in categories.values_mut() {
@@ -414,6 +449,18 @@ pub fn summarize_analysis(
         category.share_percent = category
             .amount
             .checked_div(total.amount)
+            .and_then(|share| share.checked_mul(Decimal::ONE_HUNDRED))
+            .ok_or(AnalysisError::Overflow)?;
+    }
+
+    for total in totals.values_mut() {
+        let Some(regular) = total.regular.as_mut() else {
+            continue;
+        };
+        let total_amount = total.amount;
+        regular.share_percent = regular
+            .amount
+            .checked_div(total_amount)
             .and_then(|share| share.checked_mul(Decimal::ONE_HUNDRED))
             .ok_or(AnalysisError::Overflow)?;
     }
@@ -480,6 +527,7 @@ mod analysis_tests {
                 category_name: "Категория дохода".to_owned(),
                 amount: Decimal::from(30),
                 currency: Currency::Rub,
+                is_regular: false,
             },
             AnalysisTransaction {
                 kind: TransactionKind::Expense,
@@ -487,6 +535,7 @@ mod analysis_tests {
                 category_name: "Категория расхода".to_owned(),
                 amount: Decimal::from(20),
                 currency: Currency::Rub,
+                is_regular: false,
             },
         ];
 
@@ -506,6 +555,7 @@ mod analysis_tests {
                 category_name: "Зарплата".to_owned(),
                 amount: Decimal::new(1250, 2),
                 currency: Currency::Rub,
+                is_regular: false,
             },
             AnalysisTransaction {
                 kind: TransactionKind::Income,
@@ -513,6 +563,7 @@ mod analysis_tests {
                 category_name: "Зарплата".to_owned(),
                 amount: Decimal::from(5),
                 currency: Currency::Usd,
+                is_regular: false,
             },
         ];
 
@@ -532,6 +583,7 @@ mod analysis_tests {
                 category_name: "Жильё".to_owned(),
                 amount: Decimal::new(1250, 2),
                 currency: Currency::Rub,
+                is_regular: false,
             },
             AnalysisTransaction {
                 kind: TransactionKind::Expense,
@@ -539,6 +591,7 @@ mod analysis_tests {
                 category_name: "Жильё".to_owned(),
                 amount: Decimal::new(750, 2),
                 currency: Currency::Rub,
+                is_regular: false,
             },
             AnalysisTransaction {
                 kind: TransactionKind::Expense,
@@ -546,6 +599,7 @@ mod analysis_tests {
                 category_name: "Питание".to_owned(),
                 amount: Decimal::from(5),
                 currency: Currency::Rub,
+                is_regular: false,
             },
         ];
 
@@ -578,6 +632,7 @@ mod analysis_tests {
                 category_name: "Зарплата".to_owned(),
                 amount: Decimal::MAX,
                 currency: Currency::Rub,
+                is_regular: false,
             },
             AnalysisTransaction {
                 kind: TransactionKind::Income,
@@ -585,6 +640,7 @@ mod analysis_tests {
                 category_name: "Зарплата".to_owned(),
                 amount: Decimal::ONE,
                 currency: Currency::Rub,
+                is_regular: false,
             },
         ];
 
@@ -602,11 +658,150 @@ mod analysis_tests {
             category_name: "Зарплата".to_owned(),
             amount: Decimal::ZERO,
             currency: Currency::Rub,
+            is_regular: false,
         };
 
         assert_eq!(
             summarize_analysis(&[transaction]),
             Err(AnalysisError::InvalidAmount)
+        );
+    }
+
+    #[test]
+    fn regular_total_counts_only_marked_expenses() {
+        let transactions = [
+            AnalysisTransaction {
+                kind: TransactionKind::Expense,
+                category_id: 1,
+                category_name: "Жильё".to_owned(),
+                amount: Decimal::from(30),
+                currency: Currency::Rub,
+                is_regular: true,
+            },
+            AnalysisTransaction {
+                kind: TransactionKind::Expense,
+                category_id: 2,
+                category_name: "Питание".to_owned(),
+                amount: Decimal::from(10),
+                currency: Currency::Rub,
+                is_regular: false,
+            },
+            AnalysisTransaction {
+                kind: TransactionKind::Income,
+                category_id: 3,
+                category_name: "Зарплата".to_owned(),
+                amount: Decimal::from(100),
+                currency: Currency::Rub,
+                is_regular: true,
+            },
+        ];
+
+        let summary = summarize_analysis(&transactions).unwrap();
+        let expense = summary
+            .totals
+            .iter()
+            .find(|total| total.kind == TransactionKind::Expense)
+            .unwrap();
+        let regular = expense.regular.as_ref().unwrap();
+        assert_eq!(regular.amount, Decimal::from(30));
+        assert_eq!(regular.transaction_count, 1);
+        assert_eq!(regular.share_percent, Decimal::from(75));
+        assert!(summary
+            .totals
+            .iter()
+            .find(|total| total.kind == TransactionKind::Income)
+            .unwrap()
+            .regular
+            .is_none());
+    }
+
+    #[test]
+    fn regular_total_keeps_currencies_separate() {
+        let transactions = [
+            (TransactionKind::Expense, Currency::Rub, 8, true),
+            (TransactionKind::Expense, Currency::Rub, 2, false),
+            (TransactionKind::Expense, Currency::Usd, 1, true),
+            (TransactionKind::Expense, Currency::Usd, 3, false),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(
+            |(index, (kind, currency, amount, is_regular))| AnalysisTransaction {
+                kind,
+                category_id: index as i64,
+                category_name: format!("Категория {index}"),
+                amount: Decimal::from(amount),
+                currency,
+                is_regular,
+            },
+        )
+        .collect::<Vec<_>>();
+
+        let summary = summarize_analysis(&transactions).unwrap();
+        let rub = summary
+            .totals
+            .iter()
+            .find(|total| total.currency == Currency::Rub)
+            .unwrap();
+        let usd = summary
+            .totals
+            .iter()
+            .find(|total| total.currency == Currency::Usd)
+            .unwrap();
+        assert_eq!(rub.regular.as_ref().unwrap().amount, Decimal::from(8));
+        assert_eq!(
+            rub.regular.as_ref().unwrap().share_percent,
+            Decimal::from(80)
+        );
+        assert_eq!(usd.regular.as_ref().unwrap().amount, Decimal::ONE);
+        assert_eq!(
+            usd.regular.as_ref().unwrap().share_percent,
+            Decimal::from(25)
+        );
+    }
+
+    #[test]
+    fn regular_total_is_zero_when_no_expense_is_marked() {
+        let transactions = [AnalysisTransaction {
+            kind: TransactionKind::Expense,
+            category_id: 1,
+            category_name: "Питание".to_owned(),
+            amount: Decimal::from(5),
+            currency: Currency::Rub,
+            is_regular: false,
+        }];
+
+        let summary = summarize_analysis(&transactions).unwrap();
+        let regular = summary.totals[0].regular.as_ref().unwrap();
+        assert_eq!(regular.amount, Decimal::ZERO);
+        assert_eq!(regular.transaction_count, 0);
+        assert_eq!(regular.share_percent, Decimal::ZERO);
+    }
+
+    #[test]
+    fn regular_total_reports_overflow() {
+        let transactions = [
+            AnalysisTransaction {
+                kind: TransactionKind::Expense,
+                category_id: 1,
+                category_name: "Жильё".to_owned(),
+                amount: Decimal::MAX,
+                currency: Currency::Rub,
+                is_regular: true,
+            },
+            AnalysisTransaction {
+                kind: TransactionKind::Expense,
+                category_id: 1,
+                category_name: "Жильё".to_owned(),
+                amount: Decimal::ONE,
+                currency: Currency::Rub,
+                is_regular: true,
+            },
+        ];
+
+        assert_eq!(
+            summarize_analysis(&transactions),
+            Err(AnalysisError::Overflow)
         );
     }
 }
