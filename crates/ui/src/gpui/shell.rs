@@ -16,8 +16,13 @@ use super::transactions::TransactionsPage;
 use super::transfers::TransfersPage;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::*;
+
+const FULLSCREEN_CONTROLS_ID: &str = "fullscreen-window-controls";
+const MINIMIZE_TOOLTIP: &str = "Свернуть";
+const EXIT_FULLSCREEN_TOOLTIP: &str = "Выйти из полноэкранного режима";
+const CLOSE_TOOLTIP: &str = "Закрыть";
 
 /// Вкладки приложения; порядок задаёт [`PageTab::ALL`] и панель вкладок.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -233,10 +238,55 @@ impl AppShell {
         .child(self.render_all_pages_section(all_page_links(), cx))
         .into_any_element()
     }
+
+    fn render_fullscreen_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id(FULLSCREEN_CONTROLS_ID)
+            .absolute()
+            .top(px(8.0))
+            .right(px(8.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .p_1()
+            .bg(cx.theme().title_bar)
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded_md()
+            .child(
+                Button::new("fullscreen-minimize")
+                    .ghost()
+                    .small()
+                    .icon(IconName::WindowMinimize)
+                    .tooltip(MINIMIZE_TOOLTIP)
+                    .accessibility_label(MINIMIZE_TOOLTIP)
+                    .on_click(|_, window, _| window.minimize_window()),
+            )
+            .child(
+                Button::new("fullscreen-exit")
+                    .ghost()
+                    .small()
+                    .icon(IconName::WindowRestore)
+                    .tooltip(EXIT_FULLSCREEN_TOOLTIP)
+                    .accessibility_label(EXIT_FULLSCREEN_TOOLTIP)
+                    .on_click(|_, window, _| window.toggle_fullscreen()),
+            )
+            .child(
+                Button::new("fullscreen-close")
+                    .ghost()
+                    .small()
+                    .icon(IconName::WindowClose)
+                    .tooltip(CLOSE_TOOLTIP)
+                    .accessibility_label(CLOSE_TOOLTIP)
+                    .on_click(|_, window, _| window.remove_window()),
+            )
+            .into_any_element()
+    }
 }
 
 impl Render for AppShell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.active;
         let selected = PageTab::ALL
             .iter()
@@ -254,7 +304,7 @@ impl Render for AppShell {
             }))
             .children(PageTab::ALL.iter().map(|tab| Tab::new().label(tab.title())));
 
-        div()
+        let mut root = div()
             .size_full()
             .flex()
             .flex_col()
@@ -271,7 +321,11 @@ impl Render for AppShell {
                 PageTab::PaymentDocuments => self.payment_documents.clone().into_any_element(),
                 PageTab::Analysis => self.analysis.clone().into_any_element(),
                 PageTab::Settings => self.settings.clone().into_any_element(),
-            }))
+            }));
+        if cfg!(target_os = "windows") && window.is_fullscreen() {
+            root = root.child(self.render_fullscreen_controls(cx));
+        }
+        root
     }
 }
 
@@ -336,7 +390,9 @@ pub fn run(database: Database, database_path: PathBuf, app_version: &'static str
 
 #[cfg(test)]
 mod tests {
-    use super::PageTab;
+    use super::{
+        PageTab, CLOSE_TOOLTIP, EXIT_FULLSCREEN_TOOLTIP, FULLSCREEN_CONTROLS_ID, MINIMIZE_TOOLTIP,
+    };
 
     #[test]
     fn tabs_follow_the_requested_order_and_have_russian_titles() {
@@ -362,5 +418,16 @@ mod tests {
         for title in titles {
             assert!(unique.insert(title), "дубликат названия вкладки");
         }
+    }
+
+    #[test]
+    fn fullscreen_controls_have_russian_labels_and_stable_ids() {
+        assert_eq!(MINIMIZE_TOOLTIP, "Свернуть");
+        assert_eq!(EXIT_FULLSCREEN_TOOLTIP, "Выйти из полноэкранного режима");
+        assert_eq!(CLOSE_TOOLTIP, "Закрыть");
+        assert_eq!(FULLSCREEN_CONTROLS_ID, "fullscreen-window-controls");
+        assert_ne!(MINIMIZE_TOOLTIP, EXIT_FULLSCREEN_TOOLTIP);
+        assert_ne!(MINIMIZE_TOOLTIP, CLOSE_TOOLTIP);
+        assert_ne!(EXIT_FULLSCREEN_TOOLTIP, CLOSE_TOOLTIP);
     }
 }
