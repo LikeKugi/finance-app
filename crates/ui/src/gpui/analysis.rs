@@ -188,6 +188,7 @@ impl RequestTracker {
 struct PieChartSlice {
     category_id: i64,
     category_name: String,
+    amount: rust_decimal::Decimal,
     share: f32,
     share_percent: rust_decimal::Decimal,
 }
@@ -447,6 +448,7 @@ fn pie_chart_slices(
             Some(PieChartSlice {
                 category_id: category.category_id,
                 category_name: category.category_name.clone(),
+                amount: category.amount,
                 share,
                 share_percent: category.share_percent,
             })
@@ -464,6 +466,17 @@ fn pie_chart_color(category_id: i64, is_dark: bool) -> Hsla {
     Hsla::from(rgb(colors[index]))
 }
 
+/// Подпись среза диаграммы: `Категория: Абсолютная сумма (проценты)`.
+/// Валюта уже указана в заголовке диаграммы, поэтому в подписи повторять её не нужно.
+fn pie_chart_tooltip_label(slice: &PieChartSlice) -> String {
+    format!(
+        "{}: {} ({}%)",
+        slice.category_name,
+        format_currency(&slice.amount, 2),
+        slice.share_percent.round_dp(2)
+    )
+}
+
 fn pie_chart(
     slices: Vec<PieChartSlice>,
     is_dark: bool,
@@ -479,10 +492,8 @@ fn pie_chart(
                 .outer_radius(58.0)
                 .value(|slice| slice.share)
                 .color(move |slice| pie_chart_color(slice.category_id, is_dark))
-                .tooltip_name(|slice| slice.category_name.clone().into())
-                .tooltip_value(|slice, _, _| {
-                    format!("{}%", slice.share_percent.round_dp(2)).into()
-                }),
+                .tooltip_name(|slice| pie_chart_tooltip_label(slice).into())
+                .tooltip_value(|_, _, _| "".into()),
         )
 }
 
@@ -1477,12 +1488,12 @@ mod tests {
     // Глоб-импорт `gpui_kit::*` затеняет атрибут `#[test]`, поэтому имена импортируются явно.
     use super::{
         analysis_balance_lines, analysis_column_headers, analysis_table_width, parse_filters,
-        pie_chart_color, pie_chart_slices, regular_label, regular_summary_values,
-        sort_analysis_categories, AnalysisFilters, AnalysisTable, CategoryFilterItem,
-        CategoryPicker, RequestTracker, COLUMN_WIDTHS, COL_AMOUNT, COL_CATEGORY, COL_REGULAR,
-        COL_SHARE, COL_TRANSACTION_COUNT, EXPENSE_CATEGORY_FILTER_ITEM_ID, EXPENSE_COLUMN_HEADERS,
-        INCOME_CATEGORY_FILTER_ITEM_ID, INCOME_COLUMN_HEADERS, MIN_COLUMN_WIDTHS,
-        PIE_CHART_COLORS_DARK, PIE_CHART_COLORS_LIGHT,
+        pie_chart_color, pie_chart_slices, pie_chart_tooltip_label, regular_label,
+        regular_summary_values, sort_analysis_categories, AnalysisFilters, AnalysisTable,
+        CategoryFilterItem, CategoryPicker, PieChartSlice, RequestTracker, COLUMN_WIDTHS,
+        COL_AMOUNT, COL_CATEGORY, COL_REGULAR, COL_SHARE, COL_TRANSACTION_COUNT,
+        EXPENSE_CATEGORY_FILTER_ITEM_ID, EXPENSE_COLUMN_HEADERS, INCOME_CATEGORY_FILTER_ITEM_ID,
+        INCOME_COLUMN_HEADERS, MIN_COLUMN_WIDTHS, PIE_CHART_COLORS_DARK, PIE_CHART_COLORS_LIGHT,
     };
     use chrono::NaiveDate;
     use finance_core::{
@@ -1782,6 +1793,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Зарплата", "Премии", "Годовая премия"]
         );
+        assert_eq!(
+            slices.iter().map(|slice| slice.amount).collect::<Vec<_>>(),
+            [Decimal::from(10), Decimal::from(20), Decimal::from(30)]
+        );
+    }
+
+    #[test]
+    fn pie_chart_tooltip_shows_category_amount_and_share() {
+        let slice = PieChartSlice {
+            category_id: 1,
+            category_name: "Покупки".to_owned(),
+            amount: Decimal::new(123450, 2),
+            share: 25.0,
+            share_percent: Decimal::from(25),
+        };
+
+        assert_eq!(pie_chart_tooltip_label(&slice), "Покупки: 1 234.50 (25%)");
     }
 
     #[test]
