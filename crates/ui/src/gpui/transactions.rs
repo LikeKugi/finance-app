@@ -2025,29 +2025,28 @@ const INCOME_COLUMN_TITLES: [&str; 6] = [
     "Комментарии",
     "Действия",
 ];
-const EXPENSE_COLUMN_TITLES: [&str; 8] = [
+const EXPENSE_COLUMN_TITLES: [&str; 7] = [
     "Дата",
     "Категория",
     "Сумма",
     "Валюта",
     EXPENSE_PLACE_LABEL,
     "Комментарии",
-    "Регулярные",
     "Действия",
 ];
 const ACTIONS_COLUMN_WIDTH: f32 = 160.0;
 const EXPENSE_PLACE_COLUMN_WIDTH: f32 = 180.0;
-const REGULAR_COLUMN_WIDTH: f32 = 110.0;
+/// Индекс удалённой колонки в старых сохранённых ширинах расходов.
+const LEGACY_EXPENSE_REGULAR_COLUMN: usize = 6;
 const DEFAULT_INCOME_COLUMN_WIDTHS: [f32; 6] =
     [115.0, 220.0, 135.0, 90.0, 320.0, ACTIONS_COLUMN_WIDTH];
-const DEFAULT_EXPENSE_COLUMN_WIDTHS: [f32; 8] = [
+const DEFAULT_EXPENSE_COLUMN_WIDTHS: [f32; 7] = [
     115.0,
     220.0,
     135.0,
     90.0,
     EXPENSE_PLACE_COLUMN_WIDTH,
     320.0,
-    REGULAR_COLUMN_WIDTH,
     ACTIONS_COLUMN_WIDTH,
 ];
 const MIN_COLUMN_WIDTH: f32 = 60.0;
@@ -2060,8 +2059,7 @@ const COL_INCOME_COMMENT: usize = 4;
 const COL_INCOME_ACTIONS: usize = 5;
 const COL_EXPENSE_PLACE: usize = 4;
 const COL_EXPENSE_COMMENT: usize = 5;
-const COL_EXPENSE_REGULAR: usize = 6;
-const COL_EXPENSE_ACTIONS: usize = 7;
+const COL_EXPENSE_ACTIONS: usize = 6;
 
 fn column_titles(kind: TransactionKind) -> &'static [&'static str] {
     match kind {
@@ -2106,13 +2104,13 @@ fn format_column_widths(widths: &[f32]) -> String {
         .join(",")
 }
 
-/// Добавляет в сохранённые ширины расходы новые колонки, сохраняя прежние значения.
+/// Приводит сохранённые ширины расходов к текущим колонкам, сохраняя прежние значения.
 fn migrate_expense_column_widths(mut widths: Vec<f32>) -> Vec<f32> {
     if widths.len() == INCOME_COLUMN_TITLES.len() {
         widths.insert(COL_EXPENSE_PLACE, EXPENSE_PLACE_COLUMN_WIDTH);
     }
-    if widths.len() == EXPENSE_COLUMN_TITLES.len() - 1 {
-        widths.insert(COL_EXPENSE_REGULAR, REGULAR_COLUMN_WIDTH);
+    if widths.len() == EXPENSE_COLUMN_TITLES.len() + 1 {
+        widths.remove(LEGACY_EXPENSE_REGULAR_COLUMN);
     }
     widths
 }
@@ -2170,14 +2168,6 @@ fn default_order(a: &FinancialTransaction, b: &FinancialTransaction) -> std::cmp
     b.date.cmp(&a.date).then(b.id.cmp(&a.id))
 }
 
-fn regular_label(is_regular: bool) -> &'static str {
-    if is_regular {
-        "Да"
-    } else {
-        "Нет"
-    }
-}
-
 /// Сортирует полный набор строк; суммы сравниваются как `Decimal`, а не как текст.
 fn sort_transactions(rows: &mut [FinancialTransaction], sort: Option<(usize, ColumnSort)>) {
     let Some((column, direction)) = sort else {
@@ -2195,7 +2185,6 @@ fn sort_transactions(rows: &mut [FinancialTransaction], sort: Option<(usize, Col
                 .amount
                 .cmp(&b.amount)
                 .then_with(|| a.currency.code().cmp(b.currency.code())),
-            COL_EXPENSE_REGULAR => a.is_regular.cmp(&b.is_regular),
             _ => std::cmp::Ordering::Equal,
         };
         let ordering = if direction == ColumnSort::Descending {
@@ -2288,8 +2277,7 @@ impl TableDelegate for TransactionsTable {
         } else {
             column
         };
-        let sortable = matches!(col_ix, COL_DATE | COL_CATEGORY | COL_AMOUNT)
-            || (self.kind == TransactionKind::Expense && col_ix == COL_EXPENSE_REGULAR);
+        let sortable = matches!(col_ix, COL_DATE | COL_CATEGORY | COL_AMOUNT);
         let column = if sortable {
             let direction = match self.sort {
                 Some((sorted, direction)) if sorted == col_ix => direction,
@@ -2429,14 +2417,6 @@ impl TableDelegate for TransactionsTable {
                         .into_any_element()
                 }
             }
-            COL_EXPENSE_REGULAR if self.kind == TransactionKind::Expense => div()
-                .child(selectable_table_cell(
-                    "transactions",
-                    id,
-                    col_ix,
-                    regular_label(transaction.is_regular),
-                ))
-                .into_any_element(),
             column if column == actions_column(self.kind) => {
                 let edit_page = self.page.clone();
                 let delete_page = self.page.clone();
@@ -2581,12 +2561,12 @@ mod tests {
         card_filter_from_index, card_filter_index, cards_for_bank,
         column_widths_with_fixed_actions, comment_preview, format_column_widths,
         migrate_expense_column_widths, parse_column_widths, payment_filter_label,
-        payment_filter_labels, regular_filter_from_index, regular_label, sort_transactions,
+        payment_filter_labels, regular_filter_from_index, sort_transactions,
         update_bank_filter_selection, BankFilterItem, FormValues, PlaceFilterItem,
-        ACTIONS_COLUMN_WIDTH, COL_EXPENSE_ACTIONS, COL_EXPENSE_COMMENT, COL_EXPENSE_REGULAR,
-        COL_INCOME_ACTIONS, EXPENSE_COLUMN_TITLES, EXPENSE_PLACE_LABEL,
-        INCOME_PAYMENT_FILTER_LABEL, NONE_LABEL, NO_CARD_LABEL, PAYMENT_FILTER_LABEL,
-        REGULAR_COLUMN_WIDTH, REGULAR_EXPENSE_FILTER_LABEL, REGULAR_EXPENSE_FILTER_OPTIONS,
+        ACTIONS_COLUMN_WIDTH, COL_EXPENSE_ACTIONS, COL_EXPENSE_COMMENT, COL_INCOME_ACTIONS,
+        EXPENSE_COLUMN_TITLES, EXPENSE_PLACE_LABEL, INCOME_PAYMENT_FILTER_LABEL, NONE_LABEL,
+        NO_CARD_LABEL, PAYMENT_FILTER_LABEL, REGULAR_EXPENSE_FILTER_LABEL,
+        REGULAR_EXPENSE_FILTER_OPTIONS,
     };
     use crate::gpui::helpers::card_label;
     use chrono::NaiveDate;
@@ -2971,18 +2951,6 @@ mod tests {
         rows.iter().map(|row| row.id).collect()
     }
 
-    fn transaction_with_regular(
-        id: i64,
-        day: u32,
-        category: &str,
-        amount: &str,
-        is_regular: bool,
-    ) -> FinancialTransaction {
-        let mut row = transaction(id, day, category, amount);
-        row.is_regular = is_regular;
-        row
-    }
-
     #[test]
     fn amount_sort_is_numeric_not_lexicographic() {
         let mut rows = vec![
@@ -3043,47 +3011,35 @@ mod tests {
         )
         .expect("legacy expense column widths should migrate");
 
-        assert_eq!(
-            migrated,
-            [
-                100.0,
-                200.0,
-                130.0,
-                90.0,
-                180.0,
-                300.0,
-                REGULAR_COLUMN_WIDTH,
-                180.0
-            ]
-        );
+        assert_eq!(migrated, [100.0, 200.0, 130.0, 90.0, 180.0, 300.0, 180.0]);
     }
 
     #[test]
-    fn recent_expense_widths_gain_regular_column_before_actions() {
+    fn saved_expense_widths_are_accepted_without_regular_column() {
         let saved_widths = [100.0, 200.0, 130.0, 90.0, 180.0, 300.0, 190.0];
+        let migrated = parse_column_widths(
+            &format_column_widths(&saved_widths),
+            TransactionKind::Expense,
+        )
+        .expect("current expense column widths should be accepted");
+
+        assert_eq!(migrated, saved_widths);
+    }
+
+    #[test]
+    fn saved_expense_widths_drop_removed_regular_column() {
+        let saved_widths = [100.0, 200.0, 130.0, 90.0, 180.0, 300.0, 190.0, 170.0];
         let migrated = migrate_expense_column_widths(saved_widths.to_vec());
 
-        assert_eq!(
-            migrated,
-            [
-                100.0,
-                200.0,
-                130.0,
-                90.0,
-                180.0,
-                300.0,
-                REGULAR_COLUMN_WIDTH,
-                190.0
-            ]
-        );
+        assert_eq!(migrated, [100.0, 200.0, 130.0, 90.0, 180.0, 300.0, 170.0]);
     }
 
     #[test]
-    fn regular_column_is_between_comment_and_actions() {
-        assert_eq!(EXPENSE_COLUMN_TITLES.len(), 8);
+    fn expense_column_titles_end_with_actions() {
+        assert_eq!(EXPENSE_COLUMN_TITLES.len(), 7);
         assert_eq!(EXPENSE_COLUMN_TITLES[COL_EXPENSE_COMMENT], "Комментарии");
-        assert_eq!(EXPENSE_COLUMN_TITLES[COL_EXPENSE_REGULAR], "Регулярные");
         assert_eq!(EXPENSE_COLUMN_TITLES[COL_EXPENSE_ACTIONS], "Действия");
+        assert!(!EXPENSE_COLUMN_TITLES.contains(&"Регулярные"));
     }
 
     #[test]
@@ -3099,28 +3055,6 @@ mod tests {
             regular_filter_from_index(2),
             RegularExpenseFilter::NotRegular
         );
-        assert_eq!(regular_label(true), "Да");
-        assert_eq!(regular_label(false), "Нет");
-    }
-
-    #[test]
-    fn regular_column_sort_orders_expenses_by_flag() {
-        let mut rows = vec![
-            transaction(1, 1, "А", "1"),
-            transaction_with_regular(2, 2, "Б", "1", true),
-            transaction(3, 3, "В", "1"),
-        ];
-
-        sort_transactions(
-            &mut rows,
-            Some((COL_EXPENSE_REGULAR, ColumnSort::Ascending)),
-        );
-        assert_eq!(ids(&rows), [3, 1, 2]);
-        sort_transactions(
-            &mut rows,
-            Some((COL_EXPENSE_REGULAR, ColumnSort::Descending)),
-        );
-        assert_eq!(ids(&rows), [2, 3, 1]);
     }
 
     #[test]
