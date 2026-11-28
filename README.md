@@ -56,7 +56,7 @@ cargo +stable build --workspace --release
 
 The app version is defined once in `crates/app/Cargo.toml`. Windows executable metadata and both macOS bundle version fields are generated or populated from that version; tagged releases are rejected unless the tag matches it.
 
-The workflow in `.github/workflows/build.yml` builds release artifacts on every push and pull request, and can also be started manually from the repository's **Actions** tab. It produces separate downloadable artifacts for Windows x64, macOS Apple Silicon (`arm64`), and macOS Intel (`x86_64`), with each macOS ZIP containing a versioned `FinanceApp.app` bundle.
+The workflow in `.github/workflows/build.yml` builds release artifacts for pull requests. It produces separate downloadable artifacts for Windows x64, macOS Apple Silicon (`arm64`), and macOS Intel (`x86_64`), with each macOS ZIP containing a versioned `FinanceApp.app` bundle. The workflow in `.github/workflows/tests.yml` runs all workspace tests on every push and pull request.
 
 For user-facing downloads, push a trusted version tag in the form `vMAJOR.MINOR.PATCH`. The separate `.github/workflows/release.yml` builds and publishes a GitHub Release containing `finance-app.exe` for Windows x64, `finance-app-macos-arm64.zip`, and `finance-app-macos-x86_64.zip`. The ordinary build workflow remains independent and continues to provide CI artifacts.
 
