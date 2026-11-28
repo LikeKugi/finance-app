@@ -92,6 +92,312 @@ struct Migration {
     sql: &'static str,
 }
 
+struct CategorySeed {
+    name: &'static str,
+    children: &'static [CategorySeed],
+}
+
+const fn category_seed(name: &'static str, children: &'static [CategorySeed]) -> CategorySeed {
+    CategorySeed { name, children }
+}
+
+const INCOME_CATEGORY_SEED: &[CategorySeed] = &[
+    category_seed(
+        "Зарплата",
+        &[
+            category_seed("Оклад", &[]),
+            category_seed("Премия", &[]),
+            category_seed("Отпускные", &[]),
+        ],
+    ),
+    category_seed(
+        "Фриланс",
+        &[
+            category_seed("Проекты", &[]),
+            category_seed("Консультации", &[]),
+        ],
+    ),
+    category_seed(
+        "Инвестиции",
+        &[
+            category_seed("Дивиденды", &[]),
+            category_seed("Купоны", &[]),
+            category_seed("Проценты", &[]),
+        ],
+    ),
+    category_seed("Подарки", &[]),
+    category_seed("Прочие доходы", &[]),
+];
+
+const EXPENSE_CATEGORY_SEED: &[CategorySeed] = &[
+    category_seed(
+        "Продукты",
+        &[
+            category_seed(
+                "Супермаркеты",
+                &[
+                    category_seed("Гипермаркеты", &[]),
+                    category_seed("Магазины у дома", &[]),
+                ],
+            ),
+            category_seed("Рынки", &[]),
+            category_seed("Доставка продуктов", &[]),
+        ],
+    ),
+    category_seed(
+        "Кафе и рестораны",
+        &[
+            category_seed("Кафе", &[]),
+            category_seed(
+                "Рестораны",
+                &[
+                    category_seed("Бизнес-ланчи", &[]),
+                    category_seed("Ужины", &[]),
+                ],
+            ),
+            category_seed("Фастфуд", &[]),
+            category_seed("Кофейни", &[]),
+        ],
+    ),
+    category_seed(
+        "Транспорт",
+        &[
+            category_seed("Общественный транспорт", &[]),
+            category_seed("Такси", &[]),
+            category_seed(
+                "Личный автомобиль",
+                &[
+                    category_seed("Топливо", &[]),
+                    category_seed("Обслуживание", &[]),
+                    category_seed("Страховка", &[]),
+                ],
+            ),
+        ],
+    ),
+    category_seed(
+        "Жильё и ЖКХ",
+        &[
+            category_seed("Аренда", &[]),
+            category_seed("Ипотека", &[]),
+            category_seed(
+                "Коммунальные услуги",
+                &[
+                    category_seed("Электричество", &[]),
+                    category_seed("Вода", &[]),
+                    category_seed("Отопление", &[]),
+                    category_seed("Вывоз мусора", &[]),
+                ],
+            ),
+        ],
+    ),
+    category_seed(
+        "Связь и интернет",
+        &[
+            category_seed(
+                "Мобильная связь",
+                &[category_seed("Тариф", &[]), category_seed("Роуминг", &[])],
+            ),
+            category_seed("Домашний интернет", &[]),
+            category_seed("Подписки", &[]),
+        ],
+    ),
+    category_seed(
+        "Здоровье",
+        &[
+            category_seed("Аптеки", &[]),
+            category_seed(
+                "Врачи",
+                &[
+                    category_seed("Стоматология", &[]),
+                    category_seed("Анализы", &[]),
+                ],
+            ),
+            category_seed("Страхование здоровья", &[]),
+        ],
+    ),
+    category_seed(
+        "Одежда",
+        &[
+            category_seed("Мужская одежда", &[]),
+            category_seed("Женская одежда", &[]),
+            category_seed(
+                "Обувь",
+                &[
+                    category_seed("Кроссовки", &[]),
+                    category_seed("Классическая обувь", &[]),
+                ],
+            ),
+            category_seed("Аксессуары", &[]),
+        ],
+    ),
+    category_seed(
+        "Электроника",
+        &[
+            category_seed("Бытовая техника", &[]),
+            category_seed(
+                "Компьютеры",
+                &[
+                    category_seed("Ноутбуки", &[]),
+                    category_seed("Комплектующие", &[]),
+                ],
+            ),
+            category_seed("Гаджеты", &[]),
+        ],
+    ),
+    category_seed(
+        "Дом и уют",
+        &[
+            category_seed(
+                "Мебель",
+                &[
+                    category_seed("Корпусная мебель", &[]),
+                    category_seed("Мягкая мебель", &[]),
+                ],
+            ),
+            category_seed("Текстиль", &[]),
+            category_seed("Посуда", &[]),
+            category_seed("Хозтовары", &[]),
+        ],
+    ),
+    category_seed(
+        "Развлечения",
+        &[
+            category_seed("Кино и театр", &[]),
+            category_seed("Концерты", &[]),
+            category_seed(
+                "Игры",
+                &[
+                    category_seed("Видеоигры", &[]),
+                    category_seed("Настольные игры", &[]),
+                ],
+            ),
+            category_seed("Хобби", &[]),
+        ],
+    ),
+    category_seed(
+        "Спорт и фитнес",
+        &[
+            category_seed("Абонемент", &[]),
+            category_seed("Спортивная одежда", &[]),
+            category_seed(
+                "Инвентарь",
+                &[
+                    category_seed("Тренажёры", &[]),
+                    category_seed("Аксессуары", &[]),
+                ],
+            ),
+        ],
+    ),
+    category_seed(
+        "Образование",
+        &[
+            category_seed("Курсы", &[]),
+            category_seed(
+                "Книги",
+                &[
+                    category_seed("Художественная литература", &[]),
+                    category_seed("Профессиональная литература", &[]),
+                ],
+            ),
+            category_seed("Репетиторы", &[]),
+        ],
+    ),
+    category_seed(
+        "Дети",
+        &[
+            category_seed("Детский сад", &[]),
+            category_seed("Школа", &[]),
+            category_seed(
+                "Игрушки",
+                &[
+                    category_seed("Развивающие", &[]),
+                    category_seed("Конструкторы", &[]),
+                ],
+            ),
+            category_seed("Детская одежда", &[]),
+        ],
+    ),
+    category_seed(
+        "Животные",
+        &[
+            category_seed("Корма", &[]),
+            category_seed(
+                "Ветеринария",
+                &[
+                    category_seed("Прививки", &[]),
+                    category_seed("Лечение", &[]),
+                ],
+            ),
+            category_seed("Уход", &[]),
+        ],
+    ),
+    category_seed(
+        "Путешествия",
+        &[
+            category_seed("Авиабилеты", &[]),
+            category_seed(
+                "Отели",
+                &[
+                    category_seed("Гостиницы", &[]),
+                    category_seed("Апартаменты", &[]),
+                ],
+            ),
+            category_seed("Экскурсии", &[]),
+            category_seed("Трансферы", &[]),
+        ],
+    ),
+    category_seed(
+        "Подарки",
+        &[
+            category_seed("Подарки близким", &[]),
+            category_seed("Праздники", &[]),
+            category_seed("Цветы", &[]),
+        ],
+    ),
+    category_seed(
+        "Красота",
+        &[
+            category_seed("Парикмахерская", &[]),
+            category_seed("Косметика", &[]),
+            category_seed("Маникюр", &[]),
+        ],
+    ),
+    category_seed(
+        "Финансы",
+        &[
+            category_seed("Комиссии банков", &[]),
+            category_seed("Проценты по кредитам", &[]),
+            category_seed("Страхование", &[]),
+        ],
+    ),
+    category_seed(
+        "Работа",
+        &[
+            category_seed("Канцелярия", &[]),
+            category_seed("Обеды на работе", &[]),
+            category_seed("Обучение", &[]),
+        ],
+    ),
+    category_seed(
+        "Ремонт",
+        &[
+            category_seed("Материалы", &[]),
+            category_seed("Работы", &[]),
+            category_seed("Инструменты", &[]),
+        ],
+    ),
+    category_seed("Налоги", &[]),
+    category_seed("Штрафы", &[]),
+    category_seed("Благотворительность", &[]),
+    category_seed("Садоводство", &[]),
+    category_seed("Услуги", &[]),
+    category_seed("Госуслуги", &[]),
+    category_seed("Интернет-магазины", &[]),
+    category_seed("Доставка", &[]),
+    category_seed("Прочие расходы", &[]),
+    category_seed("Непредвиденные расходы", &[]),
+];
+
 /// SQLite connection type used by the desktop application.
 pub type Database = Connection;
 
@@ -2826,6 +3132,39 @@ fn category_table(kind: TransactionKind) -> &'static str {
     }
 }
 
+fn insert_category_seed(
+    connection: &Connection,
+    kind: TransactionKind,
+    categories: &[CategorySeed],
+    parent_id: Option<i64>,
+) -> Result<(), rusqlite::Error> {
+    let table = category_table(kind);
+    for category in categories {
+        connection.execute(
+            &format!("INSERT INTO {table} (name, parent_id, is_active) VALUES (?1, ?2, 1)"),
+            params![category.name, parent_id],
+        )?;
+        let category_id = connection.last_insert_rowid();
+        insert_category_seed(connection, kind, category.children, Some(category_id))?;
+    }
+    Ok(())
+}
+
+fn insert_default_categories(connection: &Connection) -> Result<(), rusqlite::Error> {
+    insert_category_seed(
+        connection,
+        TransactionKind::Income,
+        INCOME_CATEGORY_SEED,
+        None,
+    )?;
+    insert_category_seed(
+        connection,
+        TransactionKind::Expense,
+        EXPENSE_CATEGORY_SEED,
+        None,
+    )
+}
+
 fn transaction_tables(kind: TransactionKind) -> (&'static str, &'static str) {
     match kind {
         TransactionKind::Income => ("incomes", "income_categories"),
@@ -2880,6 +3219,10 @@ fn apply_migrations(connection: &mut Connection, database_path: &Path) -> Result
                 "INSERT INTO schema_migrations (version) VALUES (?1)",
                 [migration.version],
             )?;
+        }
+
+        if current_version.is_none() {
+            insert_default_categories(&transaction)?;
         }
 
         if rebuilds_tables_with_foreign_keys {
@@ -3350,13 +3693,14 @@ pub fn list_transfers_filtered(
 mod tests {
     use chrono::NaiveDate;
     use finance_core::{
-        summarize_analysis, Currency, CurrencyDefinition, DomainError, ExpensePlace,
+        summarize_analysis, Category, Currency, CurrencyDefinition, DomainError, ExpensePlace,
         InterestDestination, PaymentCardType, PaymentDocumentDetails, PaymentDocumentFilter,
         PaymentSystem, PriceFilter, RegularExpenseFilter, SavingsDetails, SavingsTerm,
         TransactionKind, TransferDetails, TransferEndpoint, TransferOperationType,
     };
     use rusqlite::{params, Connection, OpenFlags};
     use rust_decimal::Decimal;
+    use std::collections::{BTreeSet, HashMap};
     use std::str::FromStr;
 
     use super::{
@@ -3372,8 +3716,9 @@ mod tests {
         save_category, save_expense_place, save_next_payment, save_payment_document, save_price,
         save_savings, save_savings_interest_accrual, save_transaction, save_transaction_with_card,
         save_transaction_with_card_and_rate_effect_and_place, save_transfer, set_app_setting,
-        set_currency_exchange_rate, set_primary_currency, stage_database_import, DbError,
-        NextPaymentExpense, SavingsInterestIncome, SavingsInterestIncomeRecipient, MIGRATIONS,
+        set_currency_exchange_rate, set_primary_currency, stage_database_import, CategorySeed,
+        DbError, NextPaymentExpense, SavingsInterestIncome, SavingsInterestIncomeRecipient,
+        EXPENSE_CATEGORY_SEED, INCOME_CATEGORY_SEED, MIGRATIONS,
     };
 
     fn transfer_fixture() -> (tempfile::TempDir, Connection, i64, i64, i64) {
@@ -5306,6 +5651,134 @@ mod tests {
 
         assert_eq!(migration_count, MIGRATIONS.len() as i64);
         assert_eq!(foreign_keys_enabled, 1);
+    }
+
+    fn category_hierarchy_counts(connection: &Connection, table: &str) -> (i64, i64, i64) {
+        connection
+            .query_row(
+                &format!(
+                    "SELECT
+                        (SELECT COUNT(*) FROM {table} WHERE parent_id IS NULL),
+                        (SELECT COUNT(*) FROM {table} AS root
+                         WHERE root.parent_id IS NULL AND EXISTS (
+                             SELECT 1 FROM {table} AS child WHERE child.parent_id = root.id
+                         )),
+                        (SELECT COUNT(*) FROM {table} AS root
+                         WHERE root.parent_id IS NULL AND EXISTS (
+                             SELECT 1 FROM {table} AS child
+                             JOIN {table} AS grandchild ON grandchild.parent_id = child.id
+                             WHERE child.parent_id = root.id
+                         ))"
+                ),
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    }
+
+    fn stored_category_paths(categories: &[Category]) -> BTreeSet<Vec<String>> {
+        let categories_by_id: HashMap<_, _> = categories
+            .iter()
+            .map(|category| (category.id, category))
+            .collect();
+        categories
+            .iter()
+            .map(|category| {
+                let mut path = vec![category.name.clone()];
+                let mut current = category;
+                while let Some(parent_id) = current.parent_id {
+                    current = categories_by_id
+                        .get(&parent_id)
+                        .copied()
+                        .expect("a category parent must be present in the listing");
+                    path.push(current.name.clone());
+                }
+                path.reverse();
+                path
+            })
+            .collect()
+    }
+
+    fn seed_category_paths(categories: &[CategorySeed]) -> BTreeSet<Vec<String>> {
+        fn collect_paths(
+            categories: &[CategorySeed],
+            path: &mut Vec<String>,
+            paths: &mut BTreeSet<Vec<String>>,
+        ) {
+            for category in categories {
+                path.push(category.name.to_owned());
+                paths.insert(path.clone());
+                collect_paths(category.children, path, paths);
+                let _ = path.pop();
+            }
+        }
+
+        let mut paths = BTreeSet::new();
+        collect_paths(categories, &mut Vec::new(), &mut paths);
+        paths
+    }
+
+    #[test]
+    fn initialize_seeds_default_category_hierarchies_only_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let connection = initialize(&database_path).unwrap();
+
+        assert_eq!(
+            category_hierarchy_counts(&connection, "income_categories"),
+            (5, 3, 0)
+        );
+        assert_eq!(
+            category_hierarchy_counts(&connection, "expense_categories"),
+            (30, 20, 15)
+        );
+        assert_eq!(
+            stored_category_paths(
+                &list_categories(&connection, TransactionKind::Income, true).unwrap()
+            ),
+            seed_category_paths(INCOME_CATEGORY_SEED)
+        );
+        assert_eq!(
+            stored_category_paths(
+                &list_categories(&connection, TransactionKind::Expense, true).unwrap()
+            ),
+            seed_category_paths(EXPENSE_CATEGORY_SEED)
+        );
+
+        drop(connection);
+        let connection = initialize(&database_path).unwrap();
+
+        assert_eq!(
+            category_hierarchy_counts(&connection, "income_categories"),
+            (5, 3, 0)
+        );
+        assert_eq!(
+            category_hierarchy_counts(&connection, "expense_categories"),
+            (30, 20, 15)
+        );
+
+        drop(connection);
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 DELETE FROM incomes;
+                 DELETE FROM expenses;
+                 DELETE FROM income_categories;
+                 DELETE FROM expense_categories;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let connection = initialize(&database_path).unwrap();
+        assert_eq!(
+            category_hierarchy_counts(&connection, "income_categories"),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            category_hierarchy_counts(&connection, "expense_categories"),
+            (0, 0, 0)
+        );
     }
 
     #[test]
@@ -7940,46 +8413,49 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let database_path = directory.path().join("data.db");
         let connection = initialize(&database_path).unwrap();
-        let income_category_one = save_category(
-            &connection,
-            TransactionKind::Income,
-            None,
-            "Доход 1",
-            None,
-            true,
-            None,
-        )
-        .unwrap();
-        let income_category_two = save_category(
-            &connection,
-            TransactionKind::Income,
-            None,
-            "Доход 2",
-            None,
-            true,
-            None,
-        )
-        .unwrap();
-        let expense_category_one = save_category(
-            &connection,
-            TransactionKind::Expense,
-            None,
-            "Расход 1",
-            None,
-            true,
-            Some(false),
-        )
-        .unwrap();
-        let expense_category_two = save_category(
-            &connection,
-            TransactionKind::Expense,
-            None,
-            "Расход 2",
-            None,
-            true,
-            Some(false),
-        )
-        .unwrap();
+        let shared_category_id: i64 = connection
+            .query_row(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM (
+                    SELECT id FROM income_categories
+                    UNION ALL
+                    SELECT id FROM expense_categories
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let income_category_one = shared_category_id;
+        let income_category_two = shared_category_id + 1;
+        let expense_category_one = income_category_one;
+        let expense_category_two = income_category_two;
+        connection
+            .execute(
+                "INSERT INTO income_categories (id, name, parent_id, is_active)
+                 VALUES (?1, ?2, NULL, 1)",
+                params![income_category_one, "Доход 1"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO income_categories (id, name, parent_id, is_active)
+                 VALUES (?1, ?2, NULL, 1)",
+                params![income_category_two, "Доход 2"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO expense_categories (id, name, parent_id, is_active, is_regular)
+                 VALUES (?1, ?2, NULL, 1, 0)",
+                params![expense_category_one, "Расход 1"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO expense_categories (id, name, parent_id, is_active, is_regular)
+                 VALUES (?1, ?2, NULL, 1, 0)",
+                params![expense_category_two, "Расход 2"],
+            )
+            .unwrap();
 
         for (kind, category_id, amount) in [
             (TransactionKind::Income, income_category_one, 10),

@@ -34,7 +34,7 @@ The initialized SQLite connection and database path are passed to `finance_ui::r
 
 ## Persistence, migrations, and exact values
 
-The database crate embeds the migration SQL files from `crates/db/migrations/` and applies versions V1 through V16. Initialization enables SQLite foreign keys on the connection and sets a five-second busy timeout. An empty database or a database with a recognized, contiguous migration history can be initialized or upgraded; an unrecognized, malformed, or newer schema is rejected without replacing the database.
+The database crate embeds the migration SQL files from `crates/db/migrations/` and applies versions V1 through V16. On a genuinely new database, the initial migration transaction also inserts the default income and expense category trees; recognized existing databases are not seeded or reseeded during upgrades. Initialization enables SQLite foreign keys on the connection and sets a five-second busy timeout. An empty database or a database with a recognized, contiguous migration history can be initialized or upgraded; an unrecognized, malformed, or newer schema is rejected without replacing the database.
 
 Before upgrading a recognized older schema, the application creates an adjacent consistent backup using SQLite facilities (`VACUUM INTO`, as recorded in `docs/decisions.md`). Pending migrations and migration-history updates are applied atomically. Do not edit an applied migration; add a new version instead.
 
