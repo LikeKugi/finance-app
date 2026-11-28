@@ -99,7 +99,7 @@ enum AnalysisSection {
 }
 
 impl AnalysisSection {
-    const ALL: [Self; 3] = [Self::General, Self::Income, Self::Expense];
+    const ALL: [Self; 3] = [Self::General, Self::Expense, Self::Income];
 
     const fn title(self) -> &'static str {
         match self {
