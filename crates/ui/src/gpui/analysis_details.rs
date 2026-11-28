@@ -3,6 +3,7 @@
 //! Все запросы выполняются в фоне на отдельном read-only соединении; в UI
 //! попадают только уже отфильтрованные и точно агрегированные строки.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -43,16 +44,31 @@ use super::support::{
 
 const NONE_LABEL: &str = "Все";
 const NO_CARD_LABEL: &str = "Не по карте";
-const COLUMN_WIDTHS_KEY: &str = "table_columns.analytics_details.v1";
-const HEADERS: [&str; 6] = ["Группа", "Валюта", "Операций", "Сумма", "Доля", "График"];
-const DEFAULT_WIDTHS: [f32; 6] = [230.0, 80.0, 100.0, 140.0, 80.0, 250.0];
-const MIN_WIDTHS: [f32; 6] = [130.0, 70.0, 85.0, 110.0, 65.0, 120.0];
+const LEGACY_COLUMN_WIDTHS_KEY: &str = "table_columns.analytics_details.v1";
+const INCOME_COLUMN_WIDTHS_KEY: &str = "table_columns.analytics_details.income.v1";
+const EXPENSE_COLUMN_WIDTHS_KEY: &str = "table_columns.analytics_details.expense.v1";
+const INCOME_HEADERS: [&str; 6] = ["Категория", "Операций", "Сумма", "Валюта", "Доля", "График"];
+const EXPENSE_HEADERS: [&str; 7] = [
+    "Категория",
+    "Операций",
+    "Сумма",
+    "Валюта",
+    "Доля",
+    "Регулярные",
+    "График",
+];
+const LEGACY_DEFAULT_WIDTHS: [f32; 6] = [230.0, 80.0, 100.0, 140.0, 80.0, 250.0];
+const LEGACY_MIN_WIDTHS: [f32; 6] = [130.0, 70.0, 85.0, 110.0, 65.0, 120.0];
+const INCOME_DEFAULT_WIDTHS: [f32; 6] = [230.0, 100.0, 140.0, 80.0, 80.0, 250.0];
+const EXPENSE_DEFAULT_WIDTHS: [f32; 7] = [230.0, 100.0, 140.0, 80.0, 80.0, 110.0, 250.0];
+const INCOME_MIN_WIDTHS: [f32; 6] = [130.0, 85.0, 110.0, 70.0, 65.0, 120.0];
+const EXPENSE_MIN_WIDTHS: [f32; 7] = [130.0, 85.0, 110.0, 70.0, 65.0, 90.0, 120.0];
 const COL_GROUP: usize = 0;
-const COL_CURRENCY: usize = 1;
-const COL_COUNT: usize = 2;
-const COL_AMOUNT: usize = 3;
+const COL_COUNT: usize = 1;
+const COL_AMOUNT: usize = 2;
+const COL_CURRENCY: usize = 3;
 const COL_SHARE: usize = 4;
-const COL_CHART: usize = 5;
+const COL_REGULAR: usize = 5;
 const REGULAR_OPTIONS: [&str; 3] = ["Все", "Регулярные", "Не регулярные"];
 const BAR_COLORS: [u32; 2] = [0x3975a8, 0xbd523c];
 
@@ -247,12 +263,83 @@ fn parse_widths(value: &str) -> Option<Vec<f32>> {
         .split(',')
         .map(|part| part.trim().parse::<f32>().ok())
         .collect::<Option<Vec<_>>>()?;
-    (widths.len() == HEADERS.len()
+    Some(widths)
+}
+
+fn headers_for(kind: TransactionKind) -> &'static [&'static str] {
+    match kind {
+        TransactionKind::Income => &INCOME_HEADERS,
+        TransactionKind::Expense => &EXPENSE_HEADERS,
+    }
+}
+
+fn default_widths(kind: TransactionKind) -> &'static [f32] {
+    match kind {
+        TransactionKind::Income => &INCOME_DEFAULT_WIDTHS,
+        TransactionKind::Expense => &EXPENSE_DEFAULT_WIDTHS,
+    }
+}
+
+fn minimum_widths(kind: TransactionKind) -> &'static [f32] {
+    match kind {
+        TransactionKind::Income => &INCOME_MIN_WIDTHS,
+        TransactionKind::Expense => &EXPENSE_MIN_WIDTHS,
+    }
+}
+
+fn column_widths_key(kind: TransactionKind) -> &'static str {
+    match kind {
+        TransactionKind::Income => INCOME_COLUMN_WIDTHS_KEY,
+        TransactionKind::Expense => EXPENSE_COLUMN_WIDTHS_KEY,
+    }
+}
+
+fn valid_widths(widths: &[f32], minimums: &[f32], count: usize) -> bool {
+    widths.len() == count
         && widths
             .iter()
-            .zip(MIN_WIDTHS)
-            .all(|(width, minimum)| width.is_finite() && (minimum..=600.0).contains(width)))
-    .then_some(widths)
+            .zip(minimums)
+            .all(|(width, minimum)| width.is_finite() && (*minimum..=600.0).contains(width))
+}
+
+fn migrate_legacy_widths(widths: &[f32], kind: TransactionKind) -> Option<Vec<f32>> {
+    if !valid_widths(widths, &LEGACY_MIN_WIDTHS, LEGACY_DEFAULT_WIDTHS.len()) {
+        return None;
+    }
+    let remapped = match kind {
+        TransactionKind::Income => vec![
+            widths[0], widths[2], widths[3], widths[1], widths[4], widths[5],
+        ],
+        TransactionKind::Expense => vec![
+            widths[0],
+            widths[2],
+            widths[3],
+            widths[1],
+            widths[4],
+            EXPENSE_DEFAULT_WIDTHS[5],
+            widths[5],
+        ],
+    };
+    valid_widths(&remapped, minimum_widths(kind), headers_for(kind).len()).then_some(remapped)
+}
+
+fn parse_widths_for_kind(value: &str, kind: TransactionKind) -> Option<Vec<f32>> {
+    let widths = parse_widths(value)?;
+    valid_widths(&widths, minimum_widths(kind), headers_for(kind).len()).then_some(widths)
+}
+
+fn regular_label(
+    kind: TransactionKind,
+    slice: AnalysisSlice,
+    regular_categories: &HashMap<i64, bool>,
+    category_id: i64,
+) -> &'static str {
+    if kind != TransactionKind::Expense || slice != AnalysisSlice::Overall {
+        return "—";
+    }
+    regular_categories
+        .get(&category_id)
+        .map_or("—", |is_regular| if *is_regular { "Да" } else { "Нет" })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -344,19 +431,25 @@ impl RequestTracker {
 }
 
 struct AnalysisSliceTable {
+    kind: TransactionKind,
+    slice: AnalysisSlice,
     rows: Vec<AnalysisSliceRow>,
     sort: Option<(usize, ColumnSort)>,
     widths: Vec<f32>,
+    regular_categories: HashMap<i64, bool>,
     /// Максимум отдельно по валютам; геометрия полос не означает конвертацию.
     maxima: [f64; 2],
 }
 
 impl AnalysisSliceTable {
-    fn new(widths: Vec<f32>) -> Self {
+    fn new(kind: TransactionKind, widths: Vec<f32>) -> Self {
         Self {
+            kind,
+            slice: AnalysisSlice::Overall,
             rows: Vec::new(),
             sort: Some((COL_AMOUNT, ColumnSort::Descending)),
             widths,
+            regular_categories: HashMap::new(),
             maxima: [1.0, 1.0],
         }
     }
@@ -380,12 +473,39 @@ impl AnalysisSliceTable {
         self.widths = widths.to_vec();
     }
 
+    fn set_slice(&mut self, slice: AnalysisSlice) {
+        self.slice = slice;
+        self.sort_rows();
+    }
+
+    fn set_regular_categories(&mut self, regular_categories: HashMap<i64, bool>) {
+        self.regular_categories = regular_categories;
+        self.sort_rows();
+    }
+
     fn sort_rows(&mut self) {
-        sort_analysis_slice_rows(&mut self.rows, self.sort);
+        sort_analysis_slice_rows(
+            &mut self.rows,
+            self.sort,
+            &self.regular_categories,
+            self.slice == AnalysisSlice::Overall,
+        );
     }
 }
 
-fn sort_analysis_slice_rows(rows: &mut [AnalysisSliceRow], sort: Option<(usize, ColumnSort)>) {
+fn chart_column(kind: TransactionKind) -> usize {
+    match kind {
+        TransactionKind::Income => INCOME_HEADERS.len() - 1,
+        TransactionKind::Expense => EXPENSE_HEADERS.len() - 1,
+    }
+}
+
+fn sort_analysis_slice_rows(
+    rows: &mut [AnalysisSliceRow],
+    sort: Option<(usize, ColumnSort)>,
+    regular_categories: &HashMap<i64, bool>,
+    sort_regular: bool,
+) {
     let Some((column, direction)) = sort else {
         rows.sort_by(default_row_order);
         return;
@@ -400,6 +520,16 @@ fn sort_analysis_slice_rows(rows: &mut [AnalysisSliceRow], sort: Option<(usize, 
             COL_COUNT => left.transaction_count.cmp(&right.transaction_count),
             COL_AMOUNT => left.amount.cmp(&right.amount),
             COL_SHARE => left.share_percent.cmp(&right.share_percent),
+            COL_REGULAR if sort_regular => regular_categories
+                .get(&left.group_id)
+                .copied()
+                .unwrap_or(false)
+                .cmp(
+                    &regular_categories
+                        .get(&right.group_id)
+                        .copied()
+                        .unwrap_or(false),
+                ),
             _ => std::cmp::Ordering::Equal,
         };
         let ordering = if direction == ColumnSort::Descending {
@@ -432,7 +562,7 @@ fn currency_index_for(currency: Currency) -> usize {
 
 impl TableDelegate for AnalysisSliceTable {
     fn columns_count(&self, _: &App) -> usize {
-        HEADERS.len()
+        headers_for(self.kind).len()
     }
 
     fn rows_count(&self, _: &App) -> usize {
@@ -440,16 +570,23 @@ impl TableDelegate for AnalysisSliceTable {
     }
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
-        let direction = self
-            .sort
-            .filter(|(column, _)| *column == col_ix)
-            .map_or(ColumnSort::Default, |(_, direction)| direction);
-        Column::new(HEADERS[col_ix], HEADERS[col_ix])
-            .width(px(self.widths[col_ix]))
-            .min_width(px(MIN_WIDTHS[col_ix]))
-            .resizable(col_ix != COL_CHART)
-            .movable(false)
-            .sort(direction)
+        let is_chart = col_ix == chart_column(self.kind);
+        let direction = if is_chart {
+            ColumnSort::Default
+        } else {
+            self.sort
+                .filter(|(column, _)| *column == col_ix)
+                .map_or(ColumnSort::Default, |(_, direction)| direction)
+        };
+        Column::new(
+            headers_for(self.kind)[col_ix],
+            headers_for(self.kind)[col_ix],
+        )
+        .width(px(self.widths[col_ix]))
+        .min_width(px(minimum_widths(self.kind)[col_ix]))
+        .resizable(!is_chart)
+        .movable(false)
+        .sort(direction)
     }
 
     fn perform_sort(
@@ -459,6 +596,9 @@ impl TableDelegate for AnalysisSliceTable {
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
     ) {
+        if col_ix == chart_column(self.kind) {
+            return;
+        }
         self.sort = (sort != ColumnSort::Default).then_some((col_ix, sort));
         self.sort_rows();
     }
@@ -493,10 +633,6 @@ impl TableDelegate for AnalysisSliceTable {
                 selectable_table_cell("analytics-details", &row_id, col_ix, row.group_name.clone())
                     .into_any_element()
             }
-            COL_CURRENCY => {
-                selectable_table_cell("analytics-details", &row_id, col_ix, row.currency.code())
-                    .into_any_element()
-            }
             COL_COUNT => selectable_right_aligned_table_cell(
                 "analytics-details",
                 &row_id,
@@ -518,7 +654,21 @@ impl TableDelegate for AnalysisSliceTable {
                 format!("{}%", row.share_percent.round_dp(2)),
             )
             .into_any_element(),
-            _ => {
+            COL_CURRENCY => {
+                selectable_table_cell("analytics-details", &row_id, col_ix, row.currency.code())
+                    .into_any_element()
+            }
+            COL_REGULAR if self.kind == TransactionKind::Expense => {
+                let value = regular_label(
+                    self.kind,
+                    self.slice,
+                    &self.regular_categories,
+                    row.group_id,
+                );
+                selectable_table_cell("analytics-details", &row_id, col_ix, value)
+                    .into_any_element()
+            }
+            column if column == chart_column(self.kind) => {
                 let maximum = self.maxima[currency_index_for(row.currency)];
                 let amount = row.amount.to_f64().unwrap_or(0.0);
                 let ratio = if maximum > 0.0 {
@@ -550,6 +700,7 @@ impl TableDelegate for AnalysisSliceTable {
                     ))
                     .into_any_element()
             }
+            _ => div().into_any_element(),
         }
     }
 }
@@ -638,9 +789,9 @@ impl DetailedAnalysisPage {
             window,
             cx,
         );
-        let widths = load_widths(&database);
+        let widths = load_widths(&database, kind);
         let table = cx.new(|cx| {
-            TableState::new(AnalysisSliceTable::new(widths), window, cx).col_movable(false)
+            TableState::new(AnalysisSliceTable::new(kind, widths), window, cx).col_movable(false)
         });
         let slices = slices_for(kind);
         let saved = vec![FilterValues::default(); slices.len()];
@@ -903,10 +1054,23 @@ impl DetailedAnalysisPage {
         };
         match (categories, banks, cards, places) {
             (Ok(categories), Ok(banks), Ok(cards), Ok(places)) => {
+                let regular_categories = categories
+                    .iter()
+                    .filter_map(|category| {
+                        category
+                            .is_regular
+                            .map(|is_regular| (category.id, is_regular))
+                    })
+                    .collect();
                 self.categories = categories;
                 self.banks = banks;
                 self.cards = cards;
                 self.places = places;
+                self.table.update(cx, |table, _| {
+                    table
+                        .delegate_mut()
+                        .set_regular_categories(regular_categories);
+                });
             }
             (Err(error), _, _, _)
             | (_, Err(error), _, _)
@@ -1084,6 +1248,8 @@ impl DetailedAnalysisPage {
         let captured = self.capture_values(cx);
         *self.current_values_mut() = captured;
         self.slice = slice;
+        self.table
+            .update(cx, |table, _| table.delegate_mut().set_slice(slice));
         self.sync_card_options(window, cx);
         self.restore_values(window, cx);
         self.apply_filters(cx);
@@ -1224,31 +1390,42 @@ impl DetailedAnalysisPage {
             .iter()
             .map(|width| f32::from(*width))
             .collect::<Vec<_>>();
-        if widths.len() != HEADERS.len()
-            || !widths
-                .iter()
-                .zip(MIN_WIDTHS)
-                .all(|(width, minimum)| width.is_finite() && (minimum..=600.0).contains(width))
-        {
+        if !valid_widths(
+            &widths,
+            minimum_widths(self.kind),
+            headers_for(self.kind).len(),
+        ) {
             return;
         }
         self.table
             .update(cx, |table, _| table.delegate_mut().set_widths(&widths));
-        if let Err(error) =
-            finance_db::set_app_setting(&self.database, COLUMN_WIDTHS_KEY, &format_widths(&widths))
-        {
+        if let Err(error) = finance_db::set_app_setting(
+            &self.database,
+            column_widths_key(self.kind),
+            &format_widths(&widths),
+        ) {
             self.message = Some(format!("Не удалось сохранить ширину колонок: {error}"));
         }
     }
 }
 
-fn load_widths(database: &Database) -> Vec<f32> {
-    match finance_db::get_app_setting(database, COLUMN_WIDTHS_KEY) {
-        Ok(Some(value)) => parse_widths(&value).unwrap_or_else(|| DEFAULT_WIDTHS.to_vec()),
-        Ok(None) => DEFAULT_WIDTHS.to_vec(),
+fn load_widths(database: &Database, kind: TransactionKind) -> Vec<f32> {
+    let default = || default_widths(kind).to_vec();
+    match finance_db::get_app_setting(database, column_widths_key(kind)) {
+        Ok(Some(value)) => parse_widths_for_kind(&value, kind).unwrap_or_else(default),
+        Ok(None) => match finance_db::get_app_setting(database, LEGACY_COLUMN_WIDTHS_KEY) {
+            Ok(Some(value)) => parse_widths(&value)
+                .and_then(|widths| migrate_legacy_widths(&widths, kind))
+                .unwrap_or_else(default),
+            Ok(None) => default(),
+            Err(error) => {
+                eprintln!("Не удалось прочитать ширину колонок аналитики: {error}");
+                default()
+            }
+        },
         Err(error) => {
             eprintln!("Не удалось прочитать ширину колонок аналитики: {error}");
-            DEFAULT_WIDTHS.to_vec()
+            default()
         }
     }
 }
@@ -1315,6 +1492,13 @@ impl DetailedAnalysisPage {
                     .into_any_element(),
             ))
             .child(Self::filter_field(
+                "Период",
+                150.0,
+                false,
+                None,
+                Select::new(&self.period_select).small().into_any_element(),
+            ))
+            .child(Self::filter_field(
                 "С",
                 130.0,
                 false,
@@ -1338,13 +1522,6 @@ impl DetailedAnalysisPage {
                     .placeholder("Выбрать дату")
                     .small()
                     .into_any_element(),
-            ))
-            .child(Self::filter_field(
-                "Период",
-                150.0,
-                false,
-                None,
-                Select::new(&self.period_select).small().into_any_element(),
             ))
             .child(Self::filter_field(
                 "Валюта",
@@ -1597,9 +1774,11 @@ impl Render for DetailedAnalysisPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        currency_index, index_for_slice, parse_widths, payment_filter_from_index,
-        payment_filter_index, regular_filter_index, slices_for, summary_lines, AnalysisSliceTable,
-        RequestTracker, COL_AMOUNT, COL_GROUP, DEFAULT_WIDTHS, HEADERS,
+        chart_column, currency_index, default_widths, headers_for, index_for_slice,
+        migrate_legacy_widths, parse_widths_for_kind, payment_filter_from_index,
+        payment_filter_index, regular_filter_index, regular_label, slices_for, summary_lines,
+        AnalysisSliceTable, RequestTracker, COL_AMOUNT, COL_GROUP, EXPENSE_DEFAULT_WIDTHS,
+        INCOME_DEFAULT_WIDTHS,
     };
     use finance_core::{
         AnalysisSlice, AnalysisSliceItem, AnalysisSliceReport, AnalysisSliceRow, Currency,
@@ -1607,6 +1786,7 @@ mod tests {
     };
     use gpui_kit::component::table::ColumnSort;
     use rust_decimal::Decimal;
+    use std::collections::HashMap;
     use std::str::FromStr;
 
     fn request_values(slice: AnalysisSlice, label: &str) -> super::RequestKey {
@@ -1726,12 +1906,114 @@ mod tests {
     #[test]
     fn corrupt_saved_widths_are_rejected() {
         assert_eq!(
-            parse_widths(&super::format_widths(&DEFAULT_WIDTHS)),
-            Some(DEFAULT_WIDTHS.to_vec())
+            parse_widths_for_kind(
+                &super::format_widths(&INCOME_DEFAULT_WIDTHS),
+                TransactionKind::Income,
+            ),
+            Some(INCOME_DEFAULT_WIDTHS.to_vec())
         );
-        assert_eq!(parse_widths("100,NaN,100,100,100,100"), None);
-        assert_eq!(parse_widths("100,100"), None);
-        assert_eq!(HEADERS.len(), DEFAULT_WIDTHS.len());
+        assert_eq!(
+            parse_widths_for_kind("100,NaN,100,100,100,100", TransactionKind::Income),
+            None
+        );
+        assert_eq!(
+            parse_widths_for_kind("100,100", TransactionKind::Income),
+            None
+        );
+        assert_eq!(
+            headers_for(TransactionKind::Income).len(),
+            default_widths(TransactionKind::Income).len()
+        );
+        assert_eq!(
+            headers_for(TransactionKind::Expense).len(),
+            default_widths(TransactionKind::Expense).len()
+        );
+    }
+
+    #[test]
+    fn detailed_analysis_headers_follow_requested_column_order() {
+        assert_eq!(
+            headers_for(TransactionKind::Income),
+            &["Категория", "Операций", "Сумма", "Валюта", "Доля", "График",]
+        );
+        assert_eq!(
+            headers_for(TransactionKind::Expense),
+            &[
+                "Категория",
+                "Операций",
+                "Сумма",
+                "Валюта",
+                "Доля",
+                "Регулярные",
+                "График",
+            ]
+        );
+        assert_eq!(
+            headers_for(TransactionKind::Income).len(),
+            INCOME_DEFAULT_WIDTHS.len()
+        );
+        assert_eq!(
+            headers_for(TransactionKind::Expense).len(),
+            EXPENSE_DEFAULT_WIDTHS.len()
+        );
+        assert_eq!(chart_column(TransactionKind::Income), 5);
+        assert_eq!(chart_column(TransactionKind::Expense), 6);
+    }
+
+    #[test]
+    fn legacy_column_widths_are_remapped_to_each_table_order() {
+        let legacy = [230.0, 80.0, 100.0, 140.0, 80.0, 250.0];
+
+        assert_eq!(
+            migrate_legacy_widths(&legacy, TransactionKind::Income),
+            Some(vec![230.0, 100.0, 140.0, 80.0, 80.0, 250.0])
+        );
+        assert_eq!(
+            migrate_legacy_widths(&legacy, TransactionKind::Expense),
+            Some(vec![230.0, 100.0, 140.0, 80.0, 80.0, 110.0, 250.0])
+        );
+    }
+
+    #[test]
+    fn regularity_is_shown_only_for_expense_category_rows() {
+        let regular_categories = HashMap::from([(1, true), (2, false)]);
+
+        assert_eq!(
+            regular_label(
+                TransactionKind::Expense,
+                AnalysisSlice::Overall,
+                &regular_categories,
+                1,
+            ),
+            "Да"
+        );
+        assert_eq!(
+            regular_label(
+                TransactionKind::Expense,
+                AnalysisSlice::Overall,
+                &regular_categories,
+                2,
+            ),
+            "Нет"
+        );
+        assert_eq!(
+            regular_label(
+                TransactionKind::Expense,
+                AnalysisSlice::Cards,
+                &regular_categories,
+                1,
+            ),
+            "—"
+        );
+        assert_eq!(
+            regular_label(
+                TransactionKind::Income,
+                AnalysisSlice::Overall,
+                &regular_categories,
+                1,
+            ),
+            "—"
+        );
     }
 
     #[test]
@@ -1756,7 +2038,8 @@ mod tests {
 
     #[test]
     fn table_sort_uses_exact_amounts_and_keeps_bars_aligned_with_rows() {
-        let mut table = AnalysisSliceTable::new(DEFAULT_WIDTHS.to_vec());
+        let mut table =
+            AnalysisSliceTable::new(TransactionKind::Income, INCOME_DEFAULT_WIDTHS.to_vec());
         let rows = vec![
             AnalysisSliceRow {
                 group_id: 1,
@@ -1785,9 +2068,20 @@ mod tests {
             regular_totals: Vec::new(),
         };
         let mut sorted = report.rows.clone();
-        super::sort_analysis_slice_rows(&mut sorted, Some((COL_AMOUNT, ColumnSort::Descending)));
+        let regular_categories = HashMap::new();
+        super::sort_analysis_slice_rows(
+            &mut sorted,
+            Some((COL_AMOUNT, ColumnSort::Descending)),
+            &regular_categories,
+            false,
+        );
         assert_eq!(sorted[0].group_name, "Больше");
-        super::sort_analysis_slice_rows(&mut sorted, Some((COL_GROUP, ColumnSort::Ascending)));
+        super::sort_analysis_slice_rows(
+            &mut sorted,
+            Some((COL_GROUP, ColumnSort::Ascending)),
+            &regular_categories,
+            false,
+        );
         assert_eq!(sorted[0].group_name, "Больше");
         table.set_report(&report);
         assert_eq!(table.rows.len(), 2);
