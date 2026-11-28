@@ -6,12 +6,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{NaiveDate, Utc};
 use finance_core::{
-    canonical_amount, rebase_exchange_rate, validate_currency_code, validate_exchange_rate,
-    AnalysisTransaction, Bank, Category, Currency, CurrencyDefinition, ExpensePlace,
-    FinancialTransaction, InterestDestination, LinkedSavingsAccount, PaymentCardType,
+    canonical_amount, rebase_exchange_rate, summarize_analysis_slice, validate_currency_code,
+    validate_exchange_rate, AnalysisSlice, AnalysisSliceItem, AnalysisSliceQuery,
+    AnalysisSliceReport, AnalysisTransaction, Bank, Category, Currency, CurrencyDefinition,
+    ExpensePlace, FinancialTransaction, InterestDestination, LinkedSavingsAccount, PaymentCardType,
     PaymentDocument, PaymentDocumentDetails, PaymentDocumentFilter, PaymentSystem,
     RegularExpenseFilter, SavingsAccount, SavingsDetails, SavingsTerm, TransactionAmount,
     TransactionKind, TransferDetails, TransferEndpoint, TransferOperationType, TransferRecord,
+    ANALYSIS_UNSPECIFIED_GROUP_ID,
 };
 use rusqlite::backup::Backup;
 use rusqlite::{
@@ -499,6 +501,8 @@ pub enum DbError {
     TransferAccountInUse,
     #[error("Неактивное накопление нельзя выбрать для перевода")]
     TransferSavingsInactive,
+    #[error("Ошибка расчёта отчёта: {0}")]
+    Analysis(#[from] finance_core::AnalysisError),
     #[error(transparent)]
     Domain(#[from] finance_core::DomainError),
 }
@@ -1512,7 +1516,160 @@ fn load_analysis_transactions_with_filters(
     Ok(entries)
 }
 
-/// Creates or updates an income or expense, retaining the decimal as canonical text.
+/// Reads one detailed analytics slice from a single read-only SQLite snapshot.
+///
+/// Transaction slices reuse the same filters as the income/expense pages. The
+/// deposit slice reads only the transfer journal: incoming transfers to a
+/// savings account for income and outgoing transfers from it for expenses.
+/// It does not read interest payouts, card-link settings, or account balances.
+pub fn load_analysis_slice_report(
+    database_path: &Path,
+    query: &AnalysisSliceQuery,
+) -> Result<AnalysisSliceReport, DbError> {
+    if matches!((query.from, query.to), (Some(from), Some(to)) if from > to) {
+        return Err(DbError::InvalidAnalysisDateRange);
+    }
+
+    let mut connection =
+        Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+    let items = if query.slice == AnalysisSlice::Deposits {
+        load_deposit_analysis_items(&transaction, query)?
+    } else {
+        load_transaction_analysis_items(&transaction, query)?
+    };
+    transaction.commit()?;
+    Ok(summarize_analysis_slice(&items)?)
+}
+
+fn load_transaction_analysis_items(
+    connection: &Connection,
+    query: &AnalysisSliceQuery,
+) -> Result<Vec<AnalysisSliceItem>, DbError> {
+    let transactions = list_transactions_filtered_by_regular(
+        connection,
+        query.kind,
+        query.from,
+        query.to,
+        query.category_ids.clone(),
+        query.currency,
+        &query.search,
+        query.bank_id,
+        query.payment_document_filter,
+        query.expense_place_id,
+        query.regular_filter,
+    )?;
+    let cards = list_payment_documents(connection, None, None, None)?;
+
+    Ok(transactions
+        .into_iter()
+        .map(|transaction| {
+            let (group_id, group_name) = match query.slice {
+                AnalysisSlice::Overall => {
+                    (transaction.category_id, transaction.category_name.clone())
+                }
+                AnalysisSlice::Cards => match transaction.payment_document_id {
+                    None => (ANALYSIS_UNSPECIFIED_GROUP_ID, "Не указано".to_owned()),
+                    Some(card_id) => (
+                        card_id,
+                        cards
+                            .iter()
+                            .find(|card| card.id == card_id)
+                            .and_then(|card| {
+                                card.name
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|name| !name.is_empty())
+                                    .map(str::to_owned)
+                            })
+                            .unwrap_or_else(|| format!("Карта №{card_id}")),
+                    ),
+                },
+                AnalysisSlice::Banks => match transaction.payment_document_id {
+                    None => (ANALYSIS_UNSPECIFIED_GROUP_ID, "Не указано".to_owned()),
+                    Some(card_id) => cards.iter().find(|card| card.id == card_id).map_or(
+                        (ANALYSIS_UNSPECIFIED_GROUP_ID, "Не указано".to_owned()),
+                        |card| (card.bank_id, card.bank_name.clone()),
+                    ),
+                },
+                AnalysisSlice::Places => transaction.expense_place_id.map_or(
+                    (ANALYSIS_UNSPECIFIED_GROUP_ID, "Не указано".to_owned()),
+                    |place_id| {
+                        (
+                            place_id,
+                            transaction.expense_place_name.clone().unwrap_or_default(),
+                        )
+                    },
+                ),
+                AnalysisSlice::Currency => (
+                    match transaction.currency {
+                        Currency::Rub => 1,
+                        Currency::Usd => 2,
+                    },
+                    transaction.currency.code().to_owned(),
+                ),
+                AnalysisSlice::Deposits => unreachable!("deposit slice is read from transfers"),
+            };
+            AnalysisSliceItem {
+                group_id,
+                group_name,
+                currency: transaction.currency,
+                amount: transaction.amount,
+            }
+        })
+        .collect())
+}
+
+fn load_deposit_analysis_items(
+    connection: &Connection,
+    query: &AnalysisSliceQuery,
+) -> Result<Vec<AnalysisSliceItem>, DbError> {
+    let transfers = list_transfers_filtered(
+        connection,
+        query.from,
+        query.to,
+        None,
+        None,
+        None,
+        query.currency,
+        &query.search,
+    )?;
+    let savings = list_savings(connection, None, None, "")?;
+
+    Ok(transfers
+        .into_iter()
+        .filter_map(|transfer| {
+            let (deposit, opposite) = match query.kind {
+                TransactionKind::Income => (transfer.destination, transfer.source),
+                TransactionKind::Expense => (transfer.source, transfer.destination),
+            };
+            let savings_id = deposit.savings_id()?;
+            let account = savings.iter().find(|account| account.id == savings_id)?;
+            if query
+                .bank_id
+                .is_some_and(|bank_id| bank_id != account.bank_id)
+            {
+                return None;
+            }
+            let card_matches = match query.payment_document_filter {
+                PaymentDocumentFilter::All => true,
+                PaymentDocumentFilter::WithoutCard => {
+                    !matches!(opposite, TransferEndpoint::Card(_))
+                }
+                PaymentDocumentFilter::Card(card_id) => opposite == TransferEndpoint::Card(card_id),
+            };
+            card_matches.then(|| AnalysisSliceItem {
+                group_id: account.id,
+                group_name: account.title.clone(),
+                currency: transfer.currency,
+                amount: transfer.amount,
+            })
+        })
+        .collect())
+}
+
 // The existing UI and repository callers pass these fields independently.
 #[expect(
     clippy::too_many_arguments,
@@ -3693,15 +3850,17 @@ pub fn list_transfers_filtered(
 mod tests {
     use chrono::NaiveDate;
     use finance_core::{
-        summarize_analysis, Category, Currency, CurrencyDefinition, DomainError, ExpensePlace,
-        InterestDestination, PaymentCardType, PaymentDocumentDetails, PaymentDocumentFilter,
-        PaymentSystem, PriceFilter, RegularExpenseFilter, SavingsDetails, SavingsTerm,
-        TransactionKind, TransferDetails, TransferEndpoint, TransferOperationType,
+        summarize_analysis, AnalysisSlice, AnalysisSliceQuery, Category, Currency,
+        CurrencyDefinition, DomainError, ExpensePlace, InterestDestination, PaymentCardType,
+        PaymentDocumentDetails, PaymentDocumentFilter, PaymentSystem, PriceFilter,
+        RegularExpenseFilter, SavingsDetails, SavingsTerm, TransactionKind, TransferDetails,
+        TransferEndpoint, TransferOperationType,
     };
     use rusqlite::{params, Connection, OpenFlags};
     use rust_decimal::Decimal;
     use std::collections::{BTreeSet, HashMap};
     use std::str::FromStr;
+    use std::time::Instant;
 
     use super::{
         add_currency, delete_bank, delete_category, delete_currency, delete_expense_place,
@@ -3711,10 +3870,11 @@ mod tests {
         list_payment_documents_filtered, list_price_names, list_prices, list_savings,
         list_savings_filtered, list_transaction_amounts, list_transaction_comments,
         list_transactions, list_transactions_filtered, list_transactions_filtered_by_place,
-        list_transactions_filtered_by_regular, list_transfers_filtered, load_analysis_transactions,
-        load_analysis_transactions_by_category, restore_pending_database_import, save_bank,
-        save_category, save_expense_place, save_next_payment, save_payment_document, save_price,
-        save_savings, save_savings_interest_accrual, save_transaction, save_transaction_with_card,
+        list_transactions_filtered_by_regular, list_transfers_filtered, load_analysis_slice_report,
+        load_analysis_transactions, load_analysis_transactions_by_category,
+        restore_pending_database_import, save_bank, save_category, save_expense_place,
+        save_next_payment, save_payment_document, save_price, save_savings,
+        save_savings_interest_accrual, save_transaction, save_transaction_with_card,
         save_transaction_with_card_and_rate_effect_and_place, save_transfer, set_app_setting,
         set_currency_exchange_rate, set_primary_currency, stage_database_import, CategorySeed,
         DbError, NextPaymentExpense, SavingsInterestIncome, SavingsInterestIncomeRecipient,
@@ -9982,5 +10142,250 @@ mod tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].category_id, regular_category);
         assert!(filtered[0].is_regular);
+    }
+
+    fn slice_query(kind: TransactionKind, slice: AnalysisSlice) -> AnalysisSliceQuery {
+        AnalysisSliceQuery {
+            kind,
+            slice,
+            from: None,
+            to: None,
+            category_ids: None,
+            currency: None,
+            search: String::new(),
+            bank_id: None,
+            payment_document_filter: PaymentDocumentFilter::All,
+            expense_place_id: None,
+            regular_filter: RegularExpenseFilter::All,
+        }
+    }
+
+    #[test]
+    fn analysis_slice_report_groups_by_stable_ids_and_keeps_currencies_separate() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let connection = initialize(&database_path).unwrap();
+        let bank_id = save_bank(&connection, None, "Банк", "").unwrap();
+        let first_category = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Одинаково",
+            None,
+            true,
+            Some(false),
+        )
+        .unwrap();
+        let second_category = save_category(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            "Одинаково",
+            None,
+            true,
+            Some(false),
+        )
+        .unwrap();
+        let mut card = payment_document_details(bank_id);
+        card.name = Some("Карта".to_owned());
+        card.amount = Decimal::from(1000);
+        card.currency = Some(Currency::Rub);
+        let card_id = save_payment_document(&connection, None, &card).unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        save_transaction_with_card(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            date,
+            first_category,
+            Decimal::from_str("10.25").unwrap(),
+            Currency::Rub,
+            "",
+            Some(card_id),
+        )
+        .unwrap();
+        save_transaction(
+            &connection,
+            TransactionKind::Expense,
+            None,
+            date,
+            second_category,
+            Decimal::from_str("5.75").unwrap(),
+            Currency::Rub,
+            "",
+        )
+        .unwrap();
+
+        let overall = load_analysis_slice_report(
+            &database_path,
+            &slice_query(TransactionKind::Expense, AnalysisSlice::Overall),
+        )
+        .unwrap();
+        assert_eq!(overall.totals[0].amount, Decimal::from(16));
+        assert_eq!(overall.totals[0].transaction_count, 2);
+        assert_eq!(overall.rows.len(), 2);
+
+        let cards = load_analysis_slice_report(
+            &database_path,
+            &slice_query(TransactionKind::Expense, AnalysisSlice::Cards),
+        )
+        .unwrap();
+        assert_eq!(cards.rows.len(), 2);
+        assert!(cards.rows.iter().any(
+            |row| row.group_id == card_id && row.amount == Decimal::from_str("10.25").unwrap()
+        ));
+        assert!(cards
+            .rows
+            .iter()
+            .any(|row| row.group_id == 0 && row.amount == Decimal::from_str("5.75").unwrap()));
+
+        let currency = load_analysis_slice_report(
+            &database_path,
+            &slice_query(TransactionKind::Expense, AnalysisSlice::Currency),
+        )
+        .unwrap();
+        assert_eq!(currency.rows.len(), 1);
+        assert_eq!(currency.rows[0].amount, Decimal::from(16));
+        assert_eq!(currency.rows[0].share_percent, Decimal::from(100));
+    }
+
+    #[test]
+    fn deposit_analysis_slice_uses_only_journal_sides_and_respects_filters() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let connection = initialize(&database_path).unwrap();
+        let bank_id = save_bank(&connection, None, "Банк вклада", "").unwrap();
+        let other_bank = save_bank(&connection, None, "Другой банк", "").unwrap();
+        let mut card = payment_document_details(bank_id);
+        card.name = Some("Карта".to_owned());
+        card.amount = Decimal::from(1000);
+        card.currency = Some(Currency::Rub);
+        let card_id = save_payment_document(&connection, None, &card).unwrap();
+        let mut savings = savings_details(bank_id);
+        savings.title = "Резерв".to_owned();
+        savings.amount = Decimal::from(1000);
+        savings.currency = Some(Currency::Rub);
+        let savings_id = save_savings(&connection, None, &savings).unwrap();
+
+        let mut external_top_up = transfer_details(
+            TransferOperationType::TopUp,
+            TransferEndpoint::External,
+            TransferEndpoint::Savings(savings_id),
+            "5",
+        );
+        external_top_up.comment = None;
+        save_transfer(&connection, None, &external_top_up).unwrap();
+        let mut card_top_up = transfer_details(
+            TransferOperationType::Transfer,
+            TransferEndpoint::Card(card_id),
+            TransferEndpoint::Savings(savings_id),
+            "10",
+        );
+        card_top_up.comment = None;
+        save_transfer(&connection, None, &card_top_up).unwrap();
+        let mut withdrawal = transfer_details(
+            TransferOperationType::Withdrawal,
+            TransferEndpoint::Savings(savings_id),
+            TransferEndpoint::Cash,
+            "3",
+        );
+        withdrawal.comment = None;
+        save_transfer(&connection, None, &withdrawal).unwrap();
+
+        let incoming = load_analysis_slice_report(
+            &database_path,
+            &slice_query(TransactionKind::Income, AnalysisSlice::Deposits),
+        )
+        .unwrap();
+        assert_eq!(incoming.totals[0].amount, Decimal::from(15));
+        assert_eq!(incoming.totals[0].transaction_count, 2);
+        assert_eq!(incoming.rows.len(), 1);
+        assert_eq!(incoming.rows[0].group_id, savings_id);
+        assert_eq!(incoming.rows[0].group_name, "Резерв");
+
+        let outgoing = load_analysis_slice_report(
+            &database_path,
+            &slice_query(TransactionKind::Expense, AnalysisSlice::Deposits),
+        )
+        .unwrap();
+        assert_eq!(outgoing.totals[0].amount, Decimal::from(3));
+        assert_eq!(outgoing.totals[0].transaction_count, 1);
+
+        let mut by_card = slice_query(TransactionKind::Income, AnalysisSlice::Deposits);
+        by_card.payment_document_filter = PaymentDocumentFilter::Card(card_id);
+        assert_eq!(
+            load_analysis_slice_report(&database_path, &by_card)
+                .unwrap()
+                .totals[0]
+                .amount,
+            Decimal::from(10)
+        );
+        let mut without_card = slice_query(TransactionKind::Income, AnalysisSlice::Deposits);
+        without_card.payment_document_filter = PaymentDocumentFilter::WithoutCard;
+        assert_eq!(
+            load_analysis_slice_report(&database_path, &without_card)
+                .unwrap()
+                .totals[0]
+                .amount,
+            Decimal::from(5)
+        );
+        let mut other_bank_query = slice_query(TransactionKind::Income, AnalysisSlice::Deposits);
+        other_bank_query.bank_id = Some(other_bank);
+        assert!(
+            load_analysis_slice_report(&database_path, &other_bank_query)
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+
+        let ordinary_income = load_analysis_slice_report(
+            &database_path,
+            &slice_query(TransactionKind::Income, AnalysisSlice::Overall),
+        )
+        .unwrap();
+        assert!(ordinary_income.rows.is_empty());
+    }
+    #[test]
+    #[ignore = "synthetic 100k-row performance check; run explicitly in release mode"]
+    fn analysis_slice_report_filters_100k_rows_within_one_second() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("data.db");
+        let connection = initialize(&database_path).unwrap();
+        let category_id = save_category(
+            &connection,
+            TransactionKind::Income,
+            None,
+            "Зарплата",
+            None,
+            true,
+            None,
+        )
+        .unwrap();
+        let transaction = connection.unchecked_transaction().unwrap();
+        {
+            let mut statement = transaction
+                .prepare(
+                    "INSERT INTO incomes (date, category_id, amount, currency, comment)
+                     VALUES (?1, ?2, '1.01', 'RUB', '')",
+                )
+                .unwrap();
+            for day in 1..=28 {
+                let date = format!("2026-11-{day:02}");
+                for _ in 0..3572 {
+                    statement.execute(params![date, category_id]).unwrap();
+                }
+            }
+        }
+        transaction.commit().unwrap();
+
+        let mut query = slice_query(TransactionKind::Income, AnalysisSlice::Overall);
+        query.from = Some(NaiveDate::from_ymd_opt(2026, 11, 1).unwrap());
+        query.to = Some(NaiveDate::from_ymd_opt(2026, 11, 30).unwrap());
+        let started = Instant::now();
+        let report = load_analysis_slice_report(&database_path, &query).unwrap();
+        let elapsed = started.elapsed();
+        eprintln!("100000 rows: {elapsed:?}");
+        assert_eq!(report.totals[0].transaction_count, 100_016);
+        assert!(elapsed.as_secs_f64() < 1.0, "report took {elapsed:?}");
     }
 }

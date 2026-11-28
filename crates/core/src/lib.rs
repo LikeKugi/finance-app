@@ -370,6 +370,169 @@ pub struct AnalysisSummary {
     pub totals: Vec<AnalysisTotal>,
 }
 
+/// Разрезы detailed-аналитики. Общая аналитика по категориям остаётся в
+/// [`summarize_analysis`] и не заменяется этими отчётами.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalysisSlice {
+    Overall,
+    Cards,
+    Banks,
+    Deposits,
+    Places,
+    Currency,
+}
+
+impl AnalysisSlice {
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Overall => "Общая аналитика",
+            Self::Cards => "По карточкам",
+            Self::Banks => "По банкам",
+            Self::Deposits => "По вкладам",
+            Self::Places => "По местам трат",
+            Self::Currency => "По валюте",
+        }
+    }
+}
+
+/// Стабильный идентификатор группы для операций без связанной записи.
+pub const ANALYSIS_UNSPECIFIED_GROUP_ID: i64 = 0;
+
+/// Одна строка исходных данных detailed-аналитики.
+///
+/// `group_id` — устойчивый идентификатор группы, а не её название: разные
+/// записи с одинаковыми названиями не объединяются.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisSliceItem {
+    pub group_id: i64,
+    pub group_name: String,
+    pub currency: Currency,
+    pub amount: Decimal,
+}
+
+impl AnalysisSliceItem {
+    /// Группа валюты: каждая валюта образует отдельную группу со своей шкалой.
+    pub fn currency_group(currency: Currency, amount: Decimal) -> Self {
+        Self {
+            group_id: match currency {
+                Currency::Rub => 1,
+                Currency::Usd => 2,
+            },
+            group_name: currency.code().to_owned(),
+            currency,
+            amount,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisSliceRow {
+    pub group_id: i64,
+    pub group_name: String,
+    pub currency: Currency,
+    pub amount: Decimal,
+    pub transaction_count: usize,
+    /// Доля от итога той же валюты в этом отчёте.
+    pub share_percent: Decimal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisSliceTotal {
+    pub currency: Currency,
+    pub amount: Decimal,
+    pub transaction_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisSliceReport {
+    pub rows: Vec<AnalysisSliceRow>,
+    pub totals: Vec<AnalysisSliceTotal>,
+}
+
+/// Typed query shared by the analysis screen and the read-only database API.
+#[derive(Debug, Clone)]
+pub struct AnalysisSliceQuery {
+    pub kind: TransactionKind,
+    pub slice: AnalysisSlice,
+    pub from: Option<NaiveDate>,
+    pub to: Option<NaiveDate>,
+    pub category_ids: Option<Vec<i64>>,
+    pub currency: Option<Currency>,
+    pub search: String,
+    pub bank_id: Option<i64>,
+    pub payment_document_filter: PaymentDocumentFilter,
+    pub expense_place_id: Option<i64>,
+    pub regular_filter: RegularExpenseFilter,
+}
+
+/// Aggregates already filtered report items by stable group and currency.
+///
+/// Sums and shares are exact `Decimal` values. Shares are computed only inside
+/// one currency; RUB and USD are never added together.
+pub fn summarize_analysis_slice(
+    items: &[AnalysisSliceItem],
+) -> Result<AnalysisSliceReport, AnalysisError> {
+    use std::collections::BTreeMap;
+
+    let mut groups = BTreeMap::<(Currency, i64), AnalysisSliceRow>::new();
+    let mut totals = BTreeMap::<Currency, AnalysisSliceTotal>::new();
+
+    for item in items {
+        if item.amount <= Decimal::ZERO {
+            return Err(AnalysisError::InvalidAmount);
+        }
+        let key = (item.currency, item.group_id);
+        let group = groups.entry(key).or_insert_with(|| AnalysisSliceRow {
+            group_id: item.group_id,
+            group_name: item.group_name.clone(),
+            currency: item.currency,
+            amount: Decimal::ZERO,
+            transaction_count: 0,
+            share_percent: Decimal::ZERO,
+        });
+        group.amount = group
+            .amount
+            .checked_add(item.amount)
+            .ok_or(AnalysisError::Overflow)?;
+        group.transaction_count = group
+            .transaction_count
+            .checked_add(1)
+            .ok_or(AnalysisError::Overflow)?;
+
+        let total = totals
+            .entry(item.currency)
+            .or_insert_with(|| AnalysisSliceTotal {
+                currency: item.currency,
+                amount: Decimal::ZERO,
+                transaction_count: 0,
+            });
+        total.amount = total
+            .amount
+            .checked_add(item.amount)
+            .ok_or(AnalysisError::Overflow)?;
+        total.transaction_count = total
+            .transaction_count
+            .checked_add(1)
+            .ok_or(AnalysisError::Overflow)?;
+    }
+
+    for row in groups.values_mut() {
+        let total = totals
+            .get(&row.currency)
+            .ok_or(AnalysisError::MissingTotal)?;
+        row.share_percent = row
+            .amount
+            .checked_div(total.amount)
+            .and_then(|share| share.checked_mul(Decimal::ONE_HUNDRED))
+            .ok_or(AnalysisError::Overflow)?;
+    }
+
+    Ok(AnalysisSliceReport {
+        rows: groups.into_values().collect(),
+        totals: totals.into_values().collect(),
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransactionAmount {
     pub kind: TransactionKind,
@@ -876,6 +1039,128 @@ mod analysis_tests {
 
         assert_eq!(
             summarize_analysis(&transactions),
+            Err(AnalysisError::Overflow)
+        );
+    }
+}
+
+#[cfg(test)]
+mod analysis_slice_tests {
+    use std::str::FromStr;
+
+    use super::{
+        summarize_analysis_slice, AnalysisError, AnalysisSliceItem, Currency,
+        ANALYSIS_UNSPECIFIED_GROUP_ID,
+    };
+    use rust_decimal::Decimal;
+
+    fn item(id: i64, name: &str, currency: Currency, amount: &str) -> AnalysisSliceItem {
+        AnalysisSliceItem {
+            group_id: id,
+            group_name: name.to_owned(),
+            currency,
+            amount: amount.parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn summarize_analysis_slice_keeps_identical_names_with_different_ids_separate() {
+        let report = summarize_analysis_slice(&[
+            item(1, "Одинаково", Currency::Rub, "10.25"),
+            item(2, "Одинаково", Currency::Rub, "5.75"),
+            item(
+                ANALYSIS_UNSPECIFIED_GROUP_ID,
+                "Не указано",
+                Currency::Rub,
+                "4",
+            ),
+        ])
+        .unwrap();
+
+        assert_eq!(report.rows.len(), 3);
+        let total = &report.totals[0];
+        assert_eq!(total.amount, Decimal::from(20));
+        assert_eq!(total.transaction_count, 3);
+        let rub_rows: Vec<_> = report
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.group_id,
+                    row.amount,
+                    row.transaction_count,
+                    row.share_percent,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rub_rows,
+            vec![
+                (0, Decimal::from(4), 1, Decimal::from(20)),
+                (
+                    1,
+                    Decimal::from_str("10.25").unwrap(),
+                    1,
+                    Decimal::from_str("51.25").unwrap()
+                ),
+                (
+                    2,
+                    Decimal::from_str("5.75").unwrap(),
+                    1,
+                    Decimal::from_str("28.75").unwrap()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn summarize_analysis_slice_computes_shares_inside_each_currency_only() {
+        let report = summarize_analysis_slice(&[
+            AnalysisSliceItem::currency_group(Currency::Rub, Decimal::from(3)),
+            AnalysisSliceItem::currency_group(Currency::Rub, Decimal::from(1)),
+            AnalysisSliceItem::currency_group(Currency::Usd, Decimal::from(7)),
+        ])
+        .unwrap();
+
+        assert_eq!(report.totals.len(), 2);
+        let rub = report
+            .rows
+            .iter()
+            .find(|row| row.currency == Currency::Rub)
+            .unwrap();
+        let usd = report
+            .rows
+            .iter()
+            .find(|row| row.currency == Currency::Usd)
+            .unwrap();
+        assert_eq!(rub.share_percent, Decimal::ONE_HUNDRED);
+        assert_eq!(usd.share_percent, Decimal::ONE_HUNDRED);
+        assert_eq!(rub.amount, Decimal::from(4));
+        assert_eq!(usd.amount, Decimal::from(7));
+    }
+
+    #[test]
+    fn summarize_analysis_slice_returns_empty_report_for_empty_items() {
+        assert_eq!(
+            summarize_analysis_slice(&[]),
+            Ok(super::AnalysisSliceReport {
+                rows: Vec::new(),
+                totals: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn summarize_analysis_slice_rejects_invalid_and_overflowing_amounts() {
+        assert_eq!(
+            summarize_analysis_slice(&[item(1, "Отрицательная", Currency::Rub, "-1")]),
+            Err(AnalysisError::InvalidAmount)
+        );
+        assert_eq!(
+            summarize_analysis_slice(&[
+                item(1, "Максимум", Currency::Rub, &Decimal::MAX.to_string()),
+                item(2, "Ещё", Currency::Rub, "1"),
+            ]),
             Err(AnalysisError::Overflow)
         );
     }

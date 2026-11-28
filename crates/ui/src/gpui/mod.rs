@@ -1,6 +1,7 @@
 //! Интерфейс на `gpui-kit`: оболочка с вкладками и страницы.
 
 mod analysis;
+mod analysis_details;
 mod directories;
 mod helpers;
 mod home;

@@ -1,6 +1,6 @@
 # План изменения страницы «Анализ»
 
-Статус: план; реализация изменений не начата. План основан на текущих `../../crates/ui/src/gpui/analysis.rs`, `transactions.rs`, `transfers.rs`, `crates/core/src/lib.rs`, `crates/db/src/lib.rs`, миграции V12 и документах `architecture.md` и `decisions.md`.
+Статус: реализовано; отдельные решения и отклонения от формулировок плана зафиксированы в `../../docs/decisions.md` и `../../docs/architecture.md`. План основан на текущих `../../crates/ui/src/gpui/analysis.rs`, `transactions.rs`, `transfers.rs`, `crates/core/src/lib.rs`, `crates/db/src/lib.rs`, миграции V12 и документах `architecture.md` и `decisions.md`.
 
 ## 1. Вкладки
 

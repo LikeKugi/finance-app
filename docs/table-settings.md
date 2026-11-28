@@ -49,3 +49,9 @@
 - The `Банки`, `Валюты` and `Места покупок` tables share the same full-width slot in the right half of the page. The preferred `Валюты` column widths are `Валюта` (80 px), `Курс` (160 px), `Основная` (240 px) and `Действия` (160 px). Together, `Валюта`, `Курс` and `Основная` take 480 px — exactly the width of the `Название` column in the `Банки` table — so both tables have the same total width of 640 px. The `Основная` column still fits the full `Назначить основной` label without truncating it.
 - The `Валюта` cell shows only the code for `RUB` and `USD`; full names are omitted to keep the narrow column readable. Other currencies keep the `код название` format.
 - The primary-currency button is labelled `Назначить основной`; the exchange-rate button is labelled `Изменить`. Their tooltips explain the action or why it is unavailable.
+
+## Detailed analytics
+
+- The income and expense analysis sections use one `DataTable` with `Группа`, `Валюта`, `Операций`, `Сумма`, `Доля`, and `График` columns. Only the first five carry selectable text; the bar column is geometric and scales rows independently inside each currency.
+- Saved widths use `table_columns.analytics_details.v1`. Invalid or missing values fall back to defaults; the bar column is not resizable, but its width is validated together with the other persisted columns because it shares the same horizontal scroll area.
+

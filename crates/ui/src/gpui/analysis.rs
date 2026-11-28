@@ -20,6 +20,7 @@ use gpui_kit::component::date_picker::{DatePicker, DatePickerEvent, DatePickerSt
 use gpui_kit::component::dialog::Dialog;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
+use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::table::{Column, ColumnSort, DataTable, TableDelegate, TableState};
 use gpui_kit::component::tooltip::Tooltip as ComponentTooltip;
 use gpui_kit::component::{
@@ -30,6 +31,7 @@ use gpui_kit::prelude::StatefulInteractiveElement;
 use gpui_kit::*;
 use rust_decimal::prelude::ToPrimitive;
 
+use super::analysis_details::DetailedAnalysisPage;
 use super::helpers::{format_currency, DATE_FORMAT};
 use super::selectable::{
     selectable_message, selectable_right_aligned_table_cell, selectable_table_cell, selectable_text,
@@ -86,6 +88,25 @@ impl SelectItem for CategoryFilterItem {
             .w_full()
             .tooltip(move |window, cx| ComponentTooltip::new(tooltip.clone()).build(window, cx))
             .child(self.label.clone())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AnalysisSection {
+    General,
+    Income,
+    Expense,
+}
+
+impl AnalysisSection {
+    const ALL: [Self; 3] = [Self::General, Self::Income, Self::Expense];
+
+    const fn title(self) -> &'static str {
+        match self {
+            Self::General => "Общая аналитика",
+            Self::Income => "Аналитика доходов",
+            Self::Expense => "Аналитика расходов",
+        }
     }
 }
 
@@ -528,6 +549,9 @@ impl CategoryPicker {
 pub(crate) struct AnalysisPage {
     database: Rc<Database>,
     database_path: Result<PathBuf, String>,
+    section: AnalysisSection,
+    income_details: Entity<DetailedAnalysisPage>,
+    expense_details: Entity<DetailedAnalysisPage>,
     from: Entity<DatePickerState>,
     to: Entity<DatePickerState>,
     period_select: Choice,
@@ -644,9 +668,18 @@ impl AnalysisPage {
                 TableState::new(AnalysisTable::new(kind, currency), window, cx).col_movable(false)
             })
         });
+        let income_details = cx.new(|cx| {
+            DetailedAnalysisPage::new(TransactionKind::Income, database.clone(), window, cx)
+        });
+        let expense_details = cx.new(|cx| {
+            DetailedAnalysisPage::new(TransactionKind::Expense, database.clone(), window, cx)
+        });
         let mut page = Self {
             database,
             database_path,
+            section: AnalysisSection::General,
+            income_details,
+            expense_details,
             from,
             to,
             period_select,
@@ -702,6 +735,10 @@ impl AnalysisPage {
                 }
             }
         }
+        self.income_details
+            .update(cx, |page, cx| page.reload(window, cx));
+        self.expense_details
+            .update(cx, |page, cx| page.reload(window, cx));
         self.apply_pending_filters(cx);
     }
 
@@ -1391,37 +1428,62 @@ impl Render for AnalysisPage {
                     .on_click(cx.listener(|page, _, window, cx| page.reload(window, cx))),
             );
         root = root.child(header);
-        root = root.child(self.render_filters(cx));
-        if let Some(message) = &self.message {
-            root = root.child(selectable_message(
-                "analysis-page-error",
-                message.clone(),
-                danger,
-            ));
+        let selected = AnalysisSection::ALL
+            .iter()
+            .position(|section| *section == self.section)
+            .unwrap_or(0);
+        root = root.child(
+            TabBar::new("analysis-sections")
+                .selected_index(selected)
+                .on_click(cx.listener(|page: &mut Self, index: &usize, _, cx| {
+                    if let Some(section) = AnalysisSection::ALL.get(*index) {
+                        page.section = *section;
+                        cx.notify();
+                    }
+                }))
+                .children(
+                    AnalysisSection::ALL
+                        .iter()
+                        .map(|section| Tab::new().label(section.title())),
+                ),
+        );
+        match self.section {
+            AnalysisSection::Income => root.child(self.income_details.clone()),
+            AnalysisSection::Expense => root.child(self.expense_details.clone()),
+            AnalysisSection::General => {
+                root = root.child(self.render_filters(cx));
+                if let Some(message) = &self.message {
+                    root = root.child(selectable_message(
+                        "analysis-page-error",
+                        message.clone(),
+                        danger,
+                    ));
+                }
+                let body = if let Some(error) = self.tracker.current_error() {
+                    div()
+                        .flex_1()
+                        .text_color(danger)
+                        .child(selectable_text("analysis-load-error", error.to_owned()))
+                        .into_any_element()
+                } else if let Some(summary) = self.tracker.current_report() {
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .child(self.render_summary(summary, border, cx))
+                        .into_any_element()
+                } else if self.tracker.loading {
+                    div()
+                        .flex_1()
+                        .child("Загружаем операции…")
+                        .into_any_element()
+                } else {
+                    div().flex_1().into_any_element()
+                };
+                root.child(body).child(self.render_footer(window, cx))
+            }
         }
-        let body = if let Some(error) = self.tracker.current_error() {
-            div()
-                .flex_1()
-                .text_color(danger)
-                .child(selectable_text("analysis-load-error", error.to_owned()))
-                .into_any_element()
-        } else if let Some(summary) = self.tracker.current_report() {
-            div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .child(self.render_summary(summary, border, cx))
-                .into_any_element()
-        } else if self.tracker.loading {
-            div()
-                .flex_1()
-                .child("Загружаем операции…")
-                .into_any_element()
-        } else {
-            div().flex_1().into_any_element()
-        };
-        root.child(body).child(self.render_footer(window, cx))
     }
 }
 
