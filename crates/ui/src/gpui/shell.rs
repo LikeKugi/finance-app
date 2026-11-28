@@ -20,6 +20,7 @@ use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _};
 use gpui_kit::*;
 
 const FULLSCREEN_CONTROLS_ID: &str = "fullscreen-window-controls";
+const FULLSCREEN_CONTROLS_RESERVED_WIDTH: f32 = 120.0;
 const MINIMIZE_TOOLTIP: &str = "Свернуть";
 const EXIT_FULLSCREEN_TOOLTIP: &str = "Выйти из полноэкранного режима";
 const CLOSE_TOOLTIP: &str = "Закрыть";
@@ -287,12 +288,13 @@ impl AppShell {
 
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let fullscreen_controls_visible = cfg!(target_os = "windows") && window.is_fullscreen();
         let active = self.active;
         let selected = PageTab::ALL
             .iter()
             .position(|tab| *tab == active)
             .unwrap_or(0);
-        let tabs = TabBar::new("main-tabs")
+        let mut tabs = TabBar::new("main-tabs")
             .selected_index(selected)
             .menu(true)
             .on_click(cx.listener(|this: &mut Self, index: &usize, window, cx| {
@@ -303,6 +305,9 @@ impl Render for AppShell {
                 }
             }))
             .children(PageTab::ALL.iter().map(|tab| Tab::new().label(tab.title())));
+        if fullscreen_controls_visible {
+            tabs = tabs.mr(px(FULLSCREEN_CONTROLS_RESERVED_WIDTH));
+        }
 
         let mut root = div()
             .size_full()
@@ -322,7 +327,7 @@ impl Render for AppShell {
                 PageTab::Analysis => self.analysis.clone().into_any_element(),
                 PageTab::Settings => self.settings.clone().into_any_element(),
             }));
-        if cfg!(target_os = "windows") && window.is_fullscreen() {
+        if fullscreen_controls_visible {
             root = root.child(self.render_fullscreen_controls(cx));
         }
         root
