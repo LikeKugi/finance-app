@@ -275,7 +275,7 @@ impl AppShell {
             )
             .child(
                 Button::new("fullscreen-close")
-                    .ghost()
+                    .danger()
                     .small()
                     .icon(IconName::WindowClose)
                     .tooltip(CLOSE_TOOLTIP)
