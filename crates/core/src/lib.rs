@@ -447,6 +447,7 @@ pub struct AnalysisSliceTotal {
 pub struct AnalysisSliceReport {
     pub rows: Vec<AnalysisSliceRow>,
     pub totals: Vec<AnalysisSliceTotal>,
+    pub regular_totals: Vec<AnalysisSliceTotal>,
 }
 
 /// Typed query shared by the analysis screen and the read-only database API.
@@ -530,6 +531,7 @@ pub fn summarize_analysis_slice(
     Ok(AnalysisSliceReport {
         rows: groups.into_values().collect(),
         totals: totals.into_values().collect(),
+        regular_totals: Vec::new(),
     })
 }
 
@@ -1146,6 +1148,7 @@ mod analysis_slice_tests {
             Ok(super::AnalysisSliceReport {
                 rows: Vec::new(),
                 totals: Vec::new(),
+                regular_totals: Vec::new(),
             })
         );
     }

@@ -1540,8 +1540,15 @@ pub fn load_analysis_slice_report(
     } else {
         load_transaction_analysis_items(&transaction, query)?
     };
+    let mut report = summarize_analysis_slice(&items)?;
+    if query.kind == TransactionKind::Expense && query.slice != AnalysisSlice::Deposits {
+        let mut regular_query = query.clone();
+        regular_query.regular_filter = finance_core::RegularExpenseFilter::Regular;
+        let regular_items = load_transaction_analysis_items(&transaction, &regular_query)?;
+        report.regular_totals = summarize_analysis_slice(&regular_items)?.totals;
+    }
     transaction.commit()?;
-    Ok(summarize_analysis_slice(&items)?)
+    Ok(report)
 }
 
 fn load_transaction_analysis_items(
@@ -10173,7 +10180,7 @@ mod tests {
             "Одинаково",
             None,
             true,
-            Some(false),
+            Some(true),
         )
         .unwrap();
         let second_category = save_category(
@@ -10223,7 +10230,21 @@ mod tests {
         .unwrap();
         assert_eq!(overall.totals[0].amount, Decimal::from(16));
         assert_eq!(overall.totals[0].transaction_count, 2);
+        assert_eq!(
+            overall.regular_totals[0].amount,
+            Decimal::from_str("10.25").unwrap()
+        );
+        assert_eq!(overall.regular_totals[0].transaction_count, 1);
         assert_eq!(overall.rows.len(), 2);
+
+        let mut non_regular_query = slice_query(TransactionKind::Expense, AnalysisSlice::Overall);
+        non_regular_query.regular_filter = RegularExpenseFilter::NotRegular;
+        let non_regular = load_analysis_slice_report(&database_path, &non_regular_query).unwrap();
+        assert_eq!(
+            non_regular.totals[0].amount,
+            Decimal::from_str("5.75").unwrap()
+        );
+        assert_eq!(non_regular.regular_totals, overall.regular_totals);
 
         let cards = load_analysis_slice_report(
             &database_path,

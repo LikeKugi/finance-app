@@ -199,6 +199,34 @@ fn slices_for(kind: TransactionKind) -> Vec<AnalysisSlice> {
     slices
 }
 
+fn summary_lines(kind: TransactionKind, report: &AnalysisSliceReport) -> Vec<String> {
+    let mut lines = report
+        .totals
+        .iter()
+        .map(|total| {
+            format!(
+                "Итого {}: {} {}; операций: {}",
+                total.currency.code(),
+                format_currency(&total.amount, 2),
+                total.currency.code(),
+                total.transaction_count
+            )
+        })
+        .collect::<Vec<_>>();
+    if kind == TransactionKind::Expense {
+        lines.extend(report.regular_totals.iter().map(|total| {
+            format!(
+                "Итого по регулярным {}: {} {}; операций: {}",
+                total.currency.code(),
+                format_currency(&total.amount, 2),
+                total.currency.code(),
+                total.transaction_count
+            )
+        }));
+    }
+    lines
+}
+
 fn index_for_slice(kind: TransactionKind, slice: AnalysisSlice) -> usize {
     slices_for(kind)
         .iter()
@@ -1497,20 +1525,6 @@ impl Render for DetailedAnalysisPage {
             )
             .child(tabs)
             .child(self.render_filters(cx));
-        if self.slice == AnalysisSlice::Deposits {
-            let meaning = if self.kind == TransactionKind::Income {
-                "Пополнения вкладов по журналу переводов: это не доходы и не проценты."
-            } else {
-                "Снятия со вкладов по журналу переводов: это не расходы и не остаток вклада."
-            };
-            root = root.child(selectable_message(
-                "analysis-deposits-note",
-                format!(
-                    "{meaning} Учитываются только записи журнала, включая переводы между вкладами; начальные остатки и выплаты процентов сюда не входят."
-                ),
-                cx.theme().warning,
-            ));
-        }
         if let Some(message) = &self.message {
             root = root.child(selectable_message(
                 "analysis-details-directory-error",
@@ -1526,31 +1540,17 @@ impl Render for DetailedAnalysisPage {
             ));
         }
         let report = self.tracker.current_report().cloned();
-        let body = if let Some(report) = report {
-            let totals = report
-                .totals
-                .iter()
-                .map(|total| {
-                    format!(
-                        "Итого {}: {} {}; операций: {}",
-                        total.currency.code(),
-                        format_currency(&total.amount, 2),
-                        total.currency.code(),
-                        total.transaction_count
-                    )
-                })
-                .collect::<Vec<_>>();
+        let summaries = report
+            .as_ref()
+            .map(|report| summary_lines(self.kind, report))
+            .unwrap_or_default();
+        let body = if report.is_some() {
             div()
                 .flex_1()
                 .min_h_0()
                 .flex()
                 .flex_col()
                 .gap_2()
-                .child(div().flex().flex_col().gap_1().children(
-                    totals.into_iter().enumerate().map(|(index, line)| {
-                        selectable_text(("analysis-details-total", index), line)
-                    }),
-                ))
                 .child(
                     div()
                         .flex_1()
@@ -1565,10 +1565,32 @@ impl Render for DetailedAnalysisPage {
         } else {
             div().flex_1().into_any_element()
         };
-        root.child(body).child(selectable_text(
-            "analysis-details-share-note",
-            "Доли рассчитываются отдельно внутри каждой валюты. RUB и USD не конвертируются; длина полос показывает только долю внутри своей валюты.",
-        ))
+        let mut footer = div().flex().flex_col().gap_1().children(
+            summaries
+                .into_iter()
+                .enumerate()
+                .map(|(index, line)| selectable_text(("analysis-details-total", index), line)),
+        );
+        if self.slice == AnalysisSlice::Deposits {
+            let meaning = if self.kind == TransactionKind::Income {
+                "Пополнения вкладов по журналу переводов: это не доходы и не проценты."
+            } else {
+                "Снятия со вкладов по журналу переводов: это не расходы и не остаток вклада."
+            };
+            footer = footer.child(selectable_message(
+                "analysis-deposits-note",
+                format!(
+                    "{meaning} Учитываются только записи журнала, включая переводы между вкладами; начальные остатки и выплаты процентов сюда не входят."
+                ),
+                cx.theme().warning,
+            ));
+        }
+        root.child(body)
+            .child(footer)
+            .child(selectable_text(
+                "analysis-details-share-note",
+                "Доли рассчитываются отдельно внутри каждой валюты. RUB и USD не конвертируются; длина полос показывает только долю внутри своей валюты.",
+            ))
     }
 }
 
@@ -1576,12 +1598,12 @@ impl Render for DetailedAnalysisPage {
 mod tests {
     use super::{
         currency_index, index_for_slice, parse_widths, payment_filter_from_index,
-        payment_filter_index, regular_filter_index, slices_for, AnalysisSliceTable, RequestTracker,
-        COL_AMOUNT, COL_GROUP, DEFAULT_WIDTHS, HEADERS,
+        payment_filter_index, regular_filter_index, slices_for, summary_lines, AnalysisSliceTable,
+        RequestTracker, COL_AMOUNT, COL_GROUP, DEFAULT_WIDTHS, HEADERS,
     };
     use finance_core::{
-        AnalysisSlice, AnalysisSliceItem, AnalysisSliceRow, Currency, PaymentDocumentFilter,
-        RegularExpenseFilter, TransactionKind,
+        AnalysisSlice, AnalysisSliceItem, AnalysisSliceReport, AnalysisSliceRow, Currency,
+        PaymentDocumentFilter, RegularExpenseFilter, TransactionKind,
     };
     use gpui_kit::component::table::ColumnSort;
     use rust_decimal::Decimal;
@@ -1654,6 +1676,54 @@ mod tests {
     }
 
     #[test]
+    fn expense_footer_places_regular_totals_after_all_totals() {
+        let report = AnalysisSliceReport {
+            rows: Vec::new(),
+            totals: vec![
+                finance_core::AnalysisSliceTotal {
+                    currency: Currency::Rub,
+                    amount: Decimal::from_str("1234.50").unwrap(),
+                    transaction_count: 2,
+                },
+                finance_core::AnalysisSliceTotal {
+                    currency: Currency::Usd,
+                    amount: Decimal::from(5),
+                    transaction_count: 1,
+                },
+            ],
+            regular_totals: vec![finance_core::AnalysisSliceTotal {
+                currency: Currency::Rub,
+                amount: Decimal::from(99),
+                transaction_count: 1,
+            }],
+        };
+
+        assert_eq!(
+            summary_lines(TransactionKind::Expense, &report),
+            [
+                "Итого RUB: 1 234.50 RUB; операций: 2",
+                "Итого USD: 5.00 USD; операций: 1",
+                "Итого по регулярным RUB: 99.00 RUB; операций: 1",
+            ]
+        );
+    }
+
+    #[test]
+    fn income_footer_does_not_show_regular_totals() {
+        let report = AnalysisSliceReport {
+            rows: Vec::new(),
+            totals: Vec::new(),
+            regular_totals: vec![finance_core::AnalysisSliceTotal {
+                currency: Currency::Rub,
+                amount: Decimal::from(99),
+                transaction_count: 1,
+            }],
+        };
+
+        assert!(summary_lines(TransactionKind::Income, &report).is_empty());
+    }
+
+    #[test]
     fn corrupt_saved_widths_are_rejected() {
         assert_eq!(
             parse_widths(&super::format_widths(&DEFAULT_WIDTHS)),
@@ -1712,6 +1782,7 @@ mod tests {
                 amount: Decimal::from(5),
                 transaction_count: 2,
             }],
+            regular_totals: Vec::new(),
         };
         let mut sorted = report.rows.clone();
         super::sort_analysis_slice_rows(&mut sorted, Some((COL_AMOUNT, ColumnSort::Descending)));
